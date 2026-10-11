@@ -129,23 +129,40 @@ static int   g_layer    = 3;      /* 0 / 1 = only that record run, 3 = both, 2 =
 
 /* ------------------------------------------------------------------ sky */
 
+/* The backdrop is MAPn.BCK in the track's own container: a PCX picture, 512 x
+   256, with a palette of its own at its end.  (Until 2026-10-12 the port read
+   a copy made by a tool, build/sky/MAPn.sky, that nobody but this machine
+   had: no sky anywhere else.) */
 static int sky_load(sky *s, const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    char magic[4];
-    uint16_t w = 0, h = 0;
-    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "SKY1", 4) ||
-        fread(&w, 2, 1, f) != 1 || fread(&h, 2, 1, f) != 1) {
-        fclose(f);
-        return -1;
-    }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = malloc((size_t)(n > 0 ? n : 1));
+    if (n < 128 + 769 || fread(d, 1, (size_t)n, f) != (size_t)n || d[0] != 0x0a) { free(d); fclose(f); return -1; }
+    fclose(f);
+    const int w = (d[8] | d[9] << 8) - (d[4] | d[5] << 8) + 1, h = (d[10] | d[11] << 8) - (d[6] | d[7] << 8) + 1;
+    const int bpl = d[66] | d[67] << 8;
+    if (w < 1 || h < 1 || w > 4096 || h > 4096) { free(d); return -1; }
+    const uint8_t *pal = d + n - 768;
     s->w = w;
     s->h = h;
     s->pix = malloc((size_t)w * h * 3);
-    size_t got = fread(s->pix, 1, (size_t)w * h * 3, f);
-    fclose(f);
-    return got == (size_t)w * h * 3 ? 0 : -1;
+    memset(s->pix, 0, (size_t)w * h * 3);
+    long p = 128;
+    for (int y = 0; y < h; y++) {
+        int x = 0;
+        while (x < bpl && p < n - 769) {
+            int c = d[p++], run = 1;
+            if ((c & 0xc0) == 0xc0) { run = c & 0x3f; c = d[p++]; }
+            for (; run > 0 && x < bpl; run--, x++)
+                if (x < w) memcpy(s->pix + ((size_t)y * w + x) * 3, pal + 3 * c, 3);
+        }
+    }
+    free(d);
+    return 0;
 }
 
 /*
@@ -7064,7 +7081,7 @@ static int session(int argc, char **argv)
     if (path_build(r, path_) != 0) return 1;
 
     sky sk = { 0, 0, NULL };
-    snprintf(path_, sizeof path_, "build/sky/MAP%d.sky", track);
+    snprintf(path_, sizeof path_, "build/dec/MAP%dL/MAP%d.BCK", track, track);
     if (sky_load(&sk, path_) != 0)
         fprintf(stderr, "note: no backdrop at %s\n", path_);
 
