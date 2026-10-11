@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <SDL.h>
 #include <mister_hybrid.h>
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 #include "mister.h"
 
 #define EXIT_TO_MENU  0
@@ -74,7 +77,7 @@ void mister_pad_mapping(void)
     }
 }
 
-static Uint64 g_work_from, g_work_sum, g_mark_at, g_stage[5];
+static Uint64 g_work_from, g_work_sum, g_mark_at, g_stage[6];
 
 /* the time since the last mark belongs to `stage` */
 void mister_mark(int stage)
@@ -101,9 +104,9 @@ void mister_frame_done(void)
                mister_tris / frames, mister_rows / frames, mister_pixels / frames);
         {
             const double f = 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames;
-            printf("       of that: the game %.1f, sky and clearing %.1f, the scene %.1f, the rest of the picture %.1f, to the screen %.1f ms\n",
-                   (double)g_stage[0] * f, (double)g_stage[1] * f, (double)g_stage[2] * f, (double)g_stage[3] * f, (double)g_stage[4] * f);
-            for (int k = 0; k < 5; k++) g_stage[k] = 0;
+            printf("       of that: the game %.1f, sky and clearing %.1f, the scene worked out %.1f and its filling finished %.1f, the rest of the picture %.1f, to the screen %.1f ms\n",
+                   (double)g_stage[0] * f, (double)g_stage[1] * f, (double)g_stage[2] * f, (double)g_stage[5] * f, (double)g_stage[3] * f, (double)g_stage[4] * f);
+            for (int k = 0; k < 6; k++) g_stage[k] = 0;
         }
         mister_tris = mister_rows = mister_pixels = 0;
         fflush(stdout);
@@ -120,7 +123,19 @@ void mister_show(void *window, const void *pixels, int w, int h)
         const uint32_t *src = pixels;
         for (int y = 0; y < h; y++) {
             uint16_t *dst = (uint16_t *)((uint8_t *)s->pixels + y * s->pitch);
-            for (int x = 0; x < w; x++) {
+            int x = 0;
+#ifdef __ARM_NEON
+            /* eight pixels at a time */
+            for (; x + 8 <= w; x += 8, src += 8) {
+                const uint8x8x4_t p = vld4_u8((const uint8_t *)src);          /* b, g, r, a */
+                uint16x8_t o = vshll_n_u8(vshr_n_u8(p.val[2], 3), 8);         /* r: placed below, shifted on */
+                o = vshlq_n_u16(o, 3);
+                o = vorrq_u16(o, vshlq_n_u16(vmovl_u8(vshr_n_u8(p.val[1], 2)), 5));
+                o = vorrq_u16(o, vmovl_u8(vshr_n_u8(p.val[0], 3)));
+                vst1q_u16(dst + x, o);
+            }
+#endif
+            for (; x < w; x++) {
                 uint32_t p = *src++;
                 dst[x] = (uint16_t)(((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f));
             }

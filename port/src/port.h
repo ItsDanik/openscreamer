@@ -66,7 +66,21 @@ void os_slot_set(int id, void *p);
 #define SDL_GetTicks() mister_ticks()
 #endif
 
+/*
+ * The environment is asked a thousand times a picture (every OS_... switch,
+ * where it is used), and each asking is a search through all of it: on a slow
+ * processor that is a millisecond.  An answer is remembered per place that
+ * asks -- by the address of the name it asks with, so only for names written
+ * into the program -- until something is set or unset.
+ */
+const char *os_getenv(const char *name);
+int  os_setenv(const char *name, const char *value, int overwrite);
+int  os_unsetenv(const char *name);
+
 #ifndef OS_PORT_IMPL
+#define getenv(n)        ((char *)(__builtin_constant_p(n) ? os_getenv(n) : (getenv)(n)))
+#define setenv(n, v, o)  os_setenv(n, v, o)
+#define unsetenv(n)      os_unsetenv(n)
 #define fopen(p, m)    os_fopen(p, m)
 #define malloc(n)      os_malloc(n)
 #define calloc(n, e)   os_calloc(n, e)

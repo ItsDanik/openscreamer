@@ -614,3 +614,36 @@ void os_state_restore(void)
     uintptr_t *w = (uintptr_t *)(((uintptr_t)__bss_start + sizeof(uintptr_t) - 1) & ~(sizeof(uintptr_t) - 1));
     for (size_t i = 0; i < k->bss_n; i++) w[k->bss_at[i]] = k->bss_val[i];
 }
+
+/* ---- the environment, remembered (port.h) ---- */
+
+#define ENV_SLOTS 1024
+static struct { const char *name; const char *value; unsigned age; } env_slot[ENV_SLOTS];
+static unsigned env_age = 1;
+
+const char *os_getenv(const char *name)
+{
+    unsigned at = (unsigned)(((uintptr_t)name >> 2) * 2654435761u) >> 22;
+    for (int k = 0; k < 4; k++, at = (at + 1) & (ENV_SLOTS - 1)) {
+        if (env_slot[at].name == name && env_slot[at].age == env_age) return env_slot[at].value;
+        if (env_slot[at].name == name || !env_slot[at].name || env_slot[at].age != env_age) {
+            env_slot[at].name = name;
+            env_slot[at].value = getenv(name);
+            env_slot[at].age = env_age;
+            return env_slot[at].value;
+        }
+    }
+    return getenv(name);
+}
+
+int os_setenv(const char *name, const char *value, int overwrite)
+{
+    env_age++;
+    return setenv(name, value, overwrite);
+}
+
+int os_unsetenv(const char *name)
+{
+    env_age++;
+    return unsetenv(name);
+}

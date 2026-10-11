@@ -217,7 +217,8 @@ static jmp_buf *g_next_part;           /* where os_go() jumps back to: the loop 
 #endif
 
 /* MISTER: where a picture's time goes, for the log (mister.c).  0 the game's
-   own work is done, 1 sky and clearing, 2 the scene; then the rest (3). */
+   own work is done, 1 sky and clearing, 2 the scene worked out, 5 and filled;
+   then the rest (3). */
 #ifdef MISTER_HYBRID
 #define MISTER_MARK(k) mister_mark(k)
 #else
@@ -424,20 +425,49 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
     const float sc = (float)g_s;      /* the backdrop is the same picture in both sets: doubled in high */
     float top = g_cy + (22.0f - (float)s->h) * sc + focal_y * sinf(pitch);
 
+    /* the backdrop as whole pixels, made once */
+    static const uint8_t *packed_of;
+    static uint32_t *packed;
+    if (packed_of != s->pix) {
+        packed_of = s->pix;
+        packed = malloc(sizeof(uint32_t) * (size_t)s->w * (size_t)s->h);
+        for (long i = 0; i < (long)s->w * s->h; i++)
+            packed[i] = 0xFF000000u | ((uint32_t)s->pix[3 * i] << 16) | ((uint32_t)s->pix[3 * i + 1] << 8) | s->pix[3 * i + 2];
+    }
+    /*
+     * Where a pixel would be with the camera upright -- the backdrop's column
+     * and row -- is a straight-line function of the screen's x and y: it is
+     * worked out at the start of each row and stepped along it in whole
+     * numbers (16 bits of fraction).  (It was floating point, two floors and
+     * a remainder for every pixel: fifteen milliseconds a picture on the
+     * MiSTer.)
+     */
+    const uint32_t ground = g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_GROUND;
+    const int w = s->w, h = s->h, pow2 = (w & (w - 1)) == 0;
+    const int du = (int)(cr / sc * 65536.0f), dv = (int)(-sr / sc * 65536.0f);
     for (int y = 0; y < g_vh; y++) {
         uint32_t *row = fb + (size_t)y * FB_W;
-        for (int x = 0; x < FB_W; x++) {
-            /* where this pixel would be with the camera upright */
-            float ax = (float)x - FB_W * 0.5f, ay = g_cy - (float)y;
-            float ux = ax * cr - ay * sr, uy = ax * sr + ay * cr;
-            int v = (int)floorf((g_cy - uy - top) / sc);
-            if (v >= s->h) { row[x] = g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_GROUND; continue; }
+        const float ax = -FB_W * 0.5f, ay = g_cy - (float)y;
+        const float ux = ax * cr - ay * sr, uy = ax * sr + ay * cr;
+        float fu = off + (FB_W * 0.5f + ux) / sc;
+        fu -= floorf(fu / (float)w) * (float)w;                 /* (a whole number of times round) */
+        int ui = (int)(fu * 65536.0f), vi = (int)floorf((g_cy - uy - top) / sc * 65536.0f);
+        if (dv == 0) {
+            /* upright: the whole row is one row of the backdrop, or ground */
+            const int v = vi >> 16;
+            if (v >= h) { for (int x = 0; x < FB_W; x++) row[x] = ground; continue; }
+            const uint32_t *src = packed + (size_t)(v < 0 ? 0 : v) * w;
+            if (pow2) for (int x = 0; x < FB_W; x++, ui += du) row[x] = src[(ui >> 16) & (w - 1)];
+            else for (int x = 0; x < FB_W; x++, ui += du) { int px = (ui >> 16) % w; if (px < 0) px += w; row[x] = src[px]; }
+            continue;
+        }
+        for (int x = 0; x < FB_W; x++, ui += du, vi += dv) {
+            int v = vi >> 16;
+            if (v >= h) { row[x] = ground; continue; }
             if (v < 0) v = 0;
-            int px = (int)floorf(off + (FB_W * 0.5f + ux) / sc) % s->w;
-            if (px < 0) px += s->w;
-            const uint8_t *p = s->pix + ((size_t)v * s->w + px) * 3;
-            row[x] = 0xFF000000u | ((uint32_t)p[0] << 16) |
-                     ((uint32_t)p[1] << 8) | p[2];
+            int px = ui >> 16;
+            if (pow2) px &= w - 1; else { px %= w; if (px < 0) px += w; }
+            row[x] = packed[(size_t)v * w + px];
         }
     }
 }
@@ -1080,18 +1110,46 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
 #define TRI_LIST 12288
 static tri_job g_tri[TRI_LIST];
 static int     g_tri_n, g_tri_listing;
-/* The helper fills three rows of every four, and starts on a triangle as soon
-   as it is listed -- while this thread is still working the scene out; this
-   thread fills the fourth row when it has listed them all. */
-#define ROWS_MAIN   0x1
-#define ROWS_HELPER 0xe
-#define ROWS_ALL    0xf
+/*
+ * Two LANES, the even rows and the odd: each is the whole list filled in
+ * order for its rows, sixty-four triangles at a time by whichever thread
+ * takes it.  The helper starts on a triangle as soon as it is listed, going
+ * from one lane to the other while this thread still works the scene out;
+ * when this thread has listed them all it takes a lane too.  So the work is
+ * shared out by itself, however busy the helper's processor is with other
+ * things (on the MiSTer it has the audio and the MiSTer's own program).
+ */
+#define ROWS_ALL 0xf
 typedef struct {
     SDL_sem *wake, *done;
     const tri_job *list;
-    SDL_atomic_t listed, closed, busy;
+    SDL_atomic_t listed, closed, busy, at[2];
+    SDL_SpinLock lane[2];
     SDL_Thread *thread;
 } tri_helper;
+
+/* some of a lane, if there is any to do and nobody is at it: 1 = did some */
+static int lane_work(tri_helper *h, int counted)
+{
+    const int n = SDL_AtomicGet(&h->listed);
+    int q = SDL_AtomicGet(&h->at[0]) <= SDL_AtomicGet(&h->at[1]) ? 0 : 1;      /* the one further behind first */
+    for (int tries = 0; tries < 2; tries++, q ^= 1) {
+        if (SDL_AtomicGet(&h->at[q]) >= n || !SDL_AtomicTryLock(&h->lane[q])) continue;
+        const int from = SDL_AtomicGet(&h->at[q]);
+        const int to = from + 64 < n ? from + 64 : n;
+        for (int i = from; i < to; i++) raster_job(&h->list[i], q ? 0xa : 0x5, counted);
+        SDL_AtomicSet(&h->at[q], to);
+        SDL_AtomicUnlock(&h->lane[q]);
+        if (to > from) return 1;
+    }
+    return 0;
+}
+
+static int lanes_done(tri_helper *h)
+{
+    const int n = SDL_AtomicGet(&h->listed);
+    return SDL_AtomicGet(&h->closed) && SDL_AtomicGet(&h->at[0]) >= n && SDL_AtomicGet(&h->at[1]) >= n;
+}
 
 static int tri_helper_run(void *arg)
 {
@@ -1102,12 +1160,11 @@ static int tri_helper_run(void *arg)
     for (;;) {
         SDL_SemWait(h->wake);
         if (!SDL_AtomicGet(&h->busy)) continue;
-        int at = 0;
         for (;;) {
-            const int closed = SDL_AtomicGet(&h->closed), n = SDL_AtomicGet(&h->listed);
-            while (at < n) raster_job(&h->list[at++], ROWS_HELPER, 0);
-            if (closed) break;
-            SDL_SemWait(h->wake);
+            if (lane_work(h, 0)) continue;
+            if (lanes_done(h)) break;
+            if (SDL_AtomicGet(&h->closed)) SDL_CPUPauseInstruction();      /* the other thread is at the last of it */
+            else SDL_SemWait(h->wake);                                     /* more will be listed */
         }
         SDL_AtomicSet(&h->busy, 0);
         SDL_SemPost(h->done);
@@ -1117,7 +1174,9 @@ static int tri_helper_run(void *arg)
 
 static tri_helper *tri_helper_get(void)
 {
-    tri_helper *h = os_slot(3);
+    static tri_helper *known;                            /* (put back with a part's statics; found again in the slot) */
+    if (known) return known;
+    tri_helper *h = known = os_slot(3);
     if (!h && !getenv("OS_ONETHREAD")) {
         h = SDL_calloc(1, sizeof *h);                    /* (SDL's: not the port's memory, which a change of part frees) */
         h->wake = SDL_CreateSemaphore(0);
@@ -1125,6 +1184,7 @@ static tri_helper *tri_helper_get(void)
         h->thread = SDL_CreateThread(tri_helper_run, "filler", h);
         if (!h->wake || !h->done || !h->thread) { SDL_free(h); h = NULL; setenv("OS_ONETHREAD", "1", 1); }
         os_slot_set(3, h);
+        known = h;
     }
     return h;
 }
@@ -1133,13 +1193,17 @@ static void raster_flush(void)
 {
     if (!g_tri_n) return;
     tri_helper *h = tri_helper_get();
-    if (h) {
-        SDL_AtomicSet(&h->listed, g_tri_n);
-        SDL_AtomicSet(&h->closed, 1);
-        SDL_SemPost(h->wake);
+    if (!h) {
+        for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], ROWS_ALL, 1);
+        g_tri_n = 0;
+        return;
     }
-    for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], h ? ROWS_MAIN : ROWS_ALL, 1);
-    if (h) SDL_SemWait(h->done);
+    SDL_AtomicSet(&h->listed, g_tri_n);
+    SDL_AtomicSet(&h->closed, 1);
+    SDL_SemPost(h->wake);
+    while (!lanes_done(h))
+        if (!lane_work(h, 1)) SDL_CPUPauseInstruction();
+    SDL_SemWait(h->done);
     g_tri_n = 0;
 }
 
@@ -1154,6 +1218,8 @@ static void raster_list(const tri_job *j)
         h->list = g_tri;
         SDL_AtomicSet(&h->listed, 0);
         SDL_AtomicSet(&h->closed, 0);
+        SDL_AtomicSet(&h->at[0], 0);
+        SDL_AtomicSet(&h->at[1], 0);
         SDL_AtomicSet(&h->busy, 1);
     }
     if ((g_tri_n & 31) == 0 || g_tri_n == 1) {           /* and is told of more every 32 */
@@ -1227,14 +1293,16 @@ static void draw_poly_view(const vtx *in, int n, const material *m, int id)
 /* tilt a local vector: pitch lifts the nose (+Z), roll lifts the +X side */
 static vec3 tilt(const scene_object *so, const vec3 *l)
 {
+    /* (the sines of the last tilt asked for are kept: a car's every corner asks for the same) */
+    static float of_pitch, of_roll, cp = 1.0f, sp, cr = 1.0f, sr;
     vec3 r = *l;
     if (so->pitch != 0.0f) {
-        float cp = cosf(so->pitch), sp = sinf(so->pitch);
+        if (so->pitch != of_pitch) { of_pitch = so->pitch; cp = cosf(of_pitch); sp = sinf(of_pitch); }
         float y = r.y * cp + r.z * sp, z = r.z * cp - r.y * sp;
         r.y = y; r.z = z;
     }
     if (so->roll != 0.0f) {
-        float cr = cosf(so->roll), sr = sinf(so->roll);
+        if (so->roll != of_roll) { of_roll = so->roll; cr = cosf(of_roll); sr = sinf(of_roll); }
         float x = r.x * cr - r.y * sr, y = r.y * cr + r.x * sr;
         r.x = x; r.y = y;
     }
@@ -1313,6 +1381,7 @@ static void draw_object(const scene_object *so, int id, int pass,
     vtx vc;
     to_view(centre, &vc);
     if (vc.z < -so->radius) return;
+    if (g_far_z > 0.0f && vc.z - so->radius > g_far_z) return;      /* all of it beyond the far plane */
     /* ...or all of it off to the side of the picture: the picture's furthest
        corner is 1.61 times as far out as it is deep, whichever way it leans */
     {
@@ -1348,6 +1417,7 @@ static void draw_object(const scene_object *so, int id, int pass,
     if (plain_piece) {
         static vtx seen[MESH_MAX_VERT];
         static unsigned seen_at[MESH_MAX_VERT], stamp;
+        static unsigned char seen_out[MESH_MAX_VERT];    /* which sides of the picture the corner is outside of */
         float ax_[3][3];                                 /* where the piece's x, y (up) and z point, in view space */
         const float dirs[3][3] = { { c, sn, 0.0f }, { 0.0f, 0.0f, 1.0f }, { -sn, c, 0.0f } };
         for (int a = 0; a < 3; a++) {
@@ -1383,30 +1453,31 @@ static void draw_object(const scene_object *so, int id, int pass,
                     (l0->x - ex_) * nr->x + (l0->y - ey_) * nr->y + (l0->z - ez_) * nr->z < 0.0f) continue;
             }
             vtx in[4];
-            int ok = 1, behind = 1, beyond = far_z > 0.0f, cut = 0, l_ = 1, r_ = 1, t_ = 1, b_ = 1;
+            int ok = 1;
+            unsigned all = 0x3f, any = 0;                /* bits: 1 behind the eye, 2 beyond the far plane, 4 8 16 32 off a side */
+            const float su = (float)mat->su * (1.0f / 256.0f), sv = (float)mat->sv * (1.0f / 256.0f);
             for (int k = 0; k < nc; k++) {
                 const int vi = mm->idx[fi][k];
                 if (vi < 0) { ok = 0; break; }
                 if (seen_at[vi] != stamp) {
                     const vec3 *l = &mm->vert[vi];
-                    seen[vi].x = vc.x + l->x * ax_[0][0] + l->y * ax_[1][0] + l->z * ax_[2][0];
-                    seen[vi].y = vc.y + l->x * ax_[0][1] + l->y * ax_[1][1] + l->z * ax_[2][1];
-                    seen[vi].z = vc.z + l->x * ax_[0][2] + l->y * ax_[1][2] + l->z * ax_[2][2];
+                    const float x = vc.x + l->x * ax_[0][0] + l->y * ax_[1][0] + l->z * ax_[2][0];
+                    const float y = vc.y + l->x * ax_[0][1] + l->y * ax_[1][1] + l->z * ax_[2][1];
+                    const float z = vc.z + l->x * ax_[0][2] + l->y * ax_[1][2] + l->z * ax_[2][2];
+                    seen[vi].x = x; seen[vi].y = y; seen[vi].z = z;
+                    seen_out[vi] = (unsigned char)((z < NEAR_Z) | (far_z > 0.0f && z >= far_z) << 1 |
+                                                   (x > z * side) << 2 | (x < -z * side) << 3 |
+                                                   (y > z * top) << 4 | (y < -z * bottom) << 5);
                     seen_at[vi] = stamp;
                 }
                 const vtx *v = &seen[vi];
                 in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
-                in[k].u = (float)mm->uv[vi][0] * (float)mat->su / 256.0f;
-                in[k].v = (float)mm->uv[vi][1] * (float)mat->sv / 256.0f;
-                if (v->z >= NEAR_Z) behind = 0; else cut = 1;
-                if (v->z < far_z) beyond = 0;
-                if (v->x <= v->z * side) r_ = 0;
-                if (v->x >= -v->z * side) l_ = 0;
-                if (v->y <= v->z * top) t_ = 0;
-                if (v->y >= -v->z * bottom) b_ = 0;
+                in[k].u = (float)mm->uv[vi][0] * su;
+                in[k].v = (float)mm->uv[vi][1] * sv;
+                all &= seen_out[vi]; any |= seen_out[vi];
             }
-            if (!ok || behind || beyond) { g_flat_colour = -1; continue; }
-            if (!cut && (l_ || r_ || t_ || b_)) { g_flat_colour = -1; continue; }
+            /* every corner behind the eye, or beyond the far plane; or none behind and all off one side */
+            if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
             draw_poly_view(in, nc, mat, id);
             g_flat_colour = -1;
         }
@@ -1428,6 +1499,15 @@ static void draw_object(const scene_object *so, int id, int pass,
                 if (mm->block[j].ox * mm->block[i].ox > 0.0f &&
                     fabsf(mm->block[j].oz - mm->block[i].oz) < 8.0f) covered |= 1u << j;
         }
+    /* a car's sines, once for all its faces */
+    float pose_bpc = 1.0f, pose_bps = 0.0f, pose_brc = 1.0f, pose_brs = 0.0f;
+    float pose_wcs = 1.0f, pose_wsn = 0.0f, pose_scs = 1.0f, pose_ssn = 0.0f;
+    if (so->pose) {
+        pose_bpc = cosf(so->pose->body_pitch); pose_bps = sinf(so->pose->body_pitch);
+        pose_brc = cosf(so->pose->body_roll);  pose_brs = sinf(so->pose->body_roll);
+        pose_wcs = cosf(so->pose->spin);       pose_wsn = sinf(so->pose->spin);
+        pose_scs = cosf(so->pose->steer);      pose_ssn = sinf(so->pose->steer);
+    }
     for (int fi = 0; fi < mm->nface; fi++) {
         int nc = mm->ncorner[fi];
         if (nc < 3) continue;
@@ -1454,11 +1534,8 @@ static void draw_object(const scene_object *so, int id, int pass,
         const int body = (so->pose && !wheel &&
                           (so->pose->body_pitch != 0.0f || so->pose->body_roll != 0.0f ||
                            so->pose->body_drop != 0.0f));
-        float bpc = 1.0f, bps = 0.0f, brc = 1.0f, brs = 0.0f;
-        if (body) {
-            bpc = cosf(so->pose->body_pitch); bps = sinf(so->pose->body_pitch);
-            brc = cosf(so->pose->body_roll);  brs = sinf(so->pose->body_roll);
-        }
+        const float bpc = body ? pose_bpc : 1.0f, bps = body ? pose_bps : 0.0f;
+        const float brc = body ? pose_brc : 1.0f, brs = body ? pose_brs : 0.0f;
         /*
          * The game has no depth buffer: it draws an object block by block in
          * a fixed order, so a wheel is simply painted over the bodywork it
@@ -1483,8 +1560,8 @@ static void draw_object(const scene_object *so, int id, int pass,
                inner wall, the part that shows under the bodywork -- turn it
                and it swings up inside the body and the wheel is left a flat
                disc with nothing behind it (Danik saw exactly that). */
-            if (blk->flags & 0x800) { wcs = cosf(so->pose->spin); wsn = sinf(so->pose->spin); }
-            if (blk->oz < 0.0f) { scs = cosf(so->pose->steer); ssn = sinf(so->pose->steer); }
+            if (blk->flags & 0x800) { wcs = pose_wcs; wsn = pose_wsn; }
+            if (blk->oz < 0.0f) { scs = pose_scs; ssn = pose_ssn; }
         }
 
         float p[4][3], uv[4][2];
@@ -1630,10 +1707,11 @@ static void render_frame(const camera *cam, const sky *s)
             if (&g_car[k] != g_hide)
                 draw_object(&g_car[k], g_scene->count + k, pass, cam);
     }
+    MISTER_MARK(2);
     raster_flush();
     g_tri_listing = 0;
     if (g_show_edges) draw_guides();
-    MISTER_MARK(2);
+    MISTER_MARK(5);
 }
 
 /*
