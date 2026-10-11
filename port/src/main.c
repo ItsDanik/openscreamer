@@ -791,6 +791,17 @@ static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 
     int maxx = fmaxx > FB_W - 1 ? FB_W - 1 : iceil(fmaxx);
     int maxy = fmaxy > g_vh - 1 ? g_vh - 1 : iceil(fmaxy);
 
+    /* no row of this thread's, or no column, has its centre in the triangle:
+       most of what is far away is like that, and needs nothing more */
+    {
+        int r0 = fminy - 0.5f <= (float)miny ? miny : iceil(fminy - 0.5f);
+        const int r1 = fmaxy - 0.5f >= (float)maxy ? maxy : ifloor(fmaxy - 0.5f);
+        if (odd >= 0 && (r0 & 1) != odd) r0++;
+        if (r0 > r1) return;
+        const int c0 = fminx - 0.5f <= (float)minx ? minx : iceil(fminx - 0.5f);
+        const int c1 = fmaxx - 0.5f >= (float)maxx ? maxx : ifloor(fmaxx - 0.5f);
+        if (c0 > c1) return;
+    }
 #ifdef MISTER_HYBRID
     if (counted) mister_tris++;
 #endif
