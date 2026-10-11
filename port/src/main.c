@@ -410,6 +410,19 @@ static void res_init(void)
     g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H;
 }
 
+/* the backdrop as whole pixels, made once (and by the main thread: sky_paint
+   may be another thread's work, and the port's memory is the main thread's) */
+static const uint8_t *g_sky_packed_of;
+static uint32_t *g_sky_packed;
+static void sky_ready(const sky *s)
+{
+    if (!s->pix || g_sky_packed_of == s->pix) return;
+    g_sky_packed_of = s->pix;
+    g_sky_packed = malloc(sizeof(uint32_t) * (size_t)s->w * (size_t)s->h);
+    for (long i = 0; i < (long)s->w * s->h; i++)
+        g_sky_packed[i] = 0xFF000000u | ((uint32_t)s->pix[3 * i] << 16) | ((uint32_t)s->pix[3 * i + 1] << 8) | s->pix[3 * i + 2];
+}
+
 static void sky_paint(const float yaw, const float pitch, const float roll,
                       const sky *s, float focal_x, float focal_y)
 {
@@ -425,15 +438,8 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
     const float sc = (float)g_s;      /* the backdrop is the same picture in both sets: doubled in high */
     float top = g_cy + (22.0f - (float)s->h) * sc + focal_y * sinf(pitch);
 
-    /* the backdrop as whole pixels, made once */
-    static const uint8_t *packed_of;
-    static uint32_t *packed;
-    if (packed_of != s->pix) {
-        packed_of = s->pix;
-        packed = malloc(sizeof(uint32_t) * (size_t)s->w * (size_t)s->h);
-        for (long i = 0; i < (long)s->w * s->h; i++)
-            packed[i] = 0xFF000000u | ((uint32_t)s->pix[3 * i] << 16) | ((uint32_t)s->pix[3 * i + 1] << 8) | s->pix[3 * i + 2];
-    }
+    sky_ready(s);
+    const uint32_t *const packed = g_sky_packed;
     /*
      * Where a pixel would be with the camera upright -- the backdrop's column
      * and row -- is a straight-line function of the screen's x and y: it is
@@ -1126,7 +1132,19 @@ typedef struct {
     SDL_atomic_t listed, closed, busy, at[2];
     SDL_SpinLock lane[2];
     SDL_Thread *thread;
+    /* before any filling, the helper paints the backdrop and clears the
+       depths (it has nothing else to do while the first triangles are being
+       worked out): 1 = asked for, 2 = done */
+    SDL_atomic_t before;
+    float yaw, pitch, roll, focal_x, focal_y;
+    const sky *backdrop;
 } tri_helper;
+
+static void frame_clear(float yaw, float pitch, float roll, const sky *s, float focal_x, float focal_y)
+{
+    sky_paint(yaw, pitch, roll, s, focal_x, focal_y);
+    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = -1; }
+}
 
 /* some of a lane, if there is any to do and nobody is at it: 1 = did some */
 static int lane_work(tri_helper *h, int counted)
@@ -1160,6 +1178,10 @@ static int tri_helper_run(void *arg)
     for (;;) {
         SDL_SemWait(h->wake);
         if (!SDL_AtomicGet(&h->busy)) continue;
+        if (SDL_AtomicGet(&h->before) == 1) {
+            frame_clear(h->yaw, h->pitch, h->roll, h->backdrop, h->focal_x, h->focal_y);
+            SDL_AtomicSet(&h->before, 2);
+        }
         for (;;) {
             if (lane_work(h, 0)) continue;
             if (lanes_done(h)) break;
@@ -1191,16 +1213,17 @@ static tri_helper *tri_helper_get(void)
 
 static void raster_flush(void)
 {
-    if (!g_tri_n) return;
     tri_helper *h = tri_helper_get();
     if (!h) {
         for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], ROWS_ALL, 1);
         g_tri_n = 0;
         return;
     }
+    if (!SDL_AtomicGet(&h->busy)) return;                /* nothing was listed, nothing asked for */
     SDL_AtomicSet(&h->listed, g_tri_n);
     SDL_AtomicSet(&h->closed, 1);
     SDL_SemPost(h->wake);
+    while (SDL_AtomicGet(&h->before) == 1) SDL_CPUPauseInstruction();
     while (!lanes_done(h))
         if (!lane_work(h, 1)) SDL_CPUPauseInstruction();
     SDL_SemWait(h->done);
@@ -1214,15 +1237,17 @@ static void raster_list(const tri_job *j)
     g_tri[g_tri_n++] = *j;
     tri_helper *h = tri_helper_get();
     if (!h) return;
-    if (g_tri_n == 1) {                                  /* the first of a list: the helper starts */
+    if (!SDL_AtomicGet(&h->busy)) {                      /* the first of a list: the helper starts */
         h->list = g_tri;
         SDL_AtomicSet(&h->listed, 0);
         SDL_AtomicSet(&h->closed, 0);
         SDL_AtomicSet(&h->at[0], 0);
         SDL_AtomicSet(&h->at[1], 0);
+        SDL_AtomicSet(&h->before, 0);
         SDL_AtomicSet(&h->busy, 1);
+        SDL_SemPost(h->wake);
     }
-    if ((g_tri_n & 31) == 0 || g_tri_n == 1) {           /* and is told of more every 32 */
+    if ((g_tri_n & 31) == 0) {                           /* and is told of more every 32 */
         SDL_AtomicSet(&h->listed, g_tri_n);
         SDL_SemPost(h->wake);
     }
@@ -1829,11 +1854,26 @@ static void render_frame(const camera *cam, const sky *s)
         mesh_animate_all(g_anim_clock);
     }
     MISTER_MARK(0);
-    sky_paint(cam->yaw, cam->pitch, cam->roll, s, g_focal_x, g_focal_y);
-    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = -1; }
+    {
+        tri_helper *h = tri_helper_get();
+        if (h && !SDL_AtomicGet(&h->busy)) {
+            sky_ready(s);
+            h->yaw = cam->yaw; h->pitch = cam->pitch; h->roll = cam->roll;
+            h->focal_x = g_focal_x; h->focal_y = g_focal_y; h->backdrop = s;
+            h->list = g_tri;
+            SDL_AtomicSet(&h->listed, 0);
+            SDL_AtomicSet(&h->closed, 0);
+            SDL_AtomicSet(&h->at[0], 0);
+            SDL_AtomicSet(&h->at[1], 0);
+            SDL_AtomicSet(&h->before, 1);
+            SDL_AtomicSet(&h->busy, 1);
+            SDL_SemPost(h->wake);
+        } else
+            frame_clear(cam->yaw, cam->pitch, cam->roll, s, g_focal_x, g_focal_y);
+    }
     MISTER_MARK(1);
     view_setup(cam);
-    if (!g_scene) return;
+    if (!g_scene) { raster_flush(); return; }
     g_tri_listing = 1;
 
     /* pass 0: everything solid; pass 1: the see-through materials on top */
