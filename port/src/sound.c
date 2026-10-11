@@ -36,7 +36,8 @@
 void music_frame(float *left, float *right);   /* one output frame at RATE_OUT */
 int  music_play(const char *dir, int number);
 void music_stop(void);
-void music_volume(float v);
+void music_volume(float v);                    /* the chip in the mix: the port's own */
+void music_master(float m);                    /* the game's music volume, 1 = as it starts */
 
 typedef struct {
     char     name[16];
@@ -453,6 +454,7 @@ void snd_masters(float effects, float music)
 {
     lock();
     g_sfx_gain = g_sfx_base * effects;
-    music_volume(g_music_base * music);
+    music_volume(g_music_base);
+    music_master(music);
     unlock();
 }

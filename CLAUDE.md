@@ -552,6 +552,7 @@ port/src/unr.h,  unr.c    MAPn.UNR: blob header + the object meshes
 port/src/scene.h,scene.c  MAPn.MMP: where each piece goes, and its heading
 port/src/main.c           materials, depth-buffered software rasteriser, camera, loop
 port/src/drive.c, sound.c, music.c, port.c   driving model, mixer, FM music, one-program glue
+port/src/fmchip.c, nuked/                    the sound card's FM chip in software (section 32)
 (the first-day .SPL loader is in port/attic/spl_first_day.*; nothing used it)
 ```
 
@@ -1541,14 +1542,11 @@ HMI is replaced by a 32-voice STEREO SDL mixer. From the game:
   `MELODIC.BNK` / `DRUM.BNK` are AdLib banks (28-byte header, 128 × 12 name records,
   128 × 30 instruments = two 13-byte operators + two wave shapes); a drum's name
   record byte 2 is the pitch it is played at. The connection byte is the chip's own
-  bit (0 = FM: 112 of 128), not AdLib's inverted one (`OS_MUSIC_CON=1` flips it).
-  **The FM synthesiser is the port's own** — an OPL-style two-operator voice written
-  from the chip's published behaviour (rates, key scaling, feedback, four wave shapes),
-  18 voices; loudness law, voice stealing and smooth panning are stand-ins for HMI's
-  driver. Checked numerically only: the rendered pitches match the notes in the file.
+  bit (0 = FM: 112 of 128), not AdLib's inverted one.
+  **Since 2026-10-11 the music is played as the game played it, by register writes to
+  an OPL2 chip: section 32.**  (Until then the synthesiser was the port's own, 18 voices
+  with stand-in loudness, stealing and panning: `port/attic/music_own_synth.c`.)
   `OS_NOMUSIC=1`, `OS_MUSIC=n` (pick a song), `OS_MUSICVOL=x` (default 0.6).
-  It calls `powf`-free table lookups per sample but is still ~1.6 M operator steps a
-  second — measure before putting it on the MiSTer's ARM.
 
 I cannot hear: `OS_SNDWAV=<file>` writes the mix of an `OS_DRIVE_DEMO` run to a WAV
 instead of opening a device, and the check is numeric (no clipping over a lap; engine
@@ -2186,7 +2184,7 @@ wrong, and only text.
   the rest of the loading took, before the fade-in pulled it down (Danik).
 
 **What is still the port's own, by necessity:** the renderer (depth buffer instead of the
-engine's sort), the SDL mixer / FM synthesiser / pan law, the fixed 50 Hz step and the
+engine's sort), the SDL mixer / pan law, the chip's loudness against the effects, the fixed 50 Hz step and the
 30 frames/s taken for per-frame quantities, the save formats, the CD's stand-in songs.
 **By decision:** heading snap, the wall put-back, ULTRA, the hi-res layout, BACKSPACE,
 developer mode, the one-second hold of the loading screen, the game controller's layout.
@@ -2310,6 +2308,52 @@ quicker off the line than a standing start.  Port: `car_state.waiting`; the port
 zero the pedal and hold the brake until the green.  (A replay file saved before this,
 whose driver held the pedal on the grid, now starts differently.)
 
+### 32. THE MUSIC, AS THE GAME PLAYED IT (2026-10-11; `port/src/music.c`, `fmchip.c`)
+
+Decompiled text: `build/decomp/hmi_fmmidi.c` (the driver, whole), the module itself
+`build/hmi_fmmidi.bin`.  The header comment of `music.c` has every rule; in short:
+
+**Three layers.**  (1) HMI's MIDI player, linked into STARTL.EXE at `0xd2000`..`0xe4000`
+(the game's glue is `0x2f7a0`.. in `remaining_logic.c`): `0xe3d51` is the timer's routine
+(120 a second, the song's own number), `0xe2ca9` passes one message on, `0xe37eb` ends a
+song, `0xd3a54` / `0xe29d9` the volumes.  **An immediate in a `push` is object-relative
+like every other reference: the timer routine is pushed as `0xd3d51` and lives at
+`0xe3d51`.**  (2) The driver: `HMIMDRV.386` = modules `name.com`, 0x30 bytes of header
+then 32-bit code whose addresses count from the module's start; `fmmidi.com` (first
+module, 12.7 K, plain unoptimised C -- Ghidra reads it at once as `x86:LE:32:default`,
+entries `0x80d` a message, `0xf6b` note on, `0x157b` note off, `0x1846` controller,
+`0x19bb` pitch bend, `0x201e` instrument, `0x1ed7` which voice, `0x1a7d` bent frequency,
+`0x1d64` one register write, `0xd37` packing a bank).  (3) The chip.
+
+**The player:** track 0's messages are never sent; controller 7 is the only message it
+touches -- the driver gets `master x (song x value >> 7) >> 7`, song 127, **master = the
+game's music volume >> 8 (96 as the game starts it)** -- so the game's music volume and
+its fades reach the chip as LEVELS OF THE NOTES, not as a gain; at a song's end every
+track's channel gets all-notes-off, controller reset, bend to the middle and volume 0,
+and the game starts the song again.
+**The driver:** nine two-operator voices, no rhythm mode, register `0xBD` = `0xC0`;
+voice = first free, else the first voice of the lowest channel that never had a pitch
+bend; before a note the voice's releases are set to the fastest five times over (a
+delay loop, in effect); level = `64 - (64 - t)(64 - own level)/64` with `t` from a
+64-step table of channel volume x velocity; a drum = channel 9, instrument by note from
+`DRUM.BNK`, pitch from its name record; the pitch bend's high byte only, by straight
+line between frequency numbers; modulation, pan, reverb, pressure ignored (mono).
+Its slips are kept (see the file) except the one that would write over its own memory,
+which no song reaches (checked by counting: `OS_MUSICLOG=1` prints the count each time
+round a song).
+
+**The chip** is behind `fmchip.h` (reset, write, one frame): on Linux Nuked OPL3
+(`port/src/nuked/`, LGPL 2.1+, chip-exact, an OPL2 until told otherwise), writes 40
+microseconds apart as the driver's own write routine spaced them.  The driver chosen is
+the OPL2 one; `fmmidi3.com` (OPL3, what a Sound Blaster 16 set-up would use, possibly in
+stereo) is not read.
+**The port's own:** the chip's loudness against the effects (the card's analog mixer):
+2.6 x `OS_MUSICVOL`, which makes the music as loud as the old synthesiser made it
+(measured on songs 1 and 5: within 3 %).
+Checked: all seven songs play round with no note lost and no clipping; old and new play
+the same notes at the same times (pitch-class match 0.7..1.0 a window, mostly over 0.9).
+Not checked by ear by me, of course.
+
 ---
 
 ## What is next
@@ -2321,13 +2365,10 @@ whose driver held the pedal on the grid, now starts differently.)
 2. The MiSTer hybrid core.  Before it: look at the 84 MB of static arrays.
    **DECIDED (Danik, 2026-10-11): on the MiSTer the music's FM chip goes in the FPGA** (an
    OPL core; the ARM only sends register writes), to be done when the hybrid core is
-   built -- not a software emulator on the ARM.  What that needs first, and what Linux
-   needs too: a register-level music player in the place of `music.c`'s own voices, read
-   from HMI's OPL driver (`fmmidi.com` = OPL2, `fmmidi3.com` = OPL3, inside
-   `screamer/HMIMDRV.386`, which also holds AWE32 / MPU-401 / MT-32 / GUS / Sound Master /
-   PC-speaker drivers).  On Linux it would drive a software chip (candidates looked at:
-   DBOPL GPL, Nuked OPL3 LGPL, ymfm BSD, Opal public domain -- licence is Danik's call).
-   Not started.
+   built -- not a software emulator on the ARM.  What that needed first, and Linux too: a
+   register-level music player in the place of `music.c`'s own voices, read from HMI's
+   OPL driver.  **DONE 2026-10-11, section 32**; on Linux it drives Nuked OPL3 (LGPL).
+   The MiSTer core replaces `fmchip.c` alone.
    **The chip goes into the FRAMEWORK, not into this core** (Danik, 2026-10-11):
    `~/Hybrid_MiSTer` (`github.com/ItsDanik/Hybrid_MiSTer`, GPL3, the `hybrid/` submodule of
    every core), so the other ports can use it.  Screamer is its first user.  As looked at

@@ -1,95 +1,154 @@
 /*
- * music.c - the game's MIDI music (MUSICn.HMP) on its FM instrument banks.
+ * music.c - the game's MIDI music (MUSICn.HMP), played as the game played it:
+ * by writing the registers of the sound card's FM chip.
  *
- * The original hands the song and the two banks to HMI's FM driver
- * (HMIMDRV.386), which plays them on the sound card's OPL chip.  The driver
- * is not kept; this file is a small stand-in for both it and the chip.
+ * The original has three layers.  The game hands a song to HMI's MIDI player,
+ * which is linked into STARTL.EXE (0xd2000..0xe4000); that steps the song's
+ * tracks on a timer and passes each MIDI message to a driver out of
+ * HMIMDRV.386; the driver for an AdLib / Sound Blaster is `fmmidi.com`
+ * ("HMI MIDI Driver For OPL2"), which turns the messages into register writes
+ * with the two instrument banks.  The first two are below, read from the
+ * code; the chip is behind fmchip.h.
  *
  * From the game's files:
  *   MUSICn.HMP   "HMIMIDIP013195": +0x30 number of tracks, +0x38 ticks per
  *                second (120); the tracks start at 0x388, each
- *                [number, length including these 12 bytes, channel] + events.
+ *                [number, length including these 12 bytes, a channel] + events.
  *                An event is a delay then a MIDI message; the delay is 7 bits
  *                a byte, LOW part first, and the LAST byte has its top bit
  *                set (the reverse of a MIDI file).  FF 2F ends a track.
  *   MELODIC.BNK  AdLib instrument bank, 128 instruments = the MIDI programs:
  *   DRUM.BNK     the same, 128 = the drum notes of MIDI channel 10; the third
  *                byte of a drum's name record is the pitch it is played at.
- *                Bank: +0x0c offset of the name records (12 bytes: index,
- *                flag/pitch, name), +0x10 offset of the instruments (30
+ *                Bank: +8 instruments in use, +0x0c offset of the name
+ *                records (12 bytes), +0x10 offset of the instruments (30
  *                bytes: 2, then 13 for each of the two operators -- key
  *                scaling, multiplier, feedback, attack, sustain level,
  *                sustaining, decay, release, level, tremolo, vibrato, rate
  *                scaling, connection -- then the two wave shapes).
  *
- * The port's own (the driver's choices are not read): how loudness and MIDI
- * volume become operator levels, 18 voices, smooth panning, the note stolen
- * when all voices are busy.  The connection byte is taken as the chip's own
- * bit (0 = the first operator modulates the second), which is what makes 112
- * of the 128 instruments FM; OS_MUSIC_CON=1 reads it the other way round.
+ * THE PLAYER (0xe3d51 the timer's routine, 0xe2ca9 a message on its way to the
+ * driver, 0xe37eb a song's end, 0xe29d9 / 0xd3a54 the volumes):
+ *   - every tick each track's count goes up, and its messages are sent while
+ *     the delay before them has run out; track 0's messages are not sent;
+ *   - "channel volume" (controller 7) is the only message it changes: the
+ *     driver gets  master x (song x value >> 7) >> 7,  song = 127 and master =
+ *     the game's music volume / 256 (96 as the game starts it), and the value
+ *     is remembered per channel; when the master changes, each track still
+ *     running gets its remembered value again for the channel in its header;
+ *   - at a song's end every track but the first gets, for the channel in its
+ *     header: all notes off (123), reset controllers (121), pitch bend to the
+ *     middle, channel volume 0 (as it is, not through the master).  The game
+ *     then starts the song again.
+ *
+ * THE DRIVER (fmmidi.com; addresses in that file):
+ *   - nine voices, one chip channel each, no rhythm mode; register 0xBD is
+ *     0xC0, the deep tremolo and vibrato;
+ *   - the bank's instruments are packed into register bytes once (0xd37) --
+ *     all but the last two in use, which stay as they are in the file;
+ *   - note on (0xf6b): the first free voice, or else the first voice of the
+ *     lowest channel that has never had a pitch bend (0x1ed7); that voice's
+ *     note off; five times over, both operators' release to the fastest;
+ *     the instrument's registers (0x201e); the second operator's level (and
+ *     the first one's when the instrument adds its two operators) worked out
+ *     from channel volume x velocity (below); frequency and note on (0x2227);
+ *     the channel's pitch bend if it has ever had one.
+ *     A drum (channel 9) takes its instrument from the drum bank by the note
+ *     and plays at the pitch in that instrument's name record;
+ *   - level: v = (volume x 128 / 127) x velocity >> 7, t = table[v >> 1] (64
+ *     steps, 63 at v = 0 and 0 at the top), and the register gets
+ *     64 - (64 - t) x (64 - the instrument's own level) / 64;
+ *   - controller 7 sets the levels of the channel's playing notes again
+ *     (0x237f), 0x66 is the pitch bend's range in semitones (2), 0x79 and 0x7b
+ *     as usual; sustain (0x40) is in the driver and in no song, and is not
+ *     here.  Program change, and a pitch bend's high byte only (0x19bb,
+ *     0x1a7d: between the note's own frequency number and that of the note
+ *     `range` away, by straight line).  Modulation, pan, reverb and channel
+ *     pressure, which the songs are full of, are ignored: the chip is mono.
+ *   Three slips of the driver's are kept: whether the FIRST operator gets a
+ *   level is asked of the melodic instrument of the channel's program, also
+ *   for a drum; controller 0x79 resets the velocity of the voice with the
+ *   channel's NUMBER; and a note under 12 reads its frequency out of the
+ *   level table.  One is not: with no voice to take, the driver uses the
+ *   note's number as a voice and writes all over itself.  No song gets there
+ *   (checked: none of the seven), and here the note is dropped.
+ *
+ * The port's own: how loud the chip is against the effects (the card's analog
+ * mixer; g_volume) -- set so that the music is as loud as the port's first
+ * synthesiser made it.
  */
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "port.h"
+#include "fmchip.h"
 
 #define RATE      22050.0f
-#define OVER      2                 /* the synthesiser runs at twice the output rate */
-#define NVOICE    18
 #define MAXTRACK  32
-#define SINE_N    4096
 
-typedef struct {
-    int ksl, mult, fb, ar, sl, sustaining, dr, rr, tl, am, vib, ksr, con, wave;
-} op_patch;
-typedef struct { op_patch op[2]; int pitch; } patch;
+/* ------------------------------------------------------------- the driver */
 
-enum { ENV_OFF, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE };
-typedef struct {
-    const op_patch *p;
-    float phase, step;              /* in turns */
-    float att;                      /* envelope, dB down */
-    float base;                     /* level + key scaling + loudness, dB down */
-    float d_attack, d_decay, d_release;
-    int   state;
-    float out1, out2;               /* last two outputs, for feedback */
-} oper;
-typedef struct {
-    oper  op[2];
-    int   on, chan, note, held;
-    long  age;
-    float freq;                     /* of the note, before the bend */
-} fm_voice;
+static uint8_t d_melodic[128][30], d_drum[128][30];     /* packed */
+static uint8_t d_drum_pitch[128];
+static int     d_program[16], d_bend[16], d_bent[16], d_range[16], d_volume[16];
+static int     d_voice_chan[9], d_voice_vel[9];
+static uint8_t d_voice_note[9];                         /* 0 = free */
+static uint8_t d_level[0x16], d_release[0x16];          /* an operator's 0x40 and 0x80 as the instrument has them */
+static uint8_t d_a0[9], d_b0[9];
+static long    d_dropped;
 
-typedef struct {
-    const uint8_t *p, *end, *start;
-    long wait;
-    int  done;
-} track;
+static const uint8_t d_ops[9][2] = { {0, 3}, {1, 4}, {2, 5}, {8, 11}, {9, 12}, {10, 13}, {16, 19}, {17, 20}, {18, 21} };
 
-static patch    g_melodic[128], g_drum[128];
-static int      g_banks;
-static uint8_t *g_song;
-static long     g_song_len;
-static track    g_track[MAXTRACK];
-static int      g_ntrack, g_playing, g_flip_con;
-static float    g_tick_rate = 120.0f, g_tick_acc;
-static fm_voice g_voice[NVOICE];
-static long     g_age;
-static float    g_sine[SINE_N];
-static float    g_amp[96 * 8 + 1];          /* dB down (eighths) -> amplitude */
-static float    g_fb[8];                    /* feedback setting -> turns of phase */
-static float    g_lfo_am, g_lfo_vib;        /* phases, turns */
-static float    g_volume = 0.6f;            /* under the engine; the game takes its own from SCREAMER.CFG */
-static struct { int program, volume, expression, pan; float bend; } g_chan[16];
+/* 0x2f00: channel volume x velocity (halved) -> what comes off the level */
+static const uint8_t d_soft[64] = {
+    63, 58, 53, 48, 44, 41, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
+    15, 14, 14, 13, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 2, 2, 2, 1, 1, 0
+};
+/* 0x2f4c: octave and frequency number of notes 12.. (eight octaves and seven
+   notes), and straight after it, at 0x30e8, the numbers the pitch bend uses
+   where a bend crosses into the next octave */
+static const uint16_t d_freq[] = {
+    0x157, 0x16b, 0x181, 0x198, 0x1b0, 0x1ca, 0x1e5, 0x202, 0x220, 0x241, 0x263, 0x287,
+    0x557, 0x56b, 0x581, 0x598, 0x5b0, 0x5ca, 0x5e5, 0x602, 0x620, 0x641, 0x663, 0x687,
+    0x957, 0x96b, 0x981, 0x998, 0x9b0, 0x9ca, 0x9e5, 0xa02, 0xa20, 0xa41, 0xa63, 0xa87,
+    0xd57, 0xd6b, 0xd81, 0xd98, 0xdb0, 0xdca, 0xde5, 0xe02, 0xe20, 0xe41, 0xe63, 0xe87,
+    0x1157, 0x116b, 0x1181, 0x1198, 0x11b0, 0x11ca, 0x11e5, 0x1202, 0x1220, 0x1241, 0x1263, 0x1287,
+    0x1557, 0x156b, 0x1581, 0x1598, 0x15b0, 0x15ca, 0x15e5, 0x1602, 0x1620, 0x1641, 0x1663, 0x1687,
+    0x1957, 0x196b, 0x1981, 0x1998, 0x19b0, 0x19ca, 0x19e5, 0x1a02, 0x1a20, 0x1a41, 0x1a63, 0x1a87,
+    0x1d57, 0x1d6b, 0x1d81, 0x1d98, 0x1db0, 0x1dca, 0x1de5, 0x1e02, 0x1e20, 0x1e41, 0x1e63, 0x1e87,
+    0x1eae, 0x1eb7, 0x1f02, 0x1f30, 0x1f60, 0x1f94, 0x1fca,
+    0x144, 0x132, 0x121, 0x110, 0x101, 0xf8, 0xe5, 0xd8, 0xcc, 0xc1, 0xb6, 0xac,
+    0xa1, 0x90, 0x99, 0x86, 0x81, 0x7c, 0x73, 0x6c, 0x66, 0x60, 0x5b, 0x56,
+    0x2ae, 0x2d6, 0x302, 0x330, 0x360, 0x394, 0x3de, 0x404, 0x440, 0x482, 0x4c6, 0x50e
+};
+#define D_FREQS  ((int)(sizeof d_freq / sizeof d_freq[0]))
+#define D_BEND   103                    /* where the pitch bend's numbers start in d_freq */
 
-static const float g_mult[16] = { 0.5f, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 12, 12, 15, 15 };
+/* the word the driver reads at 0x2f1c + 4 x note */
+static unsigned d_note_word(int note)
+{
+    if (note >= 12) return note - 12 < D_FREQS ? d_freq[note - 12] : 0;
+    if (note < 0 || note > 8) return 0;
+    const uint8_t *b = d_soft + 28 + 4 * note;          /* the end of the level table */
+    return b[0] | b[1] << 8 | b[2] << 16 | (unsigned)b[3] << 24;
+}
 
-/* ------------------------------------------------------------------ banks */
+/* 0xd37: a bank's instrument, one value a byte, into register bytes */
+static void d_pack(uint8_t *r)
+{
+    r[0x0b] = (uint8_t)(r[0x0b] << 7 | r[0x0c] << 6 | r[0x07] << 5 | r[0x0d] << 4 | r[0x03]);
+    r[0x02] = (uint8_t)(r[0x02] << 6 | r[0x0a]);
+    r[0x05] = (uint8_t)(r[0x05] << 4 | r[0x08]);
+    r[0x06] = (uint8_t)(r[0x06] << 4 | r[0x09]);
+    r[0x0e] = (uint8_t)(r[0x04] * 2 | r[0x0e]);
+    r[0x18] = (uint8_t)(r[0x18] << 7 | r[0x19] << 6 | r[0x14] << 5 | r[0x1a] << 4 | r[0x10]);
+    r[0x0f] = (uint8_t)(r[0x0f] << 6 | r[0x17]);
+    r[0x12] = (uint8_t)(r[0x12] << 4 | r[0x15]);
+    r[0x13] = (uint8_t)(r[0x13] << 4 | r[0x16]);
+}
 
-static int load_bank(const char *file, patch *out, int drums)
+static int d_load_bank(const char *file, uint8_t out[128][30], uint8_t *pitch)
 {
     FILE *f = fopen(file, "rb");
     if (!f) return 0;
@@ -97,165 +156,227 @@ static int load_bank(const char *file, patch *out, int drums)
     size_t n = fread(b, 1, sizeof b, f);
     fclose(f);
     if (n < 28 || memcmp(b + 2, "ADLIB-", 6)) return 0;
+    int used = (int16_t)(b[8] | b[9] << 8);
     uint32_t names = b[12] | b[13] << 8, data = b[16] | b[17] << 8;
     for (int i = 0; i < 128; i++) {
-        const uint8_t *nr = b + names + 12 * i;
-        if (names + 12 * (size_t)i + 12 > n) break;
-        int idx = nr[0] | nr[1] << 8;
-        const uint8_t *r = b + data + 30 * idx;
-        if (data + 30 * (size_t)idx + 30 > n) continue;
-        for (int o = 0; o < 2; o++) {
-            const uint8_t *q = r + 2 + 13 * o;
-            op_patch *p = &out[i].op[o];
-            p->ksl = q[0] & 3;  p->mult = q[1] & 15; p->fb = q[2] & 7;
-            p->ar = q[3] & 15;  p->sl = q[4] & 15;   p->sustaining = q[5] & 1;
-            p->dr = q[6] & 15;  p->rr = q[7] & 15;   p->tl = q[8] & 63;
-            p->am = q[9] & 1;   p->vib = q[10] & 1;  p->ksr = q[11] & 1;
-            p->con = q[12] & 1; p->wave = r[28 + o] & 3;
-        }
-        out[i].pitch = drums ? nr[2] : -1;
+        if (data + 30 * (size_t)i + 30 > n) break;
+        memcpy(out[i], b + data + 30 * i, 30);
+        if (i < used - 2) d_pack(out[i]);
+        if (pitch && names + 12 * (size_t)i + 12 <= n) pitch[i] = b[names + 12 * i + 2];
     }
     return 1;
 }
 
-/* ------------------------------------------------------------- the voices */
-
-static float wave(int shape, float phase)
+/* 0x1c35, 0x1cb4, and the values the driver's own memory starts with */
+static void d_init(void)
 {
-    phase -= floorf(phase);
-    float s = g_sine[(int)(phase * SINE_N) & (SINE_N - 1)];
-    switch (shape) {
-    case 1:  return s > 0.0f ? s : 0.0f;                       /* half sine */
-    case 2:  return fabsf(s);                                  /* rectified */
-    case 3:  return (phase < 0.25f || (phase >= 0.5f && phase < 0.75f)) ? fabsf(s) : 0.0f;
-    default: return s;
+    fmchip_reset();
+    memset(d_voice_note, 0, sizeof d_voice_note);
+    memset(d_level, 0, sizeof d_level);
+    memset(d_release, 0, sizeof d_release);
+    memset(d_a0, 0, sizeof d_a0);
+    memset(d_b0, 0, sizeof d_b0);
+    for (int v = 0; v < 9; v++) { d_voice_chan[v] = 0; d_voice_vel[v] = 0x7f; }
+    for (int c = 0; c < 16; c++) {
+        d_program[c] = 0; d_bend[c] = 0x40; d_bent[c] = 0; d_range[c] = 2; d_volume[c] = 0x7f;
     }
+    fmchip_write(0x01, 0x20);
+    for (int v = 0; v < 9; v++) fmchip_write(0xb0 + v, 0);
+    fmchip_write(0xbd, 0xc0);
 }
 
-/* the chip's key scaling: dB down, growing with pitch (rows of 3 dB/octave) */
-static float key_scale_db(int fnum, int block, int ksl)
+/* 0x1f9e */
+static void d_key_off(int v)
 {
-    static const int rom[16] = { 0, 32, 40, 45, 48, 51, 53, 55, 56, 58, 59, 60, 61, 62, 63, 64 };
-    static const int shift[4] = { 8, 1, 2, 0 };
-    int k = (rom[fnum >> 6] << 2) - ((8 - block) << 5);
-    if (k < 0) k = 0;
-    return (float)(k >> shift[ksl]) * 0.1875f;
+    if (!d_voice_note[v]) return;
+    d_b0[v] &= 0xdf;
+    fmchip_write(0xb0 + v, d_b0[v]);
+    d_voice_note[v] = 0;
 }
 
-static void op_start(oper *o, const op_patch *p, float freq, float extra_db)
+/* the level register of operator `op` for a voice's loudness (0xf6b, 0x237f) */
+static void d_write_level(int op, unsigned loud)
 {
-    /* the chip's own frequency number and octave, for its rate and key scaling */
-    int block = 0;
-    float fn = freq * 1048576.0f / 49716.0f;
-    while (fn >= 1024.0f && block < 7) { fn *= 0.5f; block++; }
-    int fnum = fn > 1023.0f ? 1023 : (int)fn;
-    int keycode = block * 2 + (fnum >> 9);
-    int ks = p->ksr ? keycode : keycode >> 2;
-
-    o->p = p;
-    o->phase = 0.0f;
-    o->step = freq * g_mult[p->mult] / (RATE * OVER);
-    o->base = (float)p->tl * 0.75f + key_scale_db(fnum, block, p->ksl) + extra_db;
-    o->out1 = o->out2 = 0.0f;
-
-    /* rates: 0..100% in 2.826 s (attack) / 39.28 s (decay, release) at rate
-       1, halving with every step, a quarter step per unit of rate scaling */
-    const float dt = 1.0f / (RATE * OVER);
-    int ra = p->ar ? p->ar * 4 + ks : 0, rd = p->dr ? p->dr * 4 + ks : 0, rl = p->rr ? p->rr * 4 + ks : 0;
-    if (ra > 63) ra = 63;
-    if (rd > 63) rd = 63;
-    if (rl > 63) rl = 63;
-    o->d_attack  = ra ? (ra >= 60 ? 1.0f : 1.0f - expf(-4.56f * dt / (2.826f * powf(2.0f, 1.0f - ra * 0.25f)))) : 0.0f;
-    o->d_decay   = rd ? 96.0f * dt / (39.28f * powf(2.0f, 1.0f - rd * 0.25f)) : 0.0f;
-    o->d_release = rl ? 96.0f * dt / (39.28f * powf(2.0f, 1.0f - rl * 0.25f)) : 0.0f;
-    o->att = 96.0f;
-    o->state = ENV_ATTACK;
+    unsigned t = d_soft[(loud & 0xff) >> 1];
+    unsigned level = (0x2000 - (0x40 - t) * 2 * (0x40 - (d_level[op] & 0x3fu))) >> 7;
+    fmchip_write(0x40 + op, (int)((level & 0xff) | (d_level[op] & 0xc0u)));
 }
 
-static float op_run(oper *o, float mod, float bend, float trem, float vib)
+static void d_voice_levels(int v, int chan_volume)
 {
-    const op_patch *p = o->p;
-    switch (o->state) {
-    case ENV_ATTACK:
-        o->att -= o->att * o->d_attack;
-        if (o->att < 0.2f) { o->att = 0.0f; o->state = ENV_DECAY; }
-        break;
-    case ENV_DECAY: {
-        float sl = p->sl == 15 ? 93.0f : (float)p->sl * 3.0f;
-        o->att += o->d_decay;
-        if (o->att >= sl) { o->att = sl; o->state = p->sustaining ? ENV_SUSTAIN : ENV_RELEASE; }
-        break;
+    unsigned loud = (unsigned)((chan_volume << 7) / 0x7f) * (unsigned)d_voice_vel[v] >> 7;
+    if (d_melodic[d_program[d_voice_chan[v]] & 127][0x0e] & 1) d_write_level(d_ops[v][0], loud);
+    d_write_level(d_ops[v][1], loud);
+}
+
+/* 0x201e */
+static void d_instrument(const uint8_t *r, int v)
+{
+    int m = d_ops[v][0], c = d_ops[v][1];
+    d_release[c] = r[0x13];
+    d_release[m] = r[0x06];
+    fmchip_write(0x20 + m, r[0x0b]);
+    fmchip_write(0x40 + m, r[0x02]);
+    d_level[m] = r[0x02];
+    fmchip_write(0x60 + m, r[0x05]);
+    fmchip_write(0x80 + m, r[0x06]);
+    fmchip_write(0xc0 + v, r[0x0e]);
+    fmchip_write(0xe0 + m, r[0x1c]);
+    fmchip_write(0x20 + c, r[0x18]);
+    d_level[c] = r[0x0f];
+    fmchip_write(0x60 + c, r[0x12]);
+    fmchip_write(0x80 + c, r[0x13]);
+    fmchip_write(0xe0 + c, r[0x1d]);
+}
+
+/* 0x1a7d: the frequency word of a voice's note under a pitch bend */
+static unsigned d_bend_word(unsigned bend, int note, int v)
+{
+    int range = d_range[d_voice_chan[v]];
+    if (note < 12 || note - range < 0 || note + range - 12 >= D_FREQS || range < 0 || range > 12)
+        return d_note_word(note);
+    unsigned f = d_note_word(note), d;
+    if (bend < 0x40) {
+        d = f - d_note_word(note - range);
+        if (d > 0x2cf) d = ((f & 0x3ff) - d_freq[D_BEND - 1 + range]) & 0x3ff;
+        f -= d * ((0x3f - bend) * 1000 >> 6) / 1000;
+    } else {
+        d = d_note_word(note + range) - f;
+        if (d > 0x2cf) {
+            f = ((f & 0x1c00) + 0x400) | d_freq[D_BEND + 11 - (note - 12) % 12];
+            d = d_note_word(note + range) - f;
+        }
+        f += d * ((bend - 0x40) * 1000 >> 6) / 1000;
     }
-    case ENV_RELEASE:
-        o->att += o->d_release;
-        if (o->att >= 96.0f) { o->att = 96.0f; o->state = ENV_OFF; }
+    return f;
+}
+
+/* 0x22e9 */
+static void d_frequency(int v, unsigned word)
+{
+    d_a0[v] = (uint8_t)word;
+    d_b0[v] = (uint8_t)(word >> 8) | 0x20;
+    fmchip_write(0xa0 + v, d_a0[v]);
+    fmchip_write(0xb0 + v, d_b0[v]);
+}
+
+/* 0xf6b */
+static void d_note_on(int chan, int note, int velocity)
+{
+    /* 0x1ed7 */
+    int v = -1;
+    for (int i = 0; i < 9 && v < 0; i++) if (!d_voice_note[i]) v = i;
+    for (int c = 0; c < 16 && v < 0; c++) {
+        if (d_bent[c]) continue;
+        for (int i = 0; i < 9 && v < 0; i++) if (d_voice_chan[i] == c) v = i;
+    }
+    if (v < 0) { d_dropped++; return; }
+
+    d_key_off(v);
+    d_voice_chan[v] = chan;
+    for (int i = 0; i < 5; i++) {
+        fmchip_write(0x80 + d_ops[v][1], d_release[d_ops[v][1]] | 0x0f);
+        fmchip_write(0x80 + d_ops[v][0], d_release[d_ops[v][0]] | 0x0f);
+    }
+    d_instrument(chan == 9 ? d_drum[note] : d_melodic[d_program[chan] & 127], v);
+    d_voice_vel[v] = velocity;
+    d_voice_levels(v, d_volume[chan]);
+
+    /* 0x2227 */
+    unsigned word = d_note_word(chan == 9 ? d_drum_pitch[note] : note);
+    d_a0[v] = (uint8_t)word;
+    d_b0[v] = (uint8_t)(word >> 8) | 0x20;
+    fmchip_write(0xa0 + v, d_a0[v]);
+    fmchip_write(0xb0 + v, d_b0[v] & 0xdf);
+    fmchip_write(0xb0 + v, d_b0[v]);
+    d_voice_note[v] = (uint8_t)note;
+
+    if (chan != 9 && d_bent[chan]) d_frequency(v, d_bend_word((unsigned)d_bend[chan], note, v));
+}
+
+/* 0x80d: one MIDI message */
+static void d_message(int status, int a, int b)
+{
+    int chan = status & 15;
+    a &= 127; b &= 127;
+    switch (status & 0xf0) {
+    case 0x90:
+        if (b) { d_note_on(chan, a, b); break; }
+        /* fall through */
+    case 0x80:                                              /* 0x157b */
+        for (int v = 0; v < 9; v++)
+            if (d_voice_note[v] == a && d_voice_chan[v] == chan) d_key_off(v);
+        break;
+    case 0xb0:                                              /* 0x1846 */
+        if (a == 7) {                                       /* 0x237f */
+            d_volume[chan] = b;
+            for (int v = 0; v < 9; v++)
+                if (d_voice_note[v] && d_voice_chan[v] == chan) d_voice_levels(v, b);
+        } else if (a == 0x66) {
+            d_range[chan] = b;
+        } else if (a == 0x79) {                             /* 0x174f */
+            d_volume[chan] = 0x7f;
+            if (chan < 9) d_voice_vel[chan] = 0x7f;
+            d_bend[chan] = 0x40;
+            d_range[chan] = 2;
+        } else if (a == 0x7b) {                             /* 0x16e9 */
+            for (int v = 0; v < 9; v++)
+                if (d_voice_chan[v] == chan) { d_key_off(v); d_voice_note[v] = 0; }
+        }
+        break;
+    case 0xc0: d_program[chan] = a; break;                  /* 0x17f9 */
+    case 0xe0:                                              /* 0x19bb: the high byte only */
+        if (chan == 9) break;
+        d_bend[chan] = b;
+        d_bent[chan] = 1;
+        for (int v = 0; v < 9; v++)
+            if (d_voice_note[v] && d_voice_chan[v] == chan)
+                d_frequency(v, d_bend_word((unsigned)b, d_voice_note[v], v));
         break;
     default: break;
     }
-    if (o->state == ENV_OFF) return 0.0f;
-    float db = o->base + o->att + (p->am ? trem : 0.0f);
-    float amp = db >= 96.0f ? 0.0f : g_amp[(int)(db * 8.0f)];
-    o->phase += o->step * bend * (p->vib ? vib : 1.0f);
-    if (o->phase >= 1.0f) o->phase -= 1.0f;
-    return wave(p->wave, o->phase + mod) * amp;
 }
 
-static float chan_gain_db(int chan, int velocity)
+/* ------------------------------------------------------------- the player */
+
+typedef struct {
+    const uint8_t *p, *end, *start;
+    long wait;
+    int  done, chan;
+} track;
+
+static int      g_banks, g_driver;
+static uint8_t *g_song;
+static long     g_song_len;
+static track    g_track[MAXTRACK];
+static int      g_ntrack, g_playing;
+static float    g_tick_rate = 120.0f, g_tick_acc;
+static float    g_volume = 0.6f;
+static int      g_master = 96;                      /* 0xd3a54: 0..127 */
+static uint8_t  g_chan_volume[16];                  /* 0x4018: controller 7 as the song last gave it */
+static long     g_rounds;
+
+/* 0xe2ca9: a message on its way to the driver */
+static void send(int status, int a, int b)
 {
-    float g = (float)velocity / 127.0f * (float)g_chan[chan].volume / 127.0f
-            * (float)g_chan[chan].expression / 127.0f;
-    if (g < 0.001f) return 96.0f;
-    return -20.0f * log10f(g);
+    if ((status & 0xf0) == 0xb0 && a == 7) {
+        g_chan_volume[status & 15] = (uint8_t)b;
+        b = (g_master * ((127 * b) >> 7)) >> 7;
+    }
+    d_message(status, a, b);
 }
 
-static void note_off(int chan, int note)
+/* 0xe37eb: a song's end, or its being stopped */
+static void song_reset(void)
 {
-    for (int v = 0; v < NVOICE; v++) {
-        fm_voice *vo = &g_voice[v];
-        if (vo->on && vo->held && vo->chan == chan && vo->note == note) {
-            vo->held = 0;
-            for (int o = 0; o < 2; o++)
-                if (vo->op[o].state != ENV_OFF) vo->op[o].state = ENV_RELEASE;
-        }
+    for (int i = 1; i < g_ntrack; i++) {
+        int c = g_track[i].chan & 15;
+        d_message(0xb0 | c, 0x7b, 0);
+        d_message(0xb0 | c, 0x79, 0);
+        d_message(0xe0 | c, 0x40, 0x40);
+        d_message(0xb0 | c, 7, 0);
     }
 }
-
-static void note_on(int chan, int note, int velocity)
-{
-    const patch *p = chan == 9 ? &g_drum[note & 127] : &g_melodic[g_chan[chan].program & 127];
-    int pitch = chan == 9 ? p->pitch : note;
-    if (pitch < 0) return;
-    note_off(chan, note);
-
-    /* a free voice, or else the oldest one that has been let go, or the oldest */
-    int pick = -1;
-    long best = 0;
-    for (int v = 0; v < NVOICE && pick < 0; v++) if (!g_voice[v].on) pick = v;
-    if (pick < 0) {
-        for (int v = 0; v < NVOICE; v++) {
-            long score = (g_age - g_voice[v].age) + (g_voice[v].held ? 0 : 1000000);
-            if (pick < 0 || score > best) { pick = v; best = score; }
-        }
-    }
-    fm_voice *vo = &g_voice[pick];
-    vo->on = 1; vo->held = 1; vo->chan = chan; vo->note = note; vo->age = g_age++;
-    vo->freq = 440.0f * powf(2.0f, ((float)pitch - 69.0f) / 12.0f);
-    float loud = chan_gain_db(chan, velocity);
-    int additive = p->op[0].con ^ g_flip_con;
-    op_start(&vo->op[0], &p->op[0], vo->freq, additive ? loud : 0.0f);
-    op_start(&vo->op[1], &p->op[1], vo->freq, loud);
-}
-
-static void all_off(void)
-{
-    memset(g_voice, 0, sizeof g_voice);
-    for (int c = 0; c < 16; c++) {
-        g_chan[c].program = 0; g_chan[c].volume = 100; g_chan[c].expression = 127;
-        g_chan[c].pan = 64; g_chan[c].bend = 1.0f;
-    }
-}
-
-/* ------------------------------------------------------------- the song */
 
 static long read_delay(track *t)
 {
@@ -280,7 +401,7 @@ static void song_rewind(void)
     }
 }
 
-static void track_event(track *t)
+static void track_event(track *t, int number)
 {
     if (t->p >= t->end) { t->done = 1; return; }
     int st = *t->p++;
@@ -293,23 +414,10 @@ static void track_event(track *t)
         return;
     }
     if (st < 0x80) { t->done = 1; return; }          /* not a message: give the track up */
-    int chan = st & 15, a = t->p < t->end ? *t->p++ : 0, b = 0;
+    int a = t->p < t->end ? *t->p++ : 0, b = 0;
     int kind = st & 0xf0;
     if (kind != 0xc0 && kind != 0xd0) b = t->p < t->end ? *t->p++ : 0;
-    switch (kind) {
-    case 0x80: note_off(chan, a); break;
-    case 0x90: if (b) note_on(chan, a, b); else note_off(chan, a); break;
-    case 0xb0:
-        if (a == 7) g_chan[chan].volume = b;
-        else if (a == 11) g_chan[chan].expression = b;
-        else if (a == 10) g_chan[chan].pan = b;
-        else if (a == 123 || a == 120)
-            for (int v = 0; v < NVOICE; v++) if (g_voice[v].chan == chan) note_off(chan, g_voice[v].note);
-        break;
-    case 0xc0: g_chan[chan].program = a; break;
-    case 0xe0: g_chan[chan].bend = powf(2.0f, ((float)((b << 7 | a) - 8192) / 8192.0f) * 2.0f / 12.0f); break;
-    default: break;
-    }
+    if (number) send(st, a, b);
 }
 
 static void song_tick(void)
@@ -318,42 +426,63 @@ static void song_tick(void)
     for (int i = 0; i < g_ntrack; i++) {
         track *t = &g_track[i];
         while (!t->done && t->wait <= 0) {
-            track_event(t);
+            track_event(t, i);
             if (!t->done) t->wait += read_delay(t);
         }
         if (!t->done) { t->wait--; alive = 1; }
     }
-    if (!alive) song_rewind();                        /* round again */
+    if (!alive) {                                    /* round again */
+        song_reset();
+        song_rewind();
+        g_rounds++;
+        if (getenv("OS_MUSICLOG"))
+            fprintf(stderr, "music: round the song %ld times, %ld notes without a voice\n", g_rounds, d_dropped);
+    }
 }
 
 /* ------------------------------------------------------------ interface */
 
 void music_stop(void)
 {
+    if (g_playing) song_reset();
     g_playing = 0;
-    all_off();
 }
 
+/* how loud the chip is in the mix: the port's own */
 void music_volume(float v) { g_volume = v; }
+
+/* the game's music volume, 1 = where the game starts it (0x6000 of 0x7fff) */
+void music_master(float m)
+{
+    int master = (int)(m * 96.0f + 0.5f);
+    if (master < 0) master = 0;
+    if (master > 127) master = 127;
+    if (master == g_master) return;
+    g_master = master;
+    if (!g_playing) return;
+    for (int i = 0; i < g_ntrack; i++) {             /* 0xe29d9 */
+        track *t = &g_track[i];
+        if (!t->done) send(0xb0 | (t->chan & 15), 7, g_chan_volume[t->chan & 15]);
+    }
+}
 
 /* `dir` holds MELODIC.BNK, DRUM.BNK and the songs; number = the n of MUSICn.HMP */
 int music_play(const char *dir, int number)
 {
     char file[700];
     music_stop();
-    if (!g_sine[SINE_N / 4]) {
-        for (int i = 0; i < SINE_N; i++) g_sine[i] = sinf((float)i * 6.2831853f / SINE_N);
-        for (int i = 0; i <= 96 * 8; i++) g_amp[i] = powf(10.0f, -(float)i / 160.0f);
-        for (int i = 1; i < 8; i++) g_fb[i] = 3.99f * powf(2.0f, (float)i - 9.0f);
-    }
-    g_flip_con = getenv("OS_MUSIC_CON") ? 1 : 0;
     if (!g_banks) {
         snprintf(file, sizeof file, "%s/MELODIC.BNK", dir);
-        int a = load_bank(file, g_melodic, 0);
+        int a = d_load_bank(file, d_melodic, NULL);
         snprintf(file, sizeof file, "%s/DRUM.BNK", dir);
-        int b = load_bank(file, g_drum, 1);
+        int b = d_load_bank(file, d_drum, d_drum_pitch);
         if (!a || !b) { fprintf(stderr, "music: no instrument banks in %s\n", dir); return 0; }
         g_banks = 1;
+    }
+    if (!g_driver) {
+        d_init();
+        memset(g_chan_volume, 0x7f, sizeof g_chan_volume);
+        g_driver = 1;
     }
     snprintf(file, sizeof file, "%s/MUSIC%d.HMP", dir, number);
     FILE *f = fopen(file, "rb");
@@ -382,11 +511,12 @@ int music_play(const char *dir, int number)
         track *t = &g_track[g_ntrack++];
         t->start = d + o + 12;
         t->end = d + o + len;
+        t->chan = d[o + 8];
         o += len;
     }
-    all_off();
     song_rewind();
     g_tick_acc = 0.0f;
+    g_rounds = 0;
     g_playing = g_ntrack > 0;
     return g_playing;
 }
@@ -395,46 +525,11 @@ int music_play(const char *dir, int number)
 void music_frame(float *left, float *right)
 {
     *left = *right = 0.0f;
-    if (!g_playing) return;
-
-    g_tick_acc += g_tick_rate / RATE;
-    while (g_tick_acc >= 1.0f) { g_tick_acc -= 1.0f; song_tick(); }
-
-    /* the chip's two slow wobbles: tremolo 3.7 Hz, 1 dB; vibrato 6.1 Hz, 7 cents */
-    g_lfo_am += 3.7f / RATE;   if (g_lfo_am >= 1.0f) g_lfo_am -= 1.0f;
-    g_lfo_vib += 6.1f / RATE;  if (g_lfo_vib >= 1.0f) g_lfo_vib -= 1.0f;
-    float tri = g_lfo_am < 0.5f ? g_lfo_am * 2.0f : 2.0f - g_lfo_am * 2.0f;
-    float trem = tri * 1.0f;
-    float vib = 1.0f + g_sine[(int)(g_lfo_vib * SINE_N) & (SINE_N - 1)] * 0.004f;
-
-    float l = 0.0f, r = 0.0f;
-    for (int v = 0; v < NVOICE; v++) {
-        fm_voice *vo = &g_voice[v];
-        if (!vo->on) continue;
-        oper *m = &vo->op[0], *c = &vo->op[1];
-        float bend = g_chan[vo->chan].bend;
-        int additive = m->p->con ^ g_flip_con;
-        float acc = 0.0f;
-        for (int k = 0; k < OVER; k++) {
-            /* feedback: the average of the operator's last two outputs, up to
-               +-2 turns of phase at the top setting; a full-scale modulator
-               swings the second operator's phase by +-4 turns */
-            float fb = (m->out1 + m->out2) * g_fb[m->p->fb];
-            float mo = op_run(m, fb, bend, trem, vib);
-            m->out2 = m->out1; m->out1 = mo;
-            if (additive) acc += mo + op_run(c, 0.0f, bend, trem, vib);
-            else          acc += op_run(c, mo * 3.99f, bend, trem, vib);
-        }
-        acc /= OVER;
-        if (c->state == ENV_OFF && (!additive || m->state == ENV_OFF)) { vo->on = 0; continue; }
-        float pan = ((float)g_chan[vo->chan].pan - 64.0f) / 64.0f;
-        l += acc * (pan > 0.0f ? 1.0f - pan : 1.0f);
-        r += acc * (pan < 0.0f ? 1.0f + pan : 1.0f);
+    if (!g_driver) return;
+    if (g_playing) {
+        g_tick_acc += g_tick_rate / RATE;
+        while (g_tick_acc >= 1.0f) { g_tick_acc -= 1.0f; song_tick(); }
     }
-    /* the half-wave shapes are lopsided: take the standing offset out */
-    static float dl, dr;
-    dl += (l - dl) * 0.002f;
-    dr += (r - dr) * 0.002f;
-    *left = (l - dl) * 5000.0f * g_volume;
-    *right = (r - dr) * 5000.0f * g_volume;
+    /* the chip rings on after a song is stopped, as it did */
+    *left = *right = fmchip_frame() * 2.6f * g_volume;
 }

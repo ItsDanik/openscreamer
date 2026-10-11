@@ -42,7 +42,10 @@ A MiSTer FPGA core built from this source is planned as `openscreamer_MiSTer`.
 - *Screamer* is by Graffiti (later Milestone), published by Virgin Interactive Entertainment.
   This project is not affiliated with them.
 - Written by Danik with Claude (Anthropic); the first day's groundwork with DeepSeek.
+- The music's FM chip is [Nuked OPL3](https://github.com/nukeykt/Nuked-OPL3) by Nuke.YKT
+  (`port/src/nuked/`, LGPL 2.1 or later).
 
 ## License
 
 GPL-3.0, see `LICENSE`. That covers this source only, not the game or its data.
+`port/src/nuked/` keeps its own licence (LGPL 2.1 or later), stated in its files.

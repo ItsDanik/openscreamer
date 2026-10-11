@@ -23,6 +23,8 @@ add_executable(openscreamer
   src/drive.c
   src/sound.c
   src/music.c
+  src/fmchip.c
+  src/nuked/opl3.c
   src/port.c
   src/controls.c
 )
