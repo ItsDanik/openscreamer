@@ -1499,6 +1499,12 @@ static void draw_object(const scene_object *so, int id, int pass,
                 if (mm->block[j].ox * mm->block[i].ox > 0.0f &&
                     fabsf(mm->block[j].oz - mm->block[i].oz) < 8.0f) covered |= 1u << j;
         }
+    static vtx q_seen[MESH_MAX_VERT];                 /* the quick way's corners in view space, and each block's turn and shift */
+    static unsigned q_seen_at[MESH_MAX_VERT], q_block_at[32], q_stamp;
+    static unsigned char q_out[MESH_MAX_VERT];
+    static float q_m[32][4][3];
+    const float q_side = FB_W * 0.5f / g_focal_x, q_top = g_cy / g_focal_y, q_bottom = ((float)g_vh - g_cy) / g_focal_y;
+    q_stamp++;
     /* a car's sines, once for all its faces */
     float pose_bpc = 1.0f, pose_bps = 0.0f, pose_brc = 1.0f, pose_brs = 0.0f;
     float pose_wcs = 1.0f, pose_wsn = 0.0f, pose_scs = 1.0f, pose_ssn = 0.0f;
@@ -1562,6 +1568,89 @@ static void draw_object(const scene_object *so, int id, int pass,
                disc with nothing behind it (Danik saw exactly that). */
             if (blk->flags & 0x800) { wcs = pose_wcs; wsn = pose_wsn; }
             if (blk->oz < 0.0f) { scs = pose_scs; ssn = pose_ssn; }
+        }
+
+        /*
+         * QUICKLY, for every face but a reflecting one: all that happens to a
+         * corner on its way to the view -- the wheel's turn, the body's lean,
+         * the object's tilt, heading and place, the camera -- is one turn and
+         * one shift for a whole block, found by sending four points through
+         * it; a corner is then nine multiplications, once however many faces
+         * share it, and the face is tested as the track's pieces' are.
+         */
+        const int bi = mm->face_block[fi];
+        if (!so->sprite && !(mat->type == 160 && blk->has_vnormal) && bi >= 0 && bi < 32) {
+            if (q_block_at[bi] != q_stamp) {
+                static const float unit[4][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+                float img[4][3];
+                for (int a = 0; a < 4; a++) {
+                    vec3 lv = { unit[a][0], unit[a][1], unit[a][2] };
+                    if (wheel) {
+                        float x = lv.x - blk->ox, y = lv.y - blk->oy, z = lv.z - blk->oz;
+                        float y2 = y * wcs - z * wsn, z2 = z * wcs + y * wsn;
+                        lv.x = blk->ox + x * scs + z2 * ssn;
+                        lv.y = blk->oy + y2;
+                        lv.z = blk->oz + z2 * scs - x * ssn;
+                    }
+                    if (body) {
+                        float y = lv.y * bpc - lv.z * bps, z = lv.z * bpc + lv.y * bps;
+                        float x = lv.x * brc - y * brs;
+                        lv.y = y * brc + lv.x * brs - so->pose->body_drop;
+                        lv.x = x; lv.z = z;
+                    }
+                    float wp[3];
+                    vtx o;
+                    place(so, c, sn, &lv, wp);
+                    to_view(wp, &o);
+                    img[a][0] = o.x; img[a][1] = o.y; img[a][2] = o.z;
+                }
+                for (int a = 0; a < 3; a++) {
+                    q_m[bi][a][0] = img[a + 1][0] - img[0][0];
+                    q_m[bi][a][1] = img[a + 1][1] - img[0][1];
+                    q_m[bi][a][2] = img[a + 1][2] - img[0][2];
+                    q_m[bi][3][a] = img[0][a];
+                }
+                q_block_at[bi] = q_stamp;
+            }
+            const float (*M)[3] = q_m[bi];
+            vtx in[4];
+            int ok = 1;
+            unsigned all = 0x3f, any = 0;
+            const float su = (float)mat->su * (1.0f / 256.0f), sv = (float)mat->sv * (1.0f / 256.0f);
+            for (int k = 0; k < nc; k++) {
+                const int vi = mm->idx[fi][k];
+                if (vi < 0 || vi >= MESH_MAX_VERT) { ok = 0; break; }
+                if (q_seen_at[vi] != q_stamp) {
+                    const vec3 *l = &mm->vert[vi];
+                    const float x = M[3][0] + l->x * M[0][0] + l->y * M[1][0] + l->z * M[2][0];
+                    const float y = M[3][1] + l->x * M[0][1] + l->y * M[1][1] + l->z * M[2][1];
+                    const float z = M[3][2] + l->x * M[0][2] + l->y * M[1][2] + l->z * M[2][2];
+                    q_seen[vi].x = x; q_seen[vi].y = y; q_seen[vi].z = z;
+                    q_out[vi] = (unsigned char)((z < NEAR_Z) | (g_far_z > 0.0f && z >= g_far_z) << 1 |
+                                                (x > z * q_side) << 2 | (x < -z * q_side) << 3 |
+                                                (y > z * q_top) << 4 | (y < -z * q_bottom) << 5);
+                    q_seen_at[vi] = q_stamp;
+                }
+                const vtx *v = &q_seen[vi];
+                in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
+                in[k].u = (float)mm->uv[vi][0] * su;
+                in[k].v = (float)mm->uv[vi][1] * sv;
+                all &= q_out[vi]; any |= q_out[vi];
+            }
+            if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
+            if (g_cull) {
+                /* turned away: its normal, turned as its block is, against the line from the eye */
+                const vec3 *nr = &mm->normal[fi];
+                if (nr->x != 0.0f || nr->y != 0.0f || nr->z != 0.0f) {
+                    const float nx = nr->x * M[0][0] + nr->y * M[1][0] + nr->z * M[2][0];
+                    const float ny = nr->x * M[0][1] + nr->y * M[1][1] + nr->z * M[2][1];
+                    const float nz = nr->x * M[0][2] + nr->y * M[1][2] + nr->z * M[2][2];
+                    if (in[0].x * nx + in[0].y * ny + in[0].z * nz < 0.0f) { g_flat_colour = -1; continue; }
+                }
+            }
+            draw_poly_view(in, nc, mat, id);
+            g_flat_colour = -1;
+            continue;
         }
 
         float p[4][3], uv[4][2];
