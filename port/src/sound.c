@@ -205,7 +205,27 @@ static void mix(int16_t *out, int frames)
 static void callback(void *user, Uint8 *stream, int len)
 {
     (void)user;
+#ifdef MISTER_HYBRID
+    /* MISTER: the core plays 44100 Hz, and SDL's own way of making that out of
+       22050 took an eighth of a processor.  The device is opened at 44100
+       and each frame mixed here goes out twice, half-way to the next one the
+       second time. */
+    static int16_t half[2048 * 2], last[2];
+    int16_t *out = (int16_t *)stream;
+    int frames = len / 8;
+    if (frames > 2048) frames = 2048;
+    mix(half, frames);
+    for (int i = 0; i < frames; i++) {
+        const int l = half[2 * i], r = half[2 * i + 1];
+        out[4 * i]     = (int16_t)((last[0] + l) / 2);
+        out[4 * i + 1] = (int16_t)((last[1] + r) / 2);
+        out[4 * i + 2] = (int16_t)l;
+        out[4 * i + 3] = (int16_t)r;
+        last[0] = (int16_t)l; last[1] = (int16_t)r;
+    }
+#else
     mix((int16_t *)stream, len / 4);
+#endif
 }
 
 static void lock(void)   { if (g_open) SDL_LockAudio(); }
@@ -252,10 +272,15 @@ int snd_init(const char *sound_dir, const char *list_file)
     }
     SDL_AudioSpec want;
     memset(&want, 0, sizeof want);
+#ifdef MISTER_HYBRID
+    want.freq = RATE_OUT * 2;               /* MISTER: see callback() */
+    want.samples = 1024;
+#else
     want.freq = RATE_OUT;
+    want.samples = 512;
+#endif
     want.format = AUDIO_S16SYS;
     want.channels = 2;
-    want.samples = 512;
     want.callback = callback;
     if (SDL_OpenAudio(&want, NULL) != 0) {
         fprintf(stderr, "sound: %s\n", SDL_GetError());

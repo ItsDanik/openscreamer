@@ -87,6 +87,8 @@ void mister_mark(int stage)
     g_mark_at = now;
 }
 long mister_pixels, mister_rows, mister_tris;
+static Uint64 g_wait_sum, g_wait_max;
+long mister_stat[4];
 
 void mister_frame_done(void)
 {
@@ -106,6 +108,11 @@ void mister_frame_done(void)
             const double f = 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames;
             printf("       of that: the game %.1f, sky and clearing %.1f, the scene worked out %.1f and its filling finished %.1f, the rest of the picture %.1f, to the screen %.1f ms\n",
                    (double)g_stage[0] * f, (double)g_stage[1] * f, (double)g_stage[2] * f, (double)g_stage[5] * f, (double)g_stage[3] * f, (double)g_stage[4] * f);
+            printf("       and handing it over, with the wait for the field: %.1f ms (the longest %.1f)\n", (double)g_wait_sum * f, (double)g_wait_max * f * (double)frames);
+            g_wait_sum = g_wait_max = 0;
+            printf("       triangles listed %ld a picture; when the last was listed the helper had filled %ld%% of the lanes (backdrop still unpainted in %ld pictures); idle turns of the main thread %ld\n", mister_stat[0] / frames, mister_stat[0] ? mister_stat[1] * 100 / 8 / mister_stat[0] : 0, mister_stat[2], mister_stat[3] / frames);
+            mister_stat[0] = mister_stat[1] = mister_stat[2] = mister_stat[3] = 0;
+            { extern Uint64 g_helper_time[2]; printf("       the helper: backdrop and clearing %.1f ms, filling %.1f ms a picture\n", (double)g_helper_time[0] * f, (double)g_helper_time[1] * f); g_helper_time[0] = g_helper_time[1] = 0; }
             for (int k = 0; k < 6; k++) g_stage[k] = 0;
         }
         mister_tris = mister_rows = mister_pixels = 0;
@@ -150,6 +157,8 @@ void mister_show(void *window, const void *pixels, int w, int h)
     mister_mark(4);
     SDL_UpdateWindowSurface(window);
     g_work_from = SDL_GetPerformanceCounter();
+    g_wait_sum += g_work_from - now;
+    if (g_work_from - now > g_wait_max) g_wait_max = g_work_from - now;
     g_mark_at = g_work_from;
 }
 

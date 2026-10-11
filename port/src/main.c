@@ -822,7 +822,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     raster_list(&j);
 }
 
-static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bit (y & 3) set = this caller fills row y */
+static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bit (y & 7) set = this caller fills row y */
 {
     const material *const m = j->m;
     const int id = j->id;
@@ -849,7 +849,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     {
         int r0 = fminy - 0.5f <= (float)miny ? miny : iceil(fminy - 0.5f);
         const int r1 = fmaxy - 0.5f >= (float)maxy ? maxy : ifloor(fmaxy - 0.5f);
-        while (r0 <= r1 && !(rows >> (r0 & 3) & 1)) r0++;
+        while (r0 <= r1 && !(rows >> (r0 & 7) & 1)) r0++;
         if (r0 > r1) return;
         const int c0 = fminx - 0.5f <= (float)minx ? minx : iceil(fminx - 0.5f);
         const int c1 = fmaxx - 0.5f >= (float)maxx ? maxx : ifloor(fmaxx - 0.5f);
@@ -909,7 +909,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     const int   plain = !glass && !fogged && flat < 0 && !wraps;
     const uint32_t *const pal = g_pal;
     for (int y = ys; y <= ye; y++) {
-        if (!(rows >> (y & 3) & 1)) continue;               /* another thread's row */
+        if (!(rows >> (y & 7) & 1)) continue;               /* another lane's row */
         const float py = (float)y + 0.5f;
         float xa = x0 + (py - y0) * s_long;
         float xb = py < y1 ? x0 + (py - y0) * s_up : x1 + (py - y1) * s_low;
@@ -1117,20 +1117,24 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
 static tri_job g_tri[TRI_LIST];
 static int     g_tri_n, g_tri_listing;
 /*
- * Two LANES, the even rows and the odd: each is the whole list filled in
- * order for its rows, sixty-four triangles at a time by whichever thread
- * takes it.  The helper starts on a triangle as soon as it is listed, going
- * from one lane to the other while this thread still works the scene out;
- * when this thread has listed them all it takes a lane too.  So the work is
- * shared out by itself, however busy the helper's processor is with other
- * things (on the MiSTer it has the audio and the MiSTer's own program).
+ * LANES: four, every fourth row of the picture each.  A lane is the whole
+ * list filled in order for its rows, by whichever thread has taken it for the
+ * next eight triangles (lane_work).  The helper starts on a triangle as
+ * soon as it is listed, while this thread still works the scene out; when
+ * this thread has listed them all it takes lanes too.  So the work is shared
+ * out by itself, however busy the helper's processor is with other things
+ * (on the MiSTer it has the audio and the copying of pictures to the core).
  */
-#define ROWS_ALL 0xf
+#define LANES    8
+Uint64 g_helper_time[2];                         /* the helper's time painting the backdrop, and filling */
+static int g_lanes = 4;                          /* how many are in use: OS_LANES (2, 3, 4 or 8) */
+static const unsigned char g_lane_rows[9][8] = { {0}, {0xff}, {0x55, 0xaa}, {0x49, 0x92, 0x24}, {0x11, 0x22, 0x44, 0x88}, {0}, {0}, {0}, {1, 2, 4, 8, 16, 32, 64, 128} };
+#define ROWS_ALL 0xff
 typedef struct {
     SDL_sem *wake, *done;
     const tri_job *list;
-    SDL_atomic_t listed, closed, busy, at[2];
-    SDL_SpinLock lane[2];
+    SDL_atomic_t listed, closed, busy, at[LANES];
+    SDL_SpinLock lane[LANES];
     SDL_Thread *thread;
     /* before any filling, the helper paints the backdrop and clears the
        depths (it has nothing else to do while the first triangles are being
@@ -1146,19 +1150,42 @@ static void frame_clear(float yaw, float pitch, float roll, const sky *s, float 
     for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = -1; }
 }
 
-/* some of a lane, if there is any to do and nobody is at it: 1 = did some */
-static int lane_work(tri_helper *h, int counted)
+/*
+ * Some of the lanes, if there is any to do: 1 = did some.  The lanes that are
+ * furthest behind AND at the same place in the list are taken together, up to
+ * `most` of them, and filled in one go (one set-up of a triangle for all of
+ * their rows): the helper alone takes all four and fills whole triangles;
+ * once both threads are at it each takes two, and one that runs out takes
+ * what the other lets go of between its turns.
+ */
+static int lane_work(tri_helper *h, int counted, int most)
 {
     const int n = SDL_AtomicGet(&h->listed);
-    int q = SDL_AtomicGet(&h->at[0]) <= SDL_AtomicGet(&h->at[1]) ? 0 : 1;      /* the one further behind first */
-    for (int tries = 0; tries < 2; tries++, q ^= 1) {
-        if (SDL_AtomicGet(&h->at[q]) >= n || !SDL_AtomicTryLock(&h->lane[q])) continue;
-        const int from = SDL_AtomicGet(&h->at[q]);
-        const int to = from + 64 < n ? from + 64 : n;
-        for (int i = from; i < to; i++) raster_job(&h->list[i], q ? 0xa : 0x5, counted);
-        SDL_AtomicSet(&h->at[q], to);
-        SDL_AtomicUnlock(&h->lane[q]);
-        if (to > from) return 1;
+    int least = n;
+    for (int k = 0; k < g_lanes; k++) {
+        const int at = SDL_AtomicGet(&h->at[k]);
+        if (at < least) least = at;
+    }
+    if (least >= n) return 0;
+    for (int pass = 0; pass < 2; pass++) {               /* first the ones furthest behind, then any */
+        int got[LANES], ngot = 0, from = -1;
+        unsigned rows = 0;
+        for (int k = 0; k < g_lanes && ngot < most; k++) {
+            const int at = SDL_AtomicGet(&h->at[k]);
+            if (at >= n || (pass == 0 ? at != least : (from >= 0 && at != from))) continue;
+            if (!SDL_AtomicTryLock(&h->lane[k])) continue;
+            const int now = SDL_AtomicGet(&h->at[k]);    /* (it may have moved before the lock was had) */
+            if (now >= n || (from >= 0 ? now != from : (pass == 0 && now != least))) { SDL_AtomicUnlock(&h->lane[k]); continue; }
+            from = now;
+            got[ngot++] = k;
+            rows |= g_lane_rows[g_lanes][k];
+        }
+        if (!ngot) continue;
+        const int some = 8;                              /* (short turns: when the other thread comes for lanes it does not wait long) */
+        const int to = from + some < n ? from + some : n;
+        for (int i = from; i < to; i++) raster_job(&h->list[i], (int)rows, counted);
+        for (int k = 0; k < ngot; k++) { SDL_AtomicSet(&h->at[got[k]], to); SDL_AtomicUnlock(&h->lane[got[k]]); }
+        return 1;
     }
     return 0;
 }
@@ -1166,7 +1193,9 @@ static int lane_work(tri_helper *h, int counted)
 static int lanes_done(tri_helper *h)
 {
     const int n = SDL_AtomicGet(&h->listed);
-    return SDL_AtomicGet(&h->closed) && SDL_AtomicGet(&h->at[0]) >= n && SDL_AtomicGet(&h->at[1]) >= n;
+    if (!SDL_AtomicGet(&h->closed)) return 0;
+    for (int k = 0; k < g_lanes; k++) if (SDL_AtomicGet(&h->at[k]) < n) return 0;
+    return 1;
 }
 
 static int tri_helper_run(void *arg)
@@ -1178,12 +1207,17 @@ static int tri_helper_run(void *arg)
     for (;;) {
         SDL_SemWait(h->wake);
         if (!SDL_AtomicGet(&h->busy)) continue;
+        Uint64 t0_ = SDL_GetPerformanceCounter();
         if (SDL_AtomicGet(&h->before) == 1) {
             frame_clear(h->yaw, h->pitch, h->roll, h->backdrop, h->focal_x, h->focal_y);
             SDL_AtomicSet(&h->before, 2);
         }
+        g_helper_time[0] += SDL_GetPerformanceCounter() - t0_;
         for (;;) {
-            if (lane_work(h, 0)) continue;
+            t0_ = SDL_GetPerformanceCounter();
+            const int did_ = lane_work(h, 0, SDL_AtomicGet(&h->closed) ? (g_lanes + 1) / 2 : g_lanes);
+            if (did_) { g_helper_time[1] += SDL_GetPerformanceCounter() - t0_; continue; }
+            if (0) continue;
             if (lanes_done(h)) break;
             if (SDL_AtomicGet(&h->closed)) SDL_CPUPauseInstruction();      /* the other thread is at the last of it */
             else SDL_SemWait(h->wake);                                     /* more will be listed */
@@ -1220,12 +1254,20 @@ static void raster_flush(void)
         return;
     }
     if (!SDL_AtomicGet(&h->busy)) return;                /* nothing was listed, nothing asked for */
+#ifdef MISTER_HYBRID
+    mister_stat[0] += g_tri_n; for (int k = 0; k < g_lanes; k++) mister_stat[1] += SDL_AtomicGet(&h->at[k]) * 8 / g_lanes;
+    mister_stat[2] += SDL_AtomicGet(&h->before) == 1;
+#endif
     SDL_AtomicSet(&h->listed, g_tri_n);
     SDL_AtomicSet(&h->closed, 1);
     SDL_SemPost(h->wake);
     while (SDL_AtomicGet(&h->before) == 1) SDL_CPUPauseInstruction();
     while (!lanes_done(h))
-        if (!lane_work(h, 1)) SDL_CPUPauseInstruction();
+        if (!lane_work(h, 1, (g_lanes + 1) / 2)) { SDL_CPUPauseInstruction();
+#ifdef MISTER_HYBRID
+            mister_stat[3]++;
+#endif
+        }
     SDL_SemWait(h->done);
     g_tri_n = 0;
 }
@@ -1241,8 +1283,7 @@ static void raster_list(const tri_job *j)
         h->list = g_tri;
         SDL_AtomicSet(&h->listed, 0);
         SDL_AtomicSet(&h->closed, 0);
-        SDL_AtomicSet(&h->at[0], 0);
-        SDL_AtomicSet(&h->at[1], 0);
+        for (int k = 0; k < LANES; k++) SDL_AtomicSet(&h->at[k], 0);
         SDL_AtomicSet(&h->before, 0);
         SDL_AtomicSet(&h->busy, 1);
         SDL_SemPost(h->wake);
@@ -1881,6 +1922,8 @@ static void render_frame(const camera *cam, const sky *s)
     }
     MISTER_MARK(0);
     {
+        const int want = getenv("OS_LANES") ? atoi(getenv("OS_LANES")) : 4;
+        g_lanes = (want == 2 || want == 3 || want == 8) ? want : 4;
         tri_helper *h = tri_helper_get();
         if (h && !SDL_AtomicGet(&h->busy)) {
             sky_ready(s);
@@ -1889,8 +1932,7 @@ static void render_frame(const camera *cam, const sky *s)
             h->list = g_tri;
             SDL_AtomicSet(&h->listed, 0);
             SDL_AtomicSet(&h->closed, 0);
-            SDL_AtomicSet(&h->at[0], 0);
-            SDL_AtomicSet(&h->at[1], 0);
+            for (int k = 0; k < LANES; k++) SDL_AtomicSet(&h->at[k], 0);
             SDL_AtomicSet(&h->before, 1);
             SDL_AtomicSet(&h->busy, 1);
             SDL_SemPost(h->wake);
