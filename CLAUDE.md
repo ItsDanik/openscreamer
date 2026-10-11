@@ -2416,6 +2416,23 @@ and 30 frames a second on every screen), one frame per field in Lores, music on 
 chip.  Known to need solving there: the port's state restore expects a dynamically linked
 SDL (section 29) and the framework's is static; the 50 Hz physics against 59.64 fields.
 
+**Where the MiSTer work stands (2026-10-11, evening).**  Nothing below is pushed.
+- `~/Hybrid_MiSTer`: host version 10 (the FM chip) is ONE LOCAL COMMIT, not pushed -- it
+  waits for Danik to hear it on a MiSTer.  FM volume: 32 = as the chip comes, 127 = x4.
+  Its simulation suite takes hours with the real chip in `tb_host` (hence the stand-in
+  `sim/jtopl2_stub.v`); its result was still awaited when this was written.
+- `~/MiSTer-ecwolf`: uncommitted -- music to the chip (`ecwolf/src/mister/mister.cpp`
+  `MiSTer_FM*`, hooks in `id_sd.cpp`), OSD option *FM Music: FPGA / Software* (status bit
+  34), `hybrid` checked out at the local commit.  Test build: `dist/ECWolf_20261011.zip`.
+  On the PC stand-in the two paths play the same notes at the same loudness (5 %).
+- `~/MiSTer-openscreamer`: stamped from the template (`hybrid/new_core.sh`), nothing
+  committed, no game in it yet.  Its first FPGA build missed timing by 0.062 ns on the
+  HDMI clock (the MiSTer system's, not ours): try another `SEED` in `core/OpenScreamer.qsf`
+  once the core has its real options.
+- Idea for the static SDL: rename the `.data` / `.bss` of the GAME's own objects (objcopy
+  `--rename-section`) so that the state save covers only those, by `__start_` / `__stop_`
+  symbols -- no dependence on how SDL is linked.
+
 ## Legal
 
 The game is **still sold on GOG and Steam** — it is not abandonware. Follow the Dethrace
