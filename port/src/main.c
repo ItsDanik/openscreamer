@@ -723,8 +723,8 @@ typedef uint32_t __attribute__((may_alias)) depth_bits;       /* a depth read as
 /*
  * A TRIANGLE TO FILL, with everything the filling needs to know about the
  * object it came from.  While a scene is drawn (render_frame) the triangles
- * are only listed, in order, and filled at the end by TWO threads, one the
- * even rows and one the odd (so that each has half of the work) -- the MiSTer has two processors and a
+ * are only listed, in order, and filled by TWO threads, each with rows of
+ * its own (see the list, below) -- the MiSTer has two processors and a
  * picture's time is mostly filling.  A row is filled by one thread only, in
  * the list's order, so the picture is the same as from one thread.
  */
@@ -737,7 +737,7 @@ typedef struct {
     float zbias;
 } tri_job;
 
-static void raster_job(const tri_job *j, int odd, int counted);
+static void raster_job(const tri_job *j, int rows, int counted);
 static void raster_list(const tri_job *j);
 
 static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
@@ -769,7 +769,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     raster_list(&j);
 }
 
-static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 every row, 0 the even ones, 1 the odd ones */
+static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bit (y & 3) set = this caller fills row y */
 {
     const material *const m = j->m;
     const int id = j->id;
@@ -796,7 +796,7 @@ static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 
     {
         int r0 = fminy - 0.5f <= (float)miny ? miny : iceil(fminy - 0.5f);
         const int r1 = fmaxy - 0.5f >= (float)maxy ? maxy : ifloor(fmaxy - 0.5f);
-        if (odd >= 0 && (r0 & 1) != odd) r0++;
+        while (r0 <= r1 && !(rows >> (r0 & 3) & 1)) r0++;
         if (r0 > r1) return;
         const int c0 = fminx - 0.5f <= (float)minx ? minx : iceil(fminx - 0.5f);
         const int c1 = fmaxx - 0.5f >= (float)maxx ? maxx : ifloor(fmaxx - 0.5f);
@@ -855,9 +855,8 @@ static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 
     const int   fogged = fog > 0.0f;
     const int   plain = !glass && !fogged && flat < 0 && !wraps;
     const uint32_t *const pal = g_pal;
-    const int ystep = odd < 0 ? 1 : 2;
-    if (odd >= 0 && (ys & 1) != odd) ys++;              /* this thread's rows */
-    for (int y = ys; y <= ye; y += ystep) {
+    for (int y = ys; y <= ye; y++) {
+        if (!(rows >> (y & 3) & 1)) continue;               /* another thread's row */
         const float py = (float)y + 0.5f;
         float xa = x0 + (py - y0) * s_long;
         float xb = py < y1 ? x0 + (py - y0) * s_up : x1 + (py - y1) * s_low;
@@ -1064,7 +1063,18 @@ static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 
 #define TRI_LIST 12288
 static tri_job g_tri[TRI_LIST];
 static int     g_tri_n, g_tri_listing;
-typedef struct { SDL_sem *go, *done; const tri_job *list; int n; SDL_Thread *thread; } tri_helper;
+/* The helper fills three rows of every four, and starts on a triangle as soon
+   as it is listed -- while this thread is still working the scene out; this
+   thread fills the fourth row when it has listed them all. */
+#define ROWS_MAIN   0x1
+#define ROWS_HELPER 0xe
+#define ROWS_ALL    0xf
+typedef struct {
+    SDL_sem *wake, *done;
+    const tri_job *list;
+    SDL_atomic_t listed, closed, busy;
+    SDL_Thread *thread;
+} tri_helper;
 
 static int tri_helper_run(void *arg)
 {
@@ -1073,39 +1083,66 @@ static int tri_helper_run(void *arg)
     mister_second_cpu();
 #endif
     for (;;) {
-        SDL_SemWait(h->go);
-        for (int i = 0; i < h->n; i++) raster_job(&h->list[i], 1, 0);
+        SDL_SemWait(h->wake);
+        if (!SDL_AtomicGet(&h->busy)) continue;
+        int at = 0;
+        for (;;) {
+            const int closed = SDL_AtomicGet(&h->closed), n = SDL_AtomicGet(&h->listed);
+            while (at < n) raster_job(&h->list[at++], ROWS_HELPER, 0);
+            if (closed) break;
+            SDL_SemWait(h->wake);
+        }
+        SDL_AtomicSet(&h->busy, 0);
         SDL_SemPost(h->done);
     }
     return 0;
 }
 
-static void raster_flush(void)
+static tri_helper *tri_helper_get(void)
 {
-    if (!g_tri_n) return;
     tri_helper *h = os_slot(3);
     if (!h && !getenv("OS_ONETHREAD")) {
         h = SDL_calloc(1, sizeof *h);                    /* (SDL's: not the port's memory, which a change of part frees) */
-        h->go = SDL_CreateSemaphore(0);
+        h->wake = SDL_CreateSemaphore(0);
         h->done = SDL_CreateSemaphore(0);
         h->thread = SDL_CreateThread(tri_helper_run, "filler", h);
-        if (!h->go || !h->done || !h->thread) { SDL_free(h); h = NULL; setenv("OS_ONETHREAD", "1", 1); }
+        if (!h->wake || !h->done || !h->thread) { SDL_free(h); h = NULL; setenv("OS_ONETHREAD", "1", 1); }
         os_slot_set(3, h);
     }
+    return h;
+}
+
+static void raster_flush(void)
+{
+    if (!g_tri_n) return;
+    tri_helper *h = tri_helper_get();
     if (h) {
-        h->list = g_tri; h->n = g_tri_n;
-        SDL_SemPost(h->go);
+        SDL_AtomicSet(&h->listed, g_tri_n);
+        SDL_AtomicSet(&h->closed, 1);
+        SDL_SemPost(h->wake);
     }
-    for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], h ? 0 : -1, 1);
+    for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], h ? ROWS_MAIN : ROWS_ALL, 1);
     if (h) SDL_SemWait(h->done);
     g_tri_n = 0;
 }
 
 static void raster_list(const tri_job *j)
 {
-    if (!g_tri_listing) { raster_job(j, -1, 1); return; }
+    if (!g_tri_listing) { raster_job(j, ROWS_ALL, 1); return; }
     if (g_tri_n == TRI_LIST) raster_flush();
     g_tri[g_tri_n++] = *j;
+    tri_helper *h = tri_helper_get();
+    if (!h) return;
+    if (g_tri_n == 1) {                                  /* the first of a list: the helper starts */
+        h->list = g_tri;
+        SDL_AtomicSet(&h->listed, 0);
+        SDL_AtomicSet(&h->closed, 0);
+        SDL_AtomicSet(&h->busy, 1);
+    }
+    if ((g_tri_n & 31) == 0 || g_tri_n == 1) {           /* and is told of more every 32 */
+        SDL_AtomicSet(&h->listed, g_tri_n);
+        SDL_SemPost(h->wake);
+    }
 }
 
 static void draw_poly_view(const vtx *in, int n, const material *m, int id);
