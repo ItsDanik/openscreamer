@@ -1,6 +1,10 @@
 # writes os_version.h (OS_VERSION) from tools/version.sh; run at every build,
 # and the file is only touched when the version has changed
-execute_process(COMMAND sh ${SRC}/../tools/version.sh OUTPUT_VARIABLE V OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(DEFINED ENV{OS_VERSION_IS})
+  set(V "$ENV{OS_VERSION_IS}")       # MISTER: worked out outside the build container, which has no git
+else()
+  execute_process(COMMAND sh ${SRC}/../tools/version.sh OUTPUT_VARIABLE V OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
 if(NOT V)
   set(V "unknown")
 endif()

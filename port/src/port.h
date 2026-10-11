@@ -59,6 +59,13 @@ int  os_once(int id);                   /* 1 the first time it is asked about `i
 void *os_slot(int id);                  /* a pointer that outlives the parts (window, renderer, texture) */
 void os_slot_set(int id, void *p);
 
+#ifdef MISTER_HYBRID
+/* MISTER: time is counted in the core's fields (mister.c) */
+#include <SDL.h>
+#include "mister.h"
+#define SDL_GetTicks() mister_ticks()
+#endif
+
 #ifndef OS_PORT_IMPL
 #define fopen(p, m)    os_fopen(p, m)
 #define malloc(n)      os_malloc(n)

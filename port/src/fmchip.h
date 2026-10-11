@@ -15,5 +15,10 @@ void fmchip_write(int reg, int value);
 /* one output frame at 22050 Hz of what the chip plays, on a 16-bit scale
    (one note at full level swings +-4085) */
 float fmchip_frame(void);
+/* for a chip that is not in software (MISTER): where in the block of audio
+   being made the next writes belong, in 44.1 kHz frames, and how loud the chip
+   is to be, 1 = as it comes.  Nothing to the software chip. */
+void fmchip_at(int frame);
+void fmchip_gain(float gain);
 
 #endif

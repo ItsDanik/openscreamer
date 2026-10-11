@@ -194,16 +194,32 @@ static SDL_Window *sys_window(SDL_Renderer **ren)
 {
     SDL_Window *win = os_slot(0);
     if (!win) {
+#ifdef MISTER_HYBRID
+        SDL_SetHint("SDL_MISTER_VSYNC", "1");            /* MISTER: a picture is shown once a field */
+#endif
         if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return NULL; }
         /* 4:3, as 320x200 was always meant to be shown; resizable, letterboxed */
+#ifdef MISTER_HYBRID
+        /* MISTER: the window is the core's screen, as big as the picture (its
+           size picks the video mode) */
+        win = SDL_CreateWindow("OpenScreamer", 0, 0, FB_W, FB_H, 0);
+#else
         win = SDL_CreateWindow("OpenScreamer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                960, 720, SDL_WINDOW_RESIZABLE);
+#endif
+#ifdef MISTER_HYBRID
+        SDL_Renderer *r = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE) : NULL;
+        if (!r) fprintf(stderr, "no picture: %s\n", SDL_GetError());
+#else
         SDL_Renderer *r = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC) : NULL;
+#endif
         SDL_RendererInfo info;
         if (r && SDL_GetRendererInfo(r, &info) == 0)
             printf("display: %s, vsync %s\n", info.name,
                    (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "on" : "NOT given by the driver");
+#ifndef MISTER_HYBRID
         if (r) SDL_RenderSetLogicalSize(r, 960, 720);
+#endif
         os_slot_set(0, win); os_slot_set(1, r);
     }
     if (ren) *ren = os_slot(1);
@@ -216,6 +232,13 @@ static SDL_Texture *sys_texture(int w, int h)
     int tw = 0, th = 0;
     if (tex) SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
     if (tex && (tw != w || th != h)) { SDL_DestroyTexture(tex); tex = NULL; }
+#ifdef MISTER_HYBRID
+    if (os_slot(0)) {                                   /* MISTER: the screen follows the picture's size */
+        int ww = 0, wh = 0;
+        SDL_GetWindowSize(os_slot(0), &ww, &wh);
+        if (ww != w || wh != h) SDL_SetWindowSize(os_slot(0), w, h);
+    }
+#endif
     if (!tex && os_slot(1))
         tex = SDL_CreateTexture(os_slot(1), SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
     os_slot_set(2, tex);
@@ -304,6 +327,9 @@ static void res_started(void)
 static void res_fail(const char *why)
 {
     fprintf(stderr, "high resolution: %s -- going back to low\n", why);
+#ifdef MISTER_HYBRID
+    setenv("OS_NOHIGH", "1", 1);                        /* MISTER: whatever the OSD says from now on */
+#endif
     g_cfg.res = 0; g_cfg.starting = 0;
     cfg_save();
     setenv("OS_RES", "low", 1);
@@ -320,6 +346,13 @@ static void res_init(void)
         for (int k = 0; k < 6; k++) key[k] = g_cfg_key[k];
         controls_init(key);
     }
+#ifdef MISTER_HYBRID
+    /* MISTER: the resolution is the core's OSD option, not the settings file's */
+    if (mister_on()) {
+        mister_hires_there(os_exists("build/dec/MAP1H/MAP1.UNR") && os_exists("build/dec/GAME/GAMEH.FNT"));
+        setenv("OS_RES", mister_res_high() && !getenv("OS_NOHIGH") ? "high" : "low", 1);
+    }
+#endif
     int hi = getenv("OS_RES") ? !strcmp(getenv("OS_RES"), "high") : g_cfg.res;
     if (hi && g_cfg.starting && !getenv("OS_RES"))
         res_fail("the last start in it did not get as far as a picture");
@@ -6010,6 +6043,9 @@ static void fps_draw(void)
     Uint32 now = SDL_GetTicks();
     frames++;
     if (now - since >= 500) { g_fps_shown = (int)((float)frames * 1000.0f / (float)(now - since) + 0.5f); frames = 0; since = now; }
+#ifdef MISTER_HYBRID
+    mister_frame_done();                               /* MISTER: OS_FPSLOG=1 writes the real speed to the log */
+#endif
     if (g_fps_on) tiny_number(g_fps_shown, 0);
 }
 
@@ -6907,7 +6943,11 @@ int main(int argc, char **argv)
             char **av = os_argv();
             os_next_done();
             int r = session(ac, av);
+#ifdef MISTER_HYBRID
+            if (!os_has_next()) return r ? r : mister_exit_code();
+#else
             if (!os_has_next()) return r;
+#endif
         }
         snd_close();
         os_state_restore();

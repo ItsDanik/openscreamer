@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <string.h>
 #include "controls.h"
+#ifdef MISTER_HYBRID
+#include "mister.h"
+#endif
 #include "port.h"
 
 static SDL_Scancode g_key[6][2];           /* each control's key, and its twin (the other Ctrl, the number pad) */
@@ -104,6 +107,9 @@ const char *controls_key_name(int i)
 
 static void pad_find(void)
 {
+#ifdef MISTER_HYBRID
+    mister_pad_mapping();                               /* MISTER: the core's joystick as a game controller */
+#endif
     if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER) && SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return;
     for (int i = 0; !g_pad && i < SDL_NumJoysticks(); i++)
         if (SDL_IsGameController(i)) g_pad = SDL_GameControllerOpen(i);
@@ -206,12 +212,20 @@ int controls_poll(SDL_Event *ev)
             case SDL_CONTROLLER_BUTTON_START: return as_key(ev, SDLK_RETURN);
             case SDL_CONTROLLER_BUTTON_BACK:  return as_key(ev, SDLK_ESCAPE);
             case SDL_CONTROLLER_BUTTON_Y:     if (!g_menu) return as_key(ev, SDLK_c); continue;
+            case SDL_CONTROLLER_BUTTON_X:     if (!g_menu) return as_key(ev, SDLK_m); continue;
             default: break;
             }
             if (!g_menu) continue;
             switch (ev->cbutton.button) {
+#ifdef MISTER_HYBRID
+            /* MISTER: in menus the OSD's Menu OK / Menu Back, which the core's
+               joystick has as two buttons of their own (mister.c) */
+            case SDL_CONTROLLER_BUTTON_LEFTSTICK:  return as_key(ev, SDLK_RETURN);
+            case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return as_key(ev, SDLK_ESCAPE);
+#else
             case SDL_CONTROLLER_BUTTON_A:          return as_key(ev, SDLK_RETURN);
             case SDL_CONTROLLER_BUTTON_B:          return as_key(ev, SDLK_ESCAPE);
+#endif
             case SDL_CONTROLLER_BUTTON_DPAD_UP:    return as_key(ev, SDLK_UP);
             case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return as_key(ev, SDLK_DOWN);
             case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return as_key(ev, SDLK_LEFT);

@@ -36,6 +36,7 @@
 void music_frame(float *left, float *right);   /* one output frame at RATE_OUT */
 int  music_play(const char *dir, int number);
 void music_stop(void);
+void fmchip_at(int frame);
 void music_volume(float v);                    /* the chip in the mix: the port's own */
 void music_master(float m);                    /* the game's music volume, 1 = as it starts */
 
@@ -189,6 +190,7 @@ static void mix(int16_t *out, int frames)
         zl[0] = g_lp_b1 * holdl - g_lp_a1 * accl + zl[1]; zl[1] = g_lp_b2 * holdl - g_lp_a2 * accl;
         zr[0] = g_lp_b1 * holdr - g_lp_a1 * accr + zr[1]; zr[1] = g_lp_b2 * holdr - g_lp_a2 * accr;
         float ml = 0.0f, mr = 0.0f;
+        fmchip_at(2 * i);
         music_frame(&ml, &mr);
         accl += ml; accr += mr;
         if (accl > 32767.0f) accl = 32767.0f;

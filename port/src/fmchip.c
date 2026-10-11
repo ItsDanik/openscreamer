@@ -13,12 +13,19 @@
 #include <stdint.h>
 #include "fmchip.h"
 #include "nuked/opl3.h"
+#ifdef MISTER_HYBRID
+#include "mister.h"
+#endif
 
 static opl3_chip g_chip;
 static int       g_ready;
+static int       g_core;      /* MISTER: the chip is the core's */
 
 void fmchip_reset(void)
 {
+#ifdef MISTER_HYBRID
+    g_core = mister_fm_start();
+#endif
     OPL3_Reset(&g_chip, 44100);
     g_ready = 1;
 }
@@ -26,14 +33,35 @@ void fmchip_reset(void)
 void fmchip_write(int reg, int value)
 {
     if (!g_ready) fmchip_reset();
+#ifdef MISTER_HYBRID
+    if (g_core) { mister_fm_write(reg, value); return; }
+#endif
     OPL3_WriteRegBuffered(&g_chip, (uint16_t)(reg & 0xff), (uint8_t)value);
 }
 
 float fmchip_frame(void)
 {
     int16_t a[2], b[2];
-    if (!g_ready) return 0.0f;
+    if (!g_ready || g_core) return 0.0f;
     OPL3_GenerateResampled(&g_chip, a);
     OPL3_GenerateResampled(&g_chip, b);
     return (float)(a[0] + b[0]) * 0.5f;
+}
+
+void fmchip_at(int frame)
+{
+#ifdef MISTER_HYBRID
+    mister_fm_at(frame);
+#else
+    (void)frame;
+#endif
+}
+
+void fmchip_gain(float gain)
+{
+#ifdef MISTER_HYBRID
+    mister_fm_gain(gain);
+#else
+    (void)gain;
+#endif
 }

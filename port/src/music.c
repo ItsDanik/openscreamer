@@ -449,7 +449,7 @@ void music_stop(void)
 }
 
 /* how loud the chip is in the mix: the port's own */
-void music_volume(float v) { g_volume = v; }
+void music_volume(float v) { g_volume = v; fmchip_gain(2.6f * v); }
 
 /* the game's music volume, 1 = where the game starts it (0x6000 of 0x7fff) */
 void music_master(float m)

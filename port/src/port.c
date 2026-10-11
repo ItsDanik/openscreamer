@@ -37,7 +37,18 @@ typedef struct {
 static keep *K;
 
 /* the program's own writable statics: GNU ld gives their ends these names */
+#ifdef OS_OWN_SECTIONS
+/* the build has put the port's own statics into sections of their own
+   (CMakeLists.txt): what is saved and put back is those and nothing of the
+   libraries linked in */
+extern char __start_osdata[], __stop_osdata[], __start_osbss[], __stop_osbss[];
+#define __data_start __start_osdata
+#define _edata       __stop_osdata
+#define __bss_start  __start_osbss
+#define _end         __stop_osbss
+#else
 extern char __data_start[], _edata[], __bss_start[], _end[];
+#endif
 
 static int is_dir(const char *p)
 {
