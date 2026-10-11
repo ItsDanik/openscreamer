@@ -41,6 +41,11 @@ if(MISTER_HYBRID)
   target_compile_definitions(os_objects PRIVATE MISTER_HYBRID=1 OS_OWN_SECTIONS=1)
   target_include_directories(os_objects PRIVATE ${SDL2_STATIC_INCLUDE_DIRS} ${CMAKE_CURRENT_BINARY_DIR})
   target_compile_options(os_objects PRIVATE ${SDL2_STATIC_CFLAGS_OTHER} -fno-common)
+  # the MiSTer's ARM: its own instruction set (not Thumb), and arithmetic
+  # without the checks nothing here relies on -- one picture in twenty
+  if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm")
+    target_compile_options(os_objects PRIVATE -O3 -marm -ffast-math)
+  endif()
   add_custom_command(OUTPUT os_own.o
     COMMAND ${CMAKE_LINKER} -r -o os_all.o $<TARGET_OBJECTS:os_objects>
     COMMAND ${CMAKE_OBJCOPY} --rename-section .data=osdata --rename-section .data.rel.local=osdata --rename-section .data.rel=osdata --rename-section .bss=osbss os_all.o os_own.o
