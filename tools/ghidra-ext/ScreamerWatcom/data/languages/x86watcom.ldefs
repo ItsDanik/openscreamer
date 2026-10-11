@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A distinct x86 variant so the Watcom compiler spec can be selected without
+  modifying the read-only Ghidra installation.  Reuses the stock x86 sleigh
+  language and processor spec; only the calling convention differs.
+-->
+<language_definitions>
+  <language processor="x86"
+            endian="little"
+            size="32"
+            variant="watcom"
+            version="4.7"
+            slafile="x86.sla"
+            processorspec="x86.pspec"
+            id="x86:LE:32:watcom">
+    <description>Intel/AMD 32-bit x86 (Watcom C/C++ register convention)</description>
+    <compiler name="Watcom" spec="x86watcom.cspec" id="watcom"/>
+    <external_name tool="gnu" name="i386:intel"/>
+    <external_name tool="IDA-PRO" name="metapc"/>
+  </language>
+</language_definitions>

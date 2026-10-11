@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Watcom C/C++ 32-bit (register) calling convention, as used by Watcom-compiled
+  DOS/4GW executables such as STARTL.EXE.
+
+  Integer/pointer arguments are passed in EAX, EDX, EBX, ECX in that order; any
+  further arguments go on the stack.  The return value comes back in EAX
+  (EDX:EAX for a 64-bit result, ST0 for floating point).  EAX, EDX, EBX and ECX
+  are all volatile; ESI, EDI, EBP are preserved by the callee.
+
+  The stack is cleaned by the caller, so extrapop is unknown.
+-->
+<compiler_spec>
+  <data_organization>
+	<absolute_max_alignment value="0" />
+	<machine_alignment value="8" />
+	<default_alignment value="1" />
+	<default_pointer_alignment value="4" />
+	<pointer_size value="4" />
+	<wchar_size value="2" />
+	<short_size value="2" />
+	<integer_size value="4" />
+	<long_size value="4" />
+	<long_long_size value="8" />
+	<float_size value="4" />
+	<double_size value="8" />
+	<long_double_size value="8" />
+	<size_alignment_map>
+		<entry size="1" alignment="1" />
+		<entry size="2" alignment="2" />
+		<entry size="4" alignment="4" />
+		<entry size="8" alignment="8" />
+	</size_alignment_map>
+	<bitfield_packing>
+		<use_MS_convention value="true"/>
+	</bitfield_packing>
+  </data_organization>
+
+  <global>
+    <range space="ram"/>
+    <register name="MXCSR"/>
+  </global>
+  <stackpointer register="ESP" space="ram"/>
+  <returnaddress>
+    <varnode space="stack" offset="0" size="4"/>
+  </returnaddress>
+
+  <default_proto>
+    <prototype name="__watcall" extrapop="unknown" stackshift="4">
+      <input>
+        <pentry minsize="1" maxsize="4"><register name="EAX"/></pentry>
+        <pentry minsize="1" maxsize="4"><register name="EDX"/></pentry>
+        <pentry minsize="1" maxsize="4"><register name="EBX"/></pentry>
+        <pentry minsize="1" maxsize="4"><register name="ECX"/></pentry>
+        <pentry minsize="1" maxsize="500" align="4">
+          <addr offset="4" space="stack"/>
+        </pentry>
+      </input>
+      <output killedbycall="true">
+        <pentry minsize="4" maxsize="10" metatype="float" extension="float">
+          <register name="ST0"/>
+        </pentry>
+        <pentry minsize="1" maxsize="4">
+          <register name="EAX"/>
+        </pentry>
+        <pentry minsize="5" maxsize="8">
+          <addr space="join" piece1="EDX" piece2="EAX"/>
+        </pentry>
+      </output>
+      <unaffected>
+        <varnode space="ram" offset="0" size="4"/>
+        <register name="ESP"/>
+        <register name="EBP"/>
+        <register name="ESI"/>
+        <register name="EDI"/>
+        <register name="DF"/>
+        <register name="FS_OFFSET"/>
+      </unaffected>
+      <killedbycall>
+        <register name="EAX"/>
+        <register name="EBX"/>
+        <register name="ECX"/>
+        <register name="EDX"/>
+        <register name="ST0"/>
+        <register name="ST1"/>
+      </killedbycall>
+    </prototype>
+  </default_proto>
+
+  <!-- Watcom can also emit cdecl for varargs / explicitly-declared functions -->
+  <prototype name="__cdecl" extrapop="4" stackshift="4">
+    <input>
+      <pentry minsize="1" maxsize="500" align="4">
+        <addr offset="4" space="stack"/>
+      </pentry>
+    </input>
+    <output killedbycall="true">
+      <pentry minsize="4" maxsize="10" metatype="float" extension="float">
+        <register name="ST0"/>
+      </pentry>
+      <pentry minsize="1" maxsize="4">
+        <register name="EAX"/>
+      </pentry>
+      <pentry minsize="5" maxsize="8">
+        <addr space="join" piece1="EDX" piece2="EAX"/>
+      </pentry>
+    </output>
+    <unaffected>
+      <varnode space="ram" offset="0" size="4"/>
+      <register name="ESP"/>
+      <register name="EBP"/>
+      <register name="ESI"/>
+      <register name="EDI"/>
+      <register name="EBX"/>
+      <register name="DF"/>
+      <register name="FS_OFFSET"/>
+    </unaffected>
+    <killedbycall>
+      <register name="ECX"/>
+      <register name="EDX"/>
+      <register name="ST0"/>
+      <register name="ST1"/>
+    </killedbycall>
+    <likelytrash>
+      <register name="ECX"/>
+    </likelytrash>
+  </prototype>
+</compiler_spec>

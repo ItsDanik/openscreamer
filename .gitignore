@@ -1,0 +1,18 @@
+# the game itself and everything made from it: never in the repository
+/screamer/
+/build/
+# builds
+/port/build/
+__pycache__/
+*.pyc
+# what the program writes when it is run from here: settings, saves, pictures
+/openscreamer.cfg
+/openscreamer.champ
+/openscreamer.records*
+/openscreamer.ghosts/
+/openscreamer.replays/
+*.ppm
+*.wav
+# Ghidra's project
+/openscreamer.gpr
+/openscreamer.rep/
