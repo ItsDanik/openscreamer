@@ -199,6 +199,14 @@ static jmp_buf *g_next_part;           /* where os_go() jumps back to: the loop 
 #define SDL_RenderPresent(r)              ((void)0)
 #endif
 
+/* MISTER: where a picture's time goes, for the log (mister.c).  0 the game's
+   own work is done, 1 sky and clearing, 2 the scene; then the rest (3). */
+#ifdef MISTER_HYBRID
+#define MISTER_MARK(k) mister_mark(k)
+#else
+#define MISTER_MARK(k) ((void)0)
+#endif
+
 static SDL_Window *sys_window(SDL_Renderer **ren)
 {
     SDL_Window *win = os_slot(0);
@@ -690,6 +698,22 @@ static uint32_t mix(uint32_t a, uint32_t b, float t)
  * old port's "the marking clips through the road" and "pieces switch sides in
  * the bend" were all sort errors).  At 320x200 a depth buffer costs nothing.
  */
+/* what raster_tri's rules of depth (they are explained there) say about a
+   pixel that is not clearly in front of what is there: 1 = draw it */
+static inline int depth_keep(float mine, float there, int other, int id, int cm, int sprite, int tie)
+{
+    const int co = other >= 0 ? g_obj_carpet[other] : 0;
+    if (sprite && other >= 0 && g_obj_ground[other]) return 1;
+    if (mine * 2.0f < there) return 0;
+    if (tie && other >= 0 && cm != co && there > 0.0f)
+        return !(cm ? mine < there * 2.0f : mine * 2.0f < there);
+    if (tie && other >= 0 && other != id && id >= 0 && there > 0.0f &&
+        mine > there * 0.9999f && mine < there * 1.0001f && g_obj_d2[id] != g_obj_d2[other])
+        return !(g_obj_d2[id] > g_obj_d2[other]);
+    return !(mine < there);
+}
+typedef uint32_t __attribute__((may_alias)) depth_bits;       /* a depth read as a whole number: the order is the same */
+
 static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                        const material *m, int id)
 {
@@ -711,6 +735,9 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     int maxx = fmaxx > FB_W - 1 ? FB_W - 1 : (int)ceilf(fmaxx);
     int maxy = fmaxy > g_vh - 1 ? g_vh - 1 : (int)ceilf(fmaxy);
 
+#ifdef MISTER_HYBRID
+    mister_tris++;
+#endif
     float ia = 1.0f / a->z, ib = 1.0f / b->z, ic = 1.0f / c->z;
     float inv = 1.0f / area;
     const int keyed = (m->type == 64);
@@ -759,6 +786,9 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     const int   flat = g_flat_colour, sprite = g_obj_sprite, tie = g_tie_rule;
     const int   cm = id >= 0 ? g_obj_carpet[id] : 0;
     const float fog = g_fog;
+    const int   fogged = fog > 0.0f;
+    const int   plain = !glass && !fogged && flat < 0 && !wraps;
+    const uint32_t *const pal = g_pal;
     for (int y = ys; y <= ye; y++) {
         const float py = (float)y + 0.5f;
         float xa = x0 + (py - y0) * s_long;
@@ -768,10 +798,57 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
         if (xs < minx) xs = minx;
         if (xe > maxx) xe = maxx;
         if (xs > xe) continue;
+#ifdef MISTER_HYBRID
+        mister_pixels += xe - xs + 1; mister_rows++;    /* MISTER: for the speed line of the log */
+#endif
         const float fx = (float)xs + 0.5f - ax, fy = py - ay;
         float iz = ia + fx * diz + fy * dizy;
         float uz = ua + fx * duz + fy * duzy, vz = va + fx * dvz + fy * dvzy;
-        for (int x = xs, pi = y * fbw + xs; x <= xe; x++, pi++, iz += diz, uz += duz, vz += dvz) {
+        /* the texture's place is worked out exactly every eighth pixel and
+           run in a straight line between (one division for eight pixels) */
+        float rz_ = 1.0f / iz;
+        float u_at = uz * rz_, v_at = vz * rz_;
+        for (int x = xs, pi = y * fbw + xs; x <= xe; ) {
+          int n_ = xe - x + 1;
+          if (n_ > 8) n_ = 8;
+          uz += duz * (float)n_; vz += dvz * (float)n_;
+          rz_ = 1.0f / (iz + diz * (float)n_);
+          const float u_to = uz * rz_, v_to = vz * rz_;
+          int ui = (int)(u_at * 65536.0f), vi = (int)(v_at * 65536.0f);
+          const int dui = (int)((u_to - u_at) * (65536.0f / (float)n_)), dvi = (int)((v_to - v_at) * (65536.0f / (float)n_));
+          u_at = u_to; v_at = v_to;
+          if (plain) {
+              /* The loop nearly every pixel goes through -- a texture, solid
+                 or with holes, nothing else going on -- with as little in it
+                 as can be: the depths are compared as whole numbers (twice a
+                 depth is its bits + 0x00800000), and only a pixel within a
+                 factor of two of what is there is put to the rules. */
+              uint32_t *const cp = fb + pi;
+              depth_bits *const zp = (depth_bits *)(zb + pi);
+              int16_t *const ip = idb + pi, *const xp = pxi + pi;
+              for (int k_ = 0; k_ < n_; k_++, iz += diz, ui += dui, vi += dvi) {
+                  union { float f; uint32_t u; } mz, tz;
+                  mz.f = iz * zbias;
+                  tz.u = zp[k_];
+                  if (mz.u <= tz.u + 0x00800000u && !depth_keep(mz.f, tz.f, ip[k_], id, cm, sprite, tie)) continue;
+                  int tu = ui >> 16, tv = vi >> 16;
+                  if ((tu | tv) & ~255) {
+                      tu = tu < 0 ? 0 : tu > 255 ? 255 : tu;
+                      tv = tv < 0 ? 0 : tv > 255 ? 255 : tv;
+                  }
+                  const long o = (long)tv * 256 + tu;
+                  if (o >= avail) continue;
+                  const unsigned idx = page[o];
+                  if (keyed && idx == 0) continue;
+                  cp[k_] = pal[idx];
+                  zp[k_] = mz.u;
+                  ip[k_] = (int16_t)id;
+                  xp[k_] = (int16_t)idx;
+              }
+              x += n_; pi += n_;
+              continue;
+          }
+          for (int k_ = 0; k_ < n_; k_++, x++, pi++, iz += diz, ui += dui, vi += dvi) {
             {
                 /*
                  * TWO OBJECTS IN THE SAME PLACE.  The engine has no depth
@@ -834,15 +911,14 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                     } else if (mine < there) continue;
                 }
             }
-            float rz = 1.0f / iz;
-            float u = uz * rz, v = vz * rz;
-            int tu, tv;
-            if (wraps) { tu = (int)floorf(u) & 255; tv = (int)floorf(v) & 255; }       /* reflections wrap */
-            else { tu = (int)u; tv = (int)v; }
-            if (tu < 0) tu = 0;
-            if (tu > 255) tu = 255;
-            if (tv < 0) tv = 0;
-            if (tv > 255) tv = 255;
+            int tu = ui >> 16, tv = vi >> 16;
+            if (wraps) { tu &= 255; tv &= 255; }                                       /* reflections wrap */
+            else {
+                if (tu < 0) tu = 0;
+                if (tu > 255) tu = 255;
+                if (tv < 0) tv = 0;
+                if (tv > 255) tv = 255;
+            }
             long o = (long)tv * 256 + tu;
             if (flat < 0 && o >= avail) continue;
             uint8_t idx = flat >= 0 ? (uint8_t)flat : page[o];
@@ -889,7 +965,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                 pxi[pi] = (int16_t)out;
                 continue;
             }
-            if (fog > 0.0f)
+            if (fogged)
                 col = mix(col, COL_FOG, 1.0f - expf(-1.0f / (iz * fog)));
             fb[pi]  = col;
             /* the depth that is KEPT is the biased one too.  Keeping the raw
@@ -898,7 +974,8 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                pillar painted over it) pass the test on a tie and overwrite. */
             zb[pi]  = iz * zbias;
             idb[pi] = (int16_t)id;
-            pxi[pi] = (fog > 0.0f) ? -1 : (int16_t)idx;
+            pxi[pi] = fogged ? -1 : (int16_t)idx;
+          }
         }
     }
 }
@@ -1014,12 +1091,32 @@ static void draw_object(const scene_object *so, int id, int pass,
     g_obj_sprite = so->sprite;
     g_env_phase = so->pose ? so->pose->env : 0;
     /* the camera's right and up, for the reflections */
-    const float crx = sinf(cam->yaw), cry = -cosf(cam->yaw);
-    const float cux = -cosf(cam->yaw) * sinf(cam->pitch), cuy = -sinf(cam->yaw) * sinf(cam->pitch),
-                cuz = cosf(cam->pitch);
     float dx = so->x - cam->x, dy = so->y - cam->y, dz = so->z - cam->z;
     float lim = g_drawdist + so->radius;
     if (dx*dx + dy*dy + dz*dz > lim * lim) return;
+    /* nothing of this object in this pass (the see-through faces are few):
+       found out once for each object, the first time it is near enough */
+    static unsigned char has[4096 + 160 + 8];       /* bit 0 known, 1 solid faces, 2 see-through ones */
+    const int piece = g_scene && so >= g_scene->obj && so < g_scene->obj + g_scene->count;
+    const int sorted = piece && id >= 0 && id < (int)sizeof has && mm;     /* (only the track's pieces: a car's number can go to another car) */
+    if (sorted) {
+        if (!has[id]) {
+            unsigned char h = 1;
+            for (int fi = 0; fi < mm->nface; fi++) {
+                int mi = mm->material[fi] / 16;
+                if (mm->ncorner[fi] < 3 || mi < 0 || mi >= g_nmat) continue;
+                if (!g_mat[mi].page && g_mat[mi].type != 128) continue;
+                h |= g_mat[mi].type == 224 ? 4 : 2;
+            }
+            has[id] = h;
+        }
+        if (!(has[id] & (pass == 1 ? 4 : 2))) {
+            if (pass == 1) return;
+            /* (pass 0 still notes the object's distance, below) */
+        }
+    }
+    const float crx = g_vs, cry = -g_vc;            /* the camera's right and up: view_setup() has the sines */
+    const float cux = -g_vc * g_vsp, cuy = -g_vs * g_vsp, cuz = g_vcp;
     if (id >= 0 && id < (int)(sizeof g_obj_d2 / sizeof g_obj_d2[0])) {
         g_obj_d2[id] = dx*dx + dy*dy + dz*dz;
         g_obj_carpet[id] = (unsigned char)(mm && mm->carpet);
@@ -1030,8 +1127,24 @@ static void draw_object(const scene_object *so, int id, int pass,
     vtx vc;
     to_view(centre, &vc);
     if (vc.z < -so->radius) return;
+    /* ...or all of it off to the side of the picture: the picture's furthest
+       corner is 1.61 times as far out as it is deep, whichever way it leans */
+    {
+        const float out = sqrtf(vc.x * vc.x + vc.y * vc.y) - so->radius, deep = vc.z + so->radius;
+        if (out > deep * 1.7f) return;
+    }
+    if (sorted && pass == 0 && !(has[id] & 2)) return;
 
-    float c = cosf(so->yaw), sn = sinf(so->yaw);
+    /* the pieces of the track do not turn: their sines are worked out once */
+    static const scene *known;
+    static float *piece_cos, *piece_sin;
+    if (known != g_scene && g_scene) {
+        known = g_scene;
+        piece_cos = malloc(sizeof(float) * (size_t)(g_scene->count + 1));
+        piece_sin = malloc(sizeof(float) * (size_t)(g_scene->count + 1));
+        for (int o = 0; o < g_scene->count; o++) { piece_cos[o] = cosf(g_scene->obj[o].yaw); piece_sin[o] = sinf(g_scene->obj[o].yaw); }
+    }
+    float c = piece ? piece_cos[so - g_scene->obj] : cosf(so->yaw), sn = piece ? piece_sin[so - g_scene->obj] : sinf(so->yaw);
     /*
      * WHEELS THE BODYWORK COVERS.  On AUTO06 (the Bullet) the body comes down
      * over the rear wheels, and its two rear tyre blocks carry flag 0x200 --
@@ -1229,8 +1342,10 @@ static void render_frame(const camera *cam, const sky *s)
         g_anim_clock = (int)(atof(getenv("OS_ANIMCLOCK")) * 65535.0);
         mesh_animate_all(g_anim_clock);
     }
+    MISTER_MARK(0);
     sky_paint(cam->yaw, cam->pitch, cam->roll, s, g_focal_x, g_focal_y);
     for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = -1; }
+    MISTER_MARK(1);
     view_setup(cam);
     if (!g_scene) return;
 
@@ -1247,6 +1362,7 @@ static void render_frame(const camera *cam, const sky *s)
                 draw_object(&g_car[k], g_scene->count + k, pass, cam);
     }
     if (g_show_edges) draw_guides();
+    MISTER_MARK(2);
 }
 
 /*
@@ -2741,8 +2857,32 @@ static int pkc_load(const char *file, int16_t *out)
 
 static void pkc_draw(const int16_t *pic)
 {
-    for (int i = 0; i < FB_W * FB_H; i++)
-        if (pic[i] >= 0) fb[i] = g_pal[pic[i]];
+    /* where a picture has pixels at all is found once (most of it is see-through) */
+    static struct { const int16_t *pic; int n; int *run; } known[6];
+    int k = 0;
+    while (k < 6 && known[k].pic && known[k].pic != pic) k++;
+    if (k == 6) {
+        for (int i = 0; i < FB_W * FB_H; i++)
+            if (pic[i] >= 0) fb[i] = g_pal[pic[i]];
+        return;
+    }
+    if (!known[k].pic) {
+        int n = 0;
+        for (int i = 0; i < FB_W * FB_H; i++)
+            if (pic[i] >= 0 && (i == 0 || pic[i - 1] < 0)) n++;
+        known[k].run = malloc(sizeof(int) * 2 * (size_t)(n + 1));
+        known[k].n = n; known[k].pic = pic;
+        n = 0;
+        for (int i = 0; i < FB_W * FB_H; i++)
+            if (pic[i] >= 0) {
+                if (i == 0 || pic[i - 1] < 0) { known[k].run[2 * n] = i; known[k].run[2 * n + 1] = 0; n++; }
+                known[k].run[2 * n - 1]++;
+            }
+    }
+    for (int r = 0; r < known[k].n; r++) {
+        const int at = known[k].run[2 * r], len = known[k].run[2 * r + 1];
+        for (int i = at; i < at + len; i++) fb[i] = g_pal[pic[i]];
+    }
 }
 
 static void cockpit_load(int model, int livery)
@@ -7472,6 +7612,9 @@ static int session(int argc, char **argv)
             if (vc_now++ == vc_frame) view_change(vc_view);
         }
         if (ddemo) dt = 1.0f / 50.0f;
+        /* OS_BENCH=1: time stands still -- the same picture (the grid) over and
+           over, for measuring how long a picture takes */
+        { static int bench = -1; if (bench < 0) bench = getenv("OS_BENCH") != NULL; if (bench) { dt = 0.0f; g_fade_in = 1.0f; } }
         if (demo) {
             dt = 1.0f / 60.0f;
             if (demo_frame == 0) new_mode = WALK;

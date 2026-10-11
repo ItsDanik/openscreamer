@@ -74,7 +74,16 @@ void mister_pad_mapping(void)
     }
 }
 
-static Uint64 g_work_from, g_work_sum;
+static Uint64 g_work_from, g_work_sum, g_mark_at, g_stage[5];
+
+/* the time since the last mark belongs to `stage` */
+void mister_mark(int stage)
+{
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (g_mark_at) g_stage[stage] += now - g_mark_at;
+    g_mark_at = now;
+}
+long mister_pixels, mister_rows, mister_tris;
 
 void mister_frame_done(void)
 {
@@ -86,9 +95,17 @@ void mister_frame_done(void)
     if (!frames) { field0 = field; g_work_sum = 0; }
     frames++;
     if (field - field0 >= 600) {
-        printf("speed: %.1f pictures a second (%d in %u fields), %.1f ms to make one\n",
+        printf("speed: %.1f pictures a second (%d in %u fields), %.1f ms to make one; %ld triangles, %ld rows, %ld pixels a picture\n",
                (double)(frames - 1) * 59.64 / (double)(field - field0), frames - 1, field - field0,
-               (double)g_work_sum * 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames);
+               (double)g_work_sum * 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames,
+               mister_tris / frames, mister_rows / frames, mister_pixels / frames);
+        {
+            const double f = 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames;
+            printf("       of that: the game %.1f, sky and clearing %.1f, the scene %.1f, the rest of the picture %.1f, to the screen %.1f ms\n",
+                   (double)g_stage[0] * f, (double)g_stage[1] * f, (double)g_stage[2] * f, (double)g_stage[3] * f, (double)g_stage[4] * f);
+            for (int k = 0; k < 5; k++) g_stage[k] = 0;
+        }
+        mister_tris = mister_rows = mister_pixels = 0;
         fflush(stdout);
         frames = 0;
     }
@@ -98,6 +115,7 @@ void mister_show(void *window, const void *pixels, int w, int h)
 {
     SDL_Surface *s = SDL_GetWindowSurface(window);
     if (!s) return;
+    mister_mark(3);
     if (s->format->format == SDL_PIXELFORMAT_RGB565 && s->w >= w && s->h >= h) {
         const uint32_t *src = pixels;
         for (int y = 0; y < h; y++) {
@@ -114,8 +132,10 @@ void mister_show(void *window, const void *pixels, int w, int h)
     /* what went before this is the making of the picture; the rest is the wait for the field */
     Uint64 now = SDL_GetPerformanceCounter();
     if (g_work_from) g_work_sum += now - g_work_from;
+    mister_mark(4);
     SDL_UpdateWindowSurface(window);
     g_work_from = SDL_GetPerformanceCounter();
+    g_mark_at = g_work_from;
 }
 
 void mister_hires_there(int there)

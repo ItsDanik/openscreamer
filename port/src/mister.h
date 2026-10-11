@@ -32,6 +32,8 @@ void     mister_pad_mapping(void);
 /* once a picture: with OS_FPSLOG=1, pictures a second and the time a picture
    took to make, every ten seconds */
 void     mister_frame_done(void);
+void     mister_mark(int stage);
+extern long mister_pixels, mister_rows, mister_tris;   /* counted by the rasteriser */
 /* the picture (32 bits a pixel) to the screen, at the next field */
 void     mister_show(void *window, const void *pixels, int w, int h);
 
