@@ -8,7 +8,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_compile_options(-Wall -Wextra -O2)
+# -fno-math-errno: sqrtf() and the like as the processor's own instruction
+add_compile_options(-Wall -Wextra -O2 -fno-math-errno)
 
 # SDL2 rather than SDL3: the MiSTer ARM toolchain and the hybrid-core
 # scaffolding are built around SDL2.

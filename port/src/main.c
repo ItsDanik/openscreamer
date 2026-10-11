@@ -698,6 +698,12 @@ static uint32_t mix(uint32_t a, uint32_t b, float t)
  * old port's "the marking clips through the road" and "pieces switch sides in
  * the bend" were all sort errors).  At 320x200 a depth buffer costs nothing.
  */
+/* floor and ceiling of a number known to be within a whole number's range,
+   without a call into the maths library (the ARM has no instruction for them,
+   and raster_tri wanted them twice a row) */
+static inline int ifloor(float x) { int i = (int)x; return i - (x < (float)i); }
+static inline int iceil(float x)  { int i = (int)x; return i + (x > (float)i); }
+
 /* what raster_tri's rules of depth (they are explained there) say about a
    pixel that is not clearly in front of what is there: 1 = draw it */
 static inline int depth_keep(float mine, float there, int other, int id, int cm, int sprite, int tie)
@@ -727,13 +733,17 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
     if (fabsf(area) < 1e-6f) return;
 
-    float fminx = fminf(ax, fminf(bx, cx)), fmaxx = fmaxf(ax, fmaxf(bx, cx));
-    float fminy = fminf(ay, fminf(by, cy)), fmaxy = fmaxf(ay, fmaxf(by, cy));
-    if (fmaxx < 0 || fminx > FB_W || fmaxy < 0 || fminy > FB_H) return;
-    int minx = fminx < 0 ? 0 : (int)floorf(fminx);
-    int miny = fminy < 0 ? 0 : (int)floorf(fminy);
-    int maxx = fmaxx > FB_W - 1 ? FB_W - 1 : (int)ceilf(fmaxx);
-    int maxy = fmaxy > g_vh - 1 ? g_vh - 1 : (int)ceilf(fmaxy);
+    float fminx = ax < bx ? ax : bx, fmaxx = ax > bx ? ax : bx;
+    float fminy = ay < by ? ay : by, fmaxy = ay > by ? ay : by;
+    if (cx < fminx) fminx = cx;
+    if (cx > fmaxx) fmaxx = cx;
+    if (cy < fminy) fminy = cy;
+    if (cy > fmaxy) fmaxy = cy;
+    if (!(fmaxx >= 0 && fminx <= FB_W && fmaxy >= 0 && fminy <= FB_H)) return;
+    int minx = fminx < 0 ? 0 : ifloor(fminx);
+    int miny = fminy < 0 ? 0 : ifloor(fminy);
+    int maxx = fmaxx > FB_W - 1 ? FB_W - 1 : iceil(fmaxx);
+    int maxy = fmaxy > g_vh - 1 ? g_vh - 1 : iceil(fmaxy);
 
 #ifdef MISTER_HYBRID
     mister_tris++;
@@ -779,9 +789,8 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     const float s_long = y2 > y0 ? (x2 - x0) / (y2 - y0) : 0.0f;
     const float s_up   = y1 > y0 ? (x1 - x0) / (y1 - y0) : 0.0f;
     const float s_low  = y2 > y1 ? (x2 - x1) / (y2 - y1) : 0.0f;
-    int ys = (int)ceilf(y0 - 0.5f), ye = (int)floorf(y2 - 0.5f);
-    if (ys < miny) ys = miny;
-    if (ye > maxy) ye = maxy;
+    int ys = y0 - 0.5f <= (float)miny ? miny : iceil(y0 - 0.5f);         /* (y0 is at most FB_H here) */
+    int ye = y2 - 0.5f >= (float)maxy ? maxy : ifloor(y2 - 0.5f);         /* (and y2 at least 0) */
     const int   wraps = (m->type == 160), fbw = FB_W;
     const int   flat = g_flat_colour, sprite = g_obj_sprite, tie = g_tie_rule;
     const int   cm = id >= 0 ? g_obj_carpet[id] : 0;
@@ -794,9 +803,9 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
         float xa = x0 + (py - y0) * s_long;
         float xb = py < y1 ? x0 + (py - y0) * s_up : x1 + (py - y1) * s_low;
         if (xa > xb) { t_ = xa; xa = xb; xb = t_; }
-        int xs = (int)ceilf(xa - 0.5f), xe = (int)floorf(xb - 0.5f);
-        if (xs < minx) xs = minx;
-        if (xe > maxx) xe = maxx;
+        xa -= 0.5f; xb -= 0.5f;
+        if (!(xa <= (float)maxx && xb >= (float)minx)) continue;
+        const int xs = xa <= (float)minx ? minx : iceil(xa), xe = xb >= (float)maxx ? maxx : ifloor(xb);
         if (xs > xe) continue;
 #ifdef MISTER_HYBRID
         mister_pixels += xe - xs + 1; mister_rows++;    /* MISTER: for the speed line of the log */
@@ -985,18 +994,27 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
  * (NOT thrown away when one corner is behind the camera -- the tile under the
  * car always has corners behind it), then fanned into triangles.
  */
+static void draw_poly_view(const vtx *in, int n, const material *m, int id);
+
 static void draw_poly(float w[][3], float uv[][2], int n,
                       const material *m, int id)
 {
-    vtx in[8], out[10];
+    vtx in[8];
     for (int k = 0; k < n; k++) {
         to_view(w[k], &in[k]);
         in[k].u = uv[k][0];
         in[k].v = uv[k][1];
     }
+    draw_poly_view(in, n, m, id);
+}
+
+/* the same from corners that are in view space already */
+static void draw_poly_view(const vtx *in, int n, const material *m, int id)
+{
+    vtx out[10];
     int no = 0;
     for (int k = 0; k < n; k++) {
-        const vtx *p = &in[k], *q = &in[(k + 1) % n];
+        const vtx *p = &in[k], *q = &in[k + 1 < n ? k + 1 : 0];
         int pin = p->z >= NEAR_Z, qin = q->z >= NEAR_Z;
         if (pin) out[no++] = *p;
         if (pin != qin) {
@@ -1014,7 +1032,7 @@ static void draw_poly(float w[][3], float uv[][2], int n,
         vtx cut[12];
         int nc = 0;
         for (int k = 0; k < no; k++) {
-            const vtx *p = &out[k], *q = &out[(k + 1) % no];
+            const vtx *p = &out[k], *q = &out[k + 1 < no ? k + 1 : 0];
             int pin = p->z < g_far_z, qin = q->z < g_far_z;
             if (pin) cut[nc++] = *p;
             if (pin != qin) {
@@ -1145,6 +1163,88 @@ static void draw_object(const scene_object *so, int id, int pass,
         for (int o = 0; o < g_scene->count; o++) { piece_cos[o] = cosf(g_scene->obj[o].yaw); piece_sin[o] = sinf(g_scene->obj[o].yaw); }
     }
     float c = piece ? piece_cos[so - g_scene->obj] : cosf(so->yaw), sn = piece ? piece_sin[so - g_scene->obj] : sinf(so->yaw);
+    /*
+     * THE TRACK'S PIECES, QUICKLY (2026-10-11, for the MiSTer: a triangle cost
+     * four microseconds before it was even filled).  A piece has no wheels,
+     * no suspension, no tilt and no reflections, so:
+     *  - a face turned away is dropped FIRST, by its normal and the eye's
+     *    place in the piece's own frame -- nothing of it is worked out;
+     *  - a corner goes from the piece's frame to the view in one step (three
+     *    rows of three numbers), once however many faces share it;
+     *  - a face wholly behind the eye, beyond the far plane or off one side
+     *    of the picture is dropped before it is cut and set up.
+     * Faces are drawn in the same order as below, to the same picture.
+     */
+    int plain_piece = !so->pose && !so->sprite && so->pitch == 0.0f && so->roll == 0.0f && mm->nvert <= MESH_MAX_VERT;
+    for (int i = 0; plain_piece && i < mm->nblock; i++) if (mm->block[i].has_vnormal) plain_piece = 0;
+    if (plain_piece) {
+        static vtx seen[MESH_MAX_VERT];
+        static unsigned seen_at[MESH_MAX_VERT], stamp;
+        float ax_[3][3];                                 /* where the piece's x, y (up) and z point, in view space */
+        const float dirs[3][3] = { { c, sn, 0.0f }, { 0.0f, 0.0f, 1.0f }, { -sn, c, 0.0f } };
+        for (int a = 0; a < 3; a++) {
+            const float fx = g_vc * dirs[a][0] + g_vs * dirs[a][1];
+            const float x = g_vs * dirs[a][0] - g_vc * dirs[a][1];
+            const float y = g_vcp * dirs[a][2] - g_vsp * fx;
+            ax_[a][0] = x * g_vcr + y * g_vsr;
+            ax_[a][1] = y * g_vcr - x * g_vsr;
+            ax_[a][2] = g_vsp * dirs[a][2] + g_vcp * fx;
+        }
+        const float ex_ = -dx * c - dy * sn, ez_ = dx * sn - dy * c, ey_ = -dz;     /* the eye, in the piece's frame */
+        const float side = FB_W * 0.5f / g_focal_x, top = g_cy / g_focal_y, bottom = ((float)g_vh - g_cy) / g_focal_y;
+        const float far_z = g_far_z;
+        const int   culling = g_cull;
+        stamp++;
+        for (int fi = 0; fi < mm->nface; fi++) {
+            const int nc = mm->ncorner[fi];
+            if (nc < 3) continue;
+            const int mi = mm->material[fi] / 16;
+            if (mi < 0 || mi >= g_nmat) continue;
+            const material *mat = &g_mat[mi];
+            g_flat_colour = -1;
+            if (!mat->page) {
+                if (mat->type != 128) continue;
+                g_flat_colour = mm->colour[fi] & 255;
+            }
+            if ((mat->type == 224) != (pass == 1)) continue;
+            const int v0 = mm->idx[fi][0];
+            if (v0 < 0) continue;
+            if (culling) {
+                const vec3 *nr = &mm->normal[fi], *l0 = &mm->vert[v0];
+                if ((nr->x != 0.0f || nr->y != 0.0f || nr->z != 0.0f) &&
+                    (l0->x - ex_) * nr->x + (l0->y - ey_) * nr->y + (l0->z - ez_) * nr->z < 0.0f) continue;
+            }
+            vtx in[4];
+            int ok = 1, behind = 1, beyond = far_z > 0.0f, cut = 0, l_ = 1, r_ = 1, t_ = 1, b_ = 1;
+            for (int k = 0; k < nc; k++) {
+                const int vi = mm->idx[fi][k];
+                if (vi < 0) { ok = 0; break; }
+                if (seen_at[vi] != stamp) {
+                    const vec3 *l = &mm->vert[vi];
+                    seen[vi].x = vc.x + l->x * ax_[0][0] + l->y * ax_[1][0] + l->z * ax_[2][0];
+                    seen[vi].y = vc.y + l->x * ax_[0][1] + l->y * ax_[1][1] + l->z * ax_[2][1];
+                    seen[vi].z = vc.z + l->x * ax_[0][2] + l->y * ax_[1][2] + l->z * ax_[2][2];
+                    seen_at[vi] = stamp;
+                }
+                const vtx *v = &seen[vi];
+                in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
+                in[k].u = (float)mm->uv[vi][0] * (float)mat->su / 256.0f;
+                in[k].v = (float)mm->uv[vi][1] * (float)mat->sv / 256.0f;
+                if (v->z >= NEAR_Z) behind = 0; else cut = 1;
+                if (v->z < far_z) beyond = 0;
+                if (v->x <= v->z * side) r_ = 0;
+                if (v->x >= -v->z * side) l_ = 0;
+                if (v->y <= v->z * top) t_ = 0;
+                if (v->y >= -v->z * bottom) b_ = 0;
+            }
+            if (!ok || behind || beyond) { g_flat_colour = -1; continue; }
+            if (!cut && (l_ || r_ || t_ || b_)) { g_flat_colour = -1; continue; }
+            draw_poly_view(in, nc, mat, id);
+            g_flat_colour = -1;
+        }
+        return;
+    }
+
     /*
      * WHEELS THE BODYWORK COVERS.  On AUTO06 (the Bullet) the body comes down
      * over the rear wheels, and its two rear tyre blocks carry flag 0x200 --
