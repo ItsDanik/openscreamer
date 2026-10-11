@@ -89,6 +89,12 @@ void mister_mark(int stage)
 long mister_pixels, mister_rows, mister_tris;
 static Uint64 g_wait_sum, g_wait_max;
 long mister_stat[4];
+static float g_last_work;
+
+float mister_last_work(void)
+{
+    return MH_IsOpen() ? g_last_work : 0.0f;
+}
 
 void mister_frame_done(void)
 {
@@ -153,7 +159,7 @@ void mister_show(void *window, const void *pixels, int w, int h)
     }
     /* what went before this is the making of the picture; the rest is the wait for the field */
     Uint64 now = SDL_GetPerformanceCounter();
-    if (g_work_from) g_work_sum += now - g_work_from;
+    if (g_work_from) { g_work_sum += now - g_work_from; g_last_work = (float)((double)(now - g_work_from) * 1000.0 / (double)SDL_GetPerformanceFrequency()); }
     mister_mark(4);
     SDL_UpdateWindowSurface(window);
     g_work_from = SDL_GetPerformanceCounter();

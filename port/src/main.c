@@ -761,9 +761,9 @@ static inline int iceil(float x)  { int i = (int)x; return i + (x > (float)i); }
    pixel that is not clearly in front of what is there: 1 = draw it */
 static inline int depth_keep(float mine, float there, int other, int id, int cm, int sprite, int tie)
 {
-    const int co = other >= 0 ? g_obj_carpet[other] : 0;
     if (sprite && other >= 0 && g_obj_ground[other]) return 1;
     if (mine * 2.0f < there) return 0;
+    const int co = other >= 0 ? g_obj_carpet[other] : 0;
     if (tie && other >= 0 && cm != co && there > 0.0f)
         return !(cm ? mine < there * 2.0f : mine * 2.0f < there);
     if (tie && other >= 0 && other != id && id >= 0 && there > 0.0f &&
@@ -1614,7 +1614,7 @@ static void draw_object(const scene_object *so, int id, int pass,
     static float q_prj[MESH_MAX_VERT][3];
     static float q_ref[MESH_MAX_VERT][2];             /* a reflecting corner's place in the reflected picture */
     static unsigned q_ref_at[MESH_MAX_VERT];
-    static float q_m[32][4][3];
+    static float q_m[32][4][3], q_eye[32][3];
     const float q_side = FB_W * 0.5f / g_focal_x, q_top = g_cy / g_focal_y, q_bottom = ((float)g_vh - g_cy) / g_focal_y;
     q_stamp++;
     /* a car's sines, once for all its faces */
@@ -1723,9 +1723,24 @@ static void draw_object(const scene_object *so, int id, int pass,
                     q_m[bi][a][2] = img[a + 1][2] - img[0][2];
                     q_m[bi][3][a] = img[0][a];
                 }
+                /* the eye's place in the block's own frame (the turn undone: its rows are at right angles) */
+                for (int a = 0; a < 3; a++)
+                    q_eye[bi][a] = -(q_m[bi][a][0] * q_m[bi][3][0] + q_m[bi][a][1] * q_m[bi][3][1] + q_m[bi][a][2] * q_m[bi][3][2]);
                 q_block_at[bi] = q_stamp;
             }
             const float (*M)[3] = q_m[bi];
+            if (g_cull) {
+                /* turned away: dropped before anything of it is worked out (half of a car's faces) */
+                const vec3 *nr = &mm->normal[fi];
+                const int v0 = mm->idx[fi][0];
+                if (v0 >= 0 && v0 < MESH_MAX_VERT && (nr->x != 0.0f || nr->y != 0.0f || nr->z != 0.0f)) {
+                    const vec3 *l0 = &mm->vert[v0];
+                    if ((l0->x - q_eye[bi][0]) * nr->x + (l0->y - q_eye[bi][1]) * nr->y + (l0->z - q_eye[bi][2]) * nr->z < 0.0f) {
+                        g_flat_colour = -1;
+                        continue;
+                    }
+                }
+            }
             vtx in[4];
             float prj[4][3];
             int ok = 1;
@@ -1782,16 +1797,6 @@ static void draw_object(const scene_object *so, int id, int pass,
                 }
             }
             if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
-            if (g_cull) {
-                /* turned away: its normal, turned as its block is, against the line from the eye */
-                const vec3 *nr = &mm->normal[fi];
-                if (nr->x != 0.0f || nr->y != 0.0f || nr->z != 0.0f) {
-                    const float nx = nr->x * M[0][0] + nr->y * M[1][0] + nr->z * M[2][0];
-                    const float ny = nr->x * M[0][1] + nr->y * M[1][1] + nr->z * M[2][1];
-                    const float nz = nr->x * M[0][2] + nr->y * M[1][2] + nr->z * M[2][2];
-                    if (in[0].x * nx + in[0].y * ny + in[0].z * nz < 0.0f) { g_flat_colour = -1; continue; }
-                }
-            }
             emit_face(in, prj, nc, any, mat, id);
             g_flat_colour = -1;
             continue;
@@ -1911,7 +1916,7 @@ static void draw_guides(void)
     }
 }
 
-static void render_frame(const camera *cam, const sky *s)
+static void render_scene(const camera *cam, const sky *s)
 {
     g_wheel_bias = !getenv("OS_NOWHEELBIAS");
     g_tie_rule = !getenv("OS_NOTIE");
@@ -1961,6 +1966,35 @@ static void render_frame(const camera *cam, const sky *s)
     g_tri_listing = 0;
     if (g_show_edges) draw_guides();
     MISTER_MARK(5);
+}
+
+static void render_frame(const camera *cam, const sky *s)
+{
+#ifdef MISTER_HYBRID
+    /*
+     * MISTER: HOW FAR IS DRAWN FOLLOWS THE TIME THERE IS.  A picture has one
+     * field, 16.7 ms; one that takes longer is shown a whole field late.  So
+     * when the last picture took nearly all of it the far plane (the game's
+     * DETAIL setting, section 30 of CLAUDE.md) comes a little nearer, and
+     * when there is time to spare it goes back out -- never nearer than the
+     * game's own MID and LOW, 27808, and never further than what is set.
+     * OS_FIXEDFAR=1 leaves it where it is set.
+     */
+    static float reach = 1.0f;
+    const float set = g_far_z;
+    if (set > 27808.0f && !getenv("OS_FIXEDFAR")) {
+        const float took = mister_last_work();
+        if (took > 14.6f) reach -= 0.02f;
+        else if (took > 0.0f && took < 13.4f) reach += 0.005f;
+        if (reach > 1.0f) reach = 1.0f;
+        if (reach * set < 27808.0f) reach = 27808.0f / set;
+        g_far_z = set * reach;
+    }
+    render_scene(cam, s);
+    g_far_z = set;
+#else
+    render_scene(cam, s);
+#endif
 }
 
 /*
