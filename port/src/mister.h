@@ -33,6 +33,7 @@ void     mister_pad_mapping(void);
    took to make, every ten seconds */
 void     mister_frame_done(void);
 void     mister_mark(int stage);
+void     mister_second_cpu(void);        /* the calling thread goes to the processor the game's main thread is not on */
 extern long mister_pixels, mister_rows, mister_tris;   /* counted by the rasteriser */
 /* the picture (32 bits a pixel) to the screen, at the next field */
 void     mister_show(void *window, const void *pixels, int w, int h);

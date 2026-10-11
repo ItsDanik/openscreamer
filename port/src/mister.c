@@ -142,3 +142,8 @@ void mister_hires_there(int there)
 {
     if (MH_IsOpen()) MH_SetMenuMask(there ? 0 : 1);
 }
+
+void mister_second_cpu(void)
+{
+    MH_PinThreadToCPU1();
+}

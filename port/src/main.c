@@ -720,15 +720,61 @@ static inline int depth_keep(float mine, float there, int other, int id, int cm,
 }
 typedef uint32_t __attribute__((may_alias)) depth_bits;       /* a depth read as a whole number: the order is the same */
 
+/*
+ * A TRIANGLE TO FILL, with everything the filling needs to know about the
+ * object it came from.  While a scene is drawn (render_frame) the triangles
+ * are only listed, in order, and filled at the end by TWO threads, one the
+ * even rows and one the odd (so that each has half of the work) -- the MiSTer has two processors and a
+ * picture's time is mostly filling.  A row is filled by one thread only, in
+ * the list's order, so the picture is the same as from one thread.
+ */
+typedef struct {
+    float ax, ay, bx, by, cx, cy;       /* the corners on the screen */
+    float ia, ib, ic;                   /* 1 / depth at each */
+    float au, av, bu, bv, cu, cv;       /* texture coordinates at each */
+    const material *m;
+    int   id, flat, sprite, tex_phase, env_phase;
+    float zbias;
+} tri_job;
+
+static void raster_job(const tri_job *j, int odd, int counted);
+static void raster_list(const tri_job *j);
+
 static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                        const material *m, int id)
 {
-    float ax = FB_W * 0.5f + a->x * g_focal_x / a->z;
-    float ay = g_cy - a->y * g_focal_y / a->z;
-    float bx = FB_W * 0.5f + b->x * g_focal_x / b->z;
-    float by = g_cy - b->y * g_focal_y / b->z;
-    float cx = FB_W * 0.5f + c->x * g_focal_x / c->z;
-    float cy = g_cy - c->y * g_focal_y / c->z;
+    tri_job j;
+    j.ia = 1.0f / a->z; j.ib = 1.0f / b->z; j.ic = 1.0f / c->z;
+    j.ax = FB_W * 0.5f + a->x * g_focal_x * j.ia;
+    j.ay = g_cy - a->y * g_focal_y * j.ia;
+    j.bx = FB_W * 0.5f + b->x * g_focal_x * j.ib;
+    j.by = g_cy - b->y * g_focal_y * j.ib;
+    j.cx = FB_W * 0.5f + c->x * g_focal_x * j.ic;
+    j.cy = g_cy - c->y * g_focal_y * j.ic;
+    {
+        /* nothing of it in the picture: not worth listing */
+        float lo = j.ax < j.bx ? j.ax : j.bx, hi = j.ax > j.bx ? j.ax : j.bx;
+        if (j.cx < lo) lo = j.cx;
+        if (j.cx > hi) hi = j.cx;
+        if (!(hi >= 0 && lo <= FB_W)) return;
+        lo = j.ay < j.by ? j.ay : j.by; hi = j.ay > j.by ? j.ay : j.by;
+        if (j.cy < lo) lo = j.cy;
+        if (j.cy > hi) hi = j.cy;
+        if (!(hi >= 0 && lo <= FB_H)) return;
+    }
+    j.au = a->u; j.av = a->v; j.bu = b->u; j.bv = b->v; j.cu = c->u; j.cv = c->v;
+    j.m = m; j.id = id;
+    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias;
+    j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
+    raster_list(&j);
+}
+
+static void raster_job(const tri_job *j, int odd, int counted)       /* odd: -1 every row, 0 the even ones, 1 the odd ones */
+{
+    const material *const m = j->m;
+    const int id = j->id;
+    (void)counted;
+    const float ax = j->ax, ay = j->ay, bx = j->bx, by = j->by, cx = j->cx, cy = j->cy;
 
     float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
     if (fabsf(area) < 1e-6f) return;
@@ -746,20 +792,20 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     int maxy = fmaxy > g_vh - 1 ? g_vh - 1 : iceil(fmaxy);
 
 #ifdef MISTER_HYBRID
-    mister_tris++;
+    if (counted) mister_tris++;
 #endif
-    float ia = 1.0f / a->z, ib = 1.0f / b->z, ic = 1.0f / c->z;
+    const float ia = j->ia, ib = j->ib, ic = j->ic;
     float inv = 1.0f / area;
     const int keyed = (m->type == 64);
     const int glass = (m->type == 224);
-    int fr = (m->type == 160) ? (m->levels * g_env_phase >> 16) : (m->levels * g_tex_phase >> 14);
+    int fr = (m->type == 160) ? (m->levels * j->env_phase >> 16) : (m->levels * j->tex_phase >> 14);
     if (fr < 0 || fr >= m->levels) fr = 0;
     const uint8_t *page = m->frame[fr];
     const long avail = m->frame_avail[fr];
     /* a decal is coplanar with what it is stuck on; let it win the tie */
     /* a reflection (routine 160) is the glass UNDER the bodywork's cut-out
        texture: it must lose every tie with the faces lying on it */
-    const float zbias = (keyed ? 1.002f : m->type == 160 ? 0.998f : 1.0f) * g_obj_zbias;
+    const float zbias = (keyed ? 1.002f : m->type == 160 ? 0.998f : 1.0f) * j->zbias;
 
     /*
      * The loop.  (2026-10-11, for the MiSTer's ARM, where it took over half of
@@ -773,8 +819,8 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
      *  - what the loop reads from the program's globals is read once.
      */
     const float e1x = bx - ax, e1y = by - ay, e2x = cx - ax, e2y = cy - ay;
-    const float ua = a->u * ia, ub = b->u * ib, uc = c->u * ic;
-    const float va = a->v * ia, vb = b->v * ib, vc = c->v * ic;
+    const float ua = j->au * ia, ub = j->bu * ib, uc = j->cu * ic;
+    const float va = j->av * ia, vb = j->bv * ib, vc = j->cv * ic;
 #define PLANE_(qa_, qb_, qc_, dx_, dy_) \
     const float dx_ = (((qb_) - (qa_)) * e2y - ((qc_) - (qa_)) * e1y) * inv, \
                 dy_ = (((qc_) - (qa_)) * e1x - ((qb_) - (qa_)) * e2x) * inv
@@ -792,13 +838,15 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     int ys = y0 - 0.5f <= (float)miny ? miny : iceil(y0 - 0.5f);         /* (y0 is at most FB_H here) */
     int ye = y2 - 0.5f >= (float)maxy ? maxy : ifloor(y2 - 0.5f);         /* (and y2 at least 0) */
     const int   wraps = (m->type == 160), fbw = FB_W;
-    const int   flat = g_flat_colour, sprite = g_obj_sprite, tie = g_tie_rule;
+    const int   flat = j->flat, sprite = j->sprite, tie = g_tie_rule;
     const int   cm = id >= 0 ? g_obj_carpet[id] : 0;
     const float fog = g_fog;
     const int   fogged = fog > 0.0f;
     const int   plain = !glass && !fogged && flat < 0 && !wraps;
     const uint32_t *const pal = g_pal;
-    for (int y = ys; y <= ye; y++) {
+    const int ystep = odd < 0 ? 1 : 2;
+    if (odd >= 0 && (ys & 1) != odd) ys++;              /* this thread's rows */
+    for (int y = ys; y <= ye; y += ystep) {
         const float py = (float)y + 0.5f;
         float xa = x0 + (py - y0) * s_long;
         float xb = py < y1 ? x0 + (py - y0) * s_up : x1 + (py - y1) * s_low;
@@ -808,7 +856,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
         const int xs = xa <= (float)minx ? minx : iceil(xa), xe = xb >= (float)maxx ? maxx : ifloor(xb);
         if (xs > xe) continue;
 #ifdef MISTER_HYBRID
-        mister_pixels += xe - xs + 1; mister_rows++;    /* MISTER: for the speed line of the log */
+        if (counted) { mister_pixels += xe - xs + 1; mister_rows++; }    /* MISTER: for the speed line of the log */
 #endif
         const float fx = (float)xs + 0.5f - ax, fy = py - ay;
         float iz = ia + fx * diz + fy * dizy;
@@ -820,11 +868,13 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
         for (int x = xs, pi = y * fbw + xs; x <= xe; ) {
           int n_ = xe - x + 1;
           if (n_ > 8) n_ = 8;
-          uz += duz * (float)n_; vz += dvz * (float)n_;
-          rz_ = 1.0f / (iz + diz * (float)n_);
+          static const float part[9] = { 0.0f, 65536.0f, 65536.0f / 2, 65536.0f / 3, 65536.0f / 4, 65536.0f / 5, 65536.0f / 6, 65536.0f / 7, 65536.0f / 8 };
+          const float fn_ = (float)n_;
+          uz += duz * fn_; vz += dvz * fn_;
+          rz_ = 1.0f / (iz + diz * fn_);
           const float u_to = uz * rz_, v_to = vz * rz_;
           int ui = (int)(u_at * 65536.0f), vi = (int)(v_at * 65536.0f);
-          const int dui = (int)((u_to - u_at) * (65536.0f / (float)n_)), dvi = (int)((v_to - v_at) * (65536.0f / (float)n_));
+          const int dui = (int)((u_to - u_at) * part[n_]), dvi = (int)((v_to - v_at) * part[n_]);
           u_at = u_to; v_at = v_to;
           if (plain) {
               /* The loop nearly every pixel goes through -- a texture, solid
@@ -994,6 +1044,59 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
  * (NOT thrown away when one corner is behind the camera -- the tile under the
  * car always has corners behind it), then fanned into triangles.
  */
+/*
+ * The list.  g_tri_listing is on from the start of a scene to its end
+ * (render_frame); a triangle from anywhere else is filled at once.  The
+ * helper thread and what it waits on outlive the parts of the program
+ * (os_slot 3): everything else here is put back with the rest.
+ */
+#define TRI_LIST 12288
+static tri_job g_tri[TRI_LIST];
+static int     g_tri_n, g_tri_listing;
+typedef struct { SDL_sem *go, *done; const tri_job *list; int n; SDL_Thread *thread; } tri_helper;
+
+static int tri_helper_run(void *arg)
+{
+    tri_helper *h = arg;
+#ifdef MISTER_HYBRID
+    mister_second_cpu();
+#endif
+    for (;;) {
+        SDL_SemWait(h->go);
+        for (int i = 0; i < h->n; i++) raster_job(&h->list[i], 1, 0);
+        SDL_SemPost(h->done);
+    }
+    return 0;
+}
+
+static void raster_flush(void)
+{
+    if (!g_tri_n) return;
+    tri_helper *h = os_slot(3);
+    if (!h && !getenv("OS_ONETHREAD")) {
+        h = SDL_calloc(1, sizeof *h);                    /* (SDL's: not the port's memory, which a change of part frees) */
+        h->go = SDL_CreateSemaphore(0);
+        h->done = SDL_CreateSemaphore(0);
+        h->thread = SDL_CreateThread(tri_helper_run, "filler", h);
+        if (!h->go || !h->done || !h->thread) { SDL_free(h); h = NULL; setenv("OS_ONETHREAD", "1", 1); }
+        os_slot_set(3, h);
+    }
+    if (h) {
+        h->list = g_tri; h->n = g_tri_n;
+        SDL_SemPost(h->go);
+    }
+    for (int i = 0; i < g_tri_n; i++) raster_job(&g_tri[i], h ? 0 : -1, 1);
+    if (h) SDL_SemWait(h->done);
+    g_tri_n = 0;
+}
+
+static void raster_list(const tri_job *j)
+{
+    if (!g_tri_listing) { raster_job(j, -1, 1); return; }
+    if (g_tri_n == TRI_LIST) raster_flush();
+    g_tri[g_tri_n++] = *j;
+}
+
 static void draw_poly_view(const vtx *in, int n, const material *m, int id);
 
 static void draw_poly(float w[][3], float uv[][2], int n,
@@ -1448,6 +1551,7 @@ static void render_frame(const camera *cam, const sky *s)
     MISTER_MARK(1);
     view_setup(cam);
     if (!g_scene) return;
+    g_tri_listing = 1;
 
     /* pass 0: everything solid; pass 1: the see-through materials on top */
     for (int pass = 0; pass < 2; pass++) {
@@ -1461,6 +1565,8 @@ static void render_frame(const camera *cam, const sky *s)
             if (&g_car[k] != g_hide)
                 draw_object(&g_car[k], g_scene->count + k, pass, cam);
     }
+    raster_flush();
+    g_tri_listing = 0;
     if (g_show_edges) draw_guides();
     MISTER_MARK(2);
 }
