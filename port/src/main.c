@@ -725,51 +725,53 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     const float zbias = (keyed ? 1.002f : m->type == 160 ? 0.998f : 1.0f) * g_obj_zbias;
 
     /*
-     * The loop, made quick (2026-10-09: hi-res ran at a third of low-res).
-     * The three weights are straight-line functions of x along a row, so
-     *  - the stretch of the row that is INSIDE the triangle is worked out
-     *    instead of testing every pixel of the bounding box (its two ends are
-     *    then settled with the very test the old loop used, so the same
-     *    pixels are drawn as before);
-     *  - 1/z and u/z, v/z are stepped from pixel to pixel instead of being
-     *    built from the weights each time, and one division serves both.
+     * The loop.  (2026-10-11, for the MiSTer's ARM, where it took over half of
+     * a picture's time: nothing is divided or tested per row any more.)
+     *  - 1/z, u/z and v/z are straight-line functions of the screen's x and y:
+     *    their two slopes are worked out once a triangle;
+     *  - the corners are put in order of height, and a row's stretch runs
+     *    between the long edge and whichever short edge is at that height.
+     *    A pixel is drawn when its centre is in the triangle, edges included,
+     *    as before;
+     *  - what the loop reads from the program's globals is read once.
      */
-#define INSIDE_AT(T_) ({ float px_ = (float)(minx + (T_)) + 0.5f; \
-        float wa_ = ((bx - px_) * (cy - py) - (cx - px_) * (by - py)) * inv; \
-        float wb_ = ((cx - px_) * (ay - py) - (ax - px_) * (cy - py)) * inv; \
-        (wa_ >= 0 && wb_ >= 0 && 1.0f - wa_ - wb_ >= 0); })
-    const float dwa = (by - cy) * inv, dwb = (cy - ay) * inv, dwc = -(dwa + dwb);
+    const float e1x = bx - ax, e1y = by - ay, e2x = cx - ax, e2y = cy - ay;
     const float ua = a->u * ia, ub = b->u * ib, uc = c->u * ic;
     const float va = a->v * ia, vb = b->v * ib, vc = c->v * ic;
-    const float diz = dwa * ia + dwb * ib + dwc * ic;
-    const float duz = dwa * ua + dwb * ub + dwc * uc, dvz = dwa * va + dwb * vb + dwc * vc;
-    const int   wraps = (m->type == 160), span = maxx - minx;
-    for (int y = miny; y <= maxy; y++) {
-        float py = y + 0.5f, px0 = (float)minx + 0.5f;
-        float wa0 = ((bx - px0) * (cy - py) - (cx - px0) * (by - py)) * inv;
-        float wb0 = ((cx - px0) * (ay - py) - (ax - px0) * (cy - py)) * inv;
-        float wc0 = 1.0f - wa0 - wb0;
-        float lo = 0.0f, hi = (float)span;
-        int none = 0;
-        const float w0[3] = { wa0, wb0, wc0 }, dw[3] = { dwa, dwb, dwc };
-        for (int e = 0; e < 3; e++) {
-            if (dw[e] > 0.0f)      { float t = -w0[e] / dw[e]; if (t > lo) lo = t; }
-            else if (dw[e] < 0.0f) { float t = w0[e] / -dw[e]; if (t < hi) hi = t; }
-            else if (w0[e] < 0.0f) none = 1;
-        }
-        if (none || lo > hi + 2.0f) continue;
-        int t0 = (int)floorf(lo) - 1, t1 = (int)ceilf(hi) + 1;
-        if (t0 < 0) t0 = 0;
-        if (t1 > span) t1 = span;
-        while (t0 <= t1 && !INSIDE_AT(t0)) t0++;
-        while (t1 >= t0 && !INSIDE_AT(t1)) t1--;
-        if (t0 > t1) continue;
-        float ft = (float)t0;
-        float wa = wa0 + dwa * ft, wb = wb0 + dwb * ft, wc = 1.0f - wa - wb;
-        float iz = wa * ia + wb * ib + wc * ic;
-        float uz = wa * ua + wb * ub + wc * uc, vz = wa * va + wb * vb + wc * vc;
-        for (int x = minx + t0; x <= minx + t1; x++, iz += diz, uz += duz, vz += dvz) {
-            int pi = y * FB_W + x;
+#define PLANE_(qa_, qb_, qc_, dx_, dy_) \
+    const float dx_ = (((qb_) - (qa_)) * e2y - ((qc_) - (qa_)) * e1y) * inv, \
+                dy_ = (((qc_) - (qa_)) * e1x - ((qb_) - (qa_)) * e2x) * inv
+    PLANE_(ia, ib, ic, diz, dizy);
+    PLANE_(ua, ub, uc, duz, duzy);
+    PLANE_(va, vb, vc, dvz, dvzy);
+#undef PLANE_
+    float x0 = ax, y0 = ay, x1 = bx, y1 = by, x2 = cx, y2 = cy, t_;
+    if (y1 < y0) { t_ = x0; x0 = x1; x1 = t_; t_ = y0; y0 = y1; y1 = t_; }
+    if (y2 < y0) { t_ = x0; x0 = x2; x2 = t_; t_ = y0; y0 = y2; y2 = t_; }
+    if (y2 < y1) { t_ = x1; x1 = x2; x2 = t_; t_ = y1; y1 = y2; y2 = t_; }
+    const float s_long = y2 > y0 ? (x2 - x0) / (y2 - y0) : 0.0f;
+    const float s_up   = y1 > y0 ? (x1 - x0) / (y1 - y0) : 0.0f;
+    const float s_low  = y2 > y1 ? (x2 - x1) / (y2 - y1) : 0.0f;
+    int ys = (int)ceilf(y0 - 0.5f), ye = (int)floorf(y2 - 0.5f);
+    if (ys < miny) ys = miny;
+    if (ye > maxy) ye = maxy;
+    const int   wraps = (m->type == 160), fbw = FB_W;
+    const int   flat = g_flat_colour, sprite = g_obj_sprite, tie = g_tie_rule;
+    const int   cm = id >= 0 ? g_obj_carpet[id] : 0;
+    const float fog = g_fog;
+    for (int y = ys; y <= ye; y++) {
+        const float py = (float)y + 0.5f;
+        float xa = x0 + (py - y0) * s_long;
+        float xb = py < y1 ? x0 + (py - y0) * s_up : x1 + (py - y1) * s_low;
+        if (xa > xb) { t_ = xa; xa = xb; xb = t_; }
+        int xs = (int)ceilf(xa - 0.5f), xe = (int)floorf(xb - 0.5f);
+        if (xs < minx) xs = minx;
+        if (xe > maxx) xe = maxx;
+        if (xs > xe) continue;
+        const float fx = (float)xs + 0.5f - ax, fy = py - ay;
+        float iz = ia + fx * diz + fy * dizy;
+        float uz = ua + fx * duz + fy * duzy, vz = va + fx * dvz + fy * dvzy;
+        for (int x = xs, pi = y * fbw + xs; x <= xe; x++, pi++, iz += diz, uz += duz, vz += dvz) {
             {
                 /*
                  * TWO OBJECTS IN THE SAME PLACE.  The engine has no depth
@@ -786,8 +788,6 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                  * object, the game's rule decides: the object whose own
                  * position is nearer the camera wins.
                  */
-                const float mine = iz * zbias, there = zb[pi];
-                const int other = idb[pi];
                 /*
                  * THE LAWN UNDER THE ROAD.  Every track has flat ground tiles
                  * named akk..tap.. (tappeto, carpet): big squares of grass
@@ -803,7 +803,6 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                  * above the tile BELOW it shows through -- the road, kerbs
                  * and rails laid on it -- and nothing further down does.
                  */
-                const int cm = id >= 0 ? g_obj_carpet[id] : 0, co = other >= 0 ? g_obj_carpet[other] : 0;
                 /*
                  * SMOKE IS NOT CUT OFF BY THE ROAD.  A puff is a rectangle
                  * 568 units high whose MIDDLE is at the car's own height
@@ -815,15 +814,25 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                  * a puff is never hidden by a piece of the drivable track;
                  * walls, scenery and cars still hide it.
                  */
-                if (g_obj_sprite && other >= 0 && g_obj_ground[other]) { }
-                else if (g_tie_rule && other >= 0 && cm != co && there > 0.0f) {
-                    if (cm ? mine < there * 2.0f : mine * 2.0f < there) continue;
-                } else
-                if (g_tie_rule && other >= 0 && other != id && id >= 0 && there > 0.0f &&
-                    mine > there * 0.9999f && mine < there * 1.0001f &&
-                    g_obj_d2[id] != g_obj_d2[other]) {
-                    if (g_obj_d2[id] > g_obj_d2[other]) continue;
-                } else if (mine < there) continue;
+                /* Most pixels are nowhere near what is there already -- more
+                   than twice as near, or more than twice as far -- and for
+                   those every rule above says the same as the plain test. */
+                const float mine = iz * zbias, there = zb[pi];
+                if (mine > there * 2.0f) { }
+                else {
+                    const int other = idb[pi];
+                    const int co = other >= 0 ? g_obj_carpet[other] : 0;
+                    if (sprite && other >= 0 && g_obj_ground[other]) { }
+                    else if (mine * 2.0f < there) continue;
+                    else if (tie && other >= 0 && cm != co && there > 0.0f) {
+                        if (cm ? mine < there * 2.0f : mine * 2.0f < there) continue;
+                    } else
+                    if (tie && other >= 0 && other != id && id >= 0 && there > 0.0f &&
+                        mine > there * 0.9999f && mine < there * 1.0001f &&
+                        g_obj_d2[id] != g_obj_d2[other]) {
+                        if (g_obj_d2[id] > g_obj_d2[other]) continue;
+                    } else if (mine < there) continue;
+                }
             }
             float rz = 1.0f / iz;
             float u = uz * rz, v = vz * rz;
@@ -835,8 +844,8 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
             if (tv < 0) tv = 0;
             if (tv > 255) tv = 255;
             long o = (long)tv * 256 + tu;
-            if (g_flat_colour < 0 && o >= avail) continue;
-            uint8_t idx = g_flat_colour >= 0 ? (uint8_t)g_flat_colour : page[o];
+            if (flat < 0 && o >= avail) continue;
+            uint8_t idx = flat >= 0 ? (uint8_t)flat : page[o];
             if (keyed && idx == 0) continue;       /* routine 64: 0 = nothing */
             uint32_t col = g_pal[idx];
             if (glass) {
@@ -880,8 +889,8 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                 pxi[pi] = (int16_t)out;
                 continue;
             }
-            if (g_fog > 0.0f)
-                col = mix(col, COL_FOG, 1.0f - expf(-1.0f / (iz * g_fog)));
+            if (fog > 0.0f)
+                col = mix(col, COL_FOG, 1.0f - expf(-1.0f / (iz * fog)));
             fb[pi]  = col;
             /* the depth that is KEPT is the biased one too.  Keeping the raw
                depth let a later face that was really behind (a tyre's black
@@ -889,7 +898,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
                pillar painted over it) pass the test on a tie and overwrite. */
             zb[pi]  = iz * zbias;
             idb[pi] = (int16_t)id;
-            pxi[pi] = (g_fog > 0.0f) ? -1 : (int16_t)idx;
+            pxi[pi] = (fog > 0.0f) ? -1 : (int16_t)idx;
         }
     }
 }
@@ -1494,18 +1503,44 @@ static int track_under(float x, float y, int want_height, float *out)
 {
     static const int cell[9][2] = { {0,0}, {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {-1,-1}, {1,-1}, {-1,1} };
     if (!g_scene) return 0;
+    /* the drivable pieces of each cell, in stored order, found once (the
+       search used to go through every piece of the track nine times) */
+    static const scene *known;
+    static int   cell_first[256 * 256 + 1];
+    static int  *cell_obj;
+    static float *obj_cos, *obj_sin;
+    if (known != g_scene) {
+        known = g_scene;
+        cell_obj = malloc(sizeof(int) * (size_t)(g_scene->count + 1));
+        obj_cos = malloc(sizeof(float) * (size_t)(g_scene->count + 1));
+        obj_sin = malloc(sizeof(float) * (size_t)(g_scene->count + 1));
+        memset(cell_first, 0, sizeof cell_first);
+        for (int pass = 0; pass < 2; pass++) {
+            for (int o = 0; o < g_scene->count; o++) {
+                const scene_object *so = &g_scene->obj[o];
+                if (so->layer != 0 || !so->m) continue;
+                int kx = ((int)so->x + 0x100000) >> 13, ky = ((int)so->y + 0x100000) >> 13;
+                if (kx < 0 || kx > 255 || ky < 0 || ky > 255) continue;
+                if (!pass) cell_first[ky * 256 + kx + 1]++;
+                else cell_obj[cell_first[ky * 256 + kx]++] = o;
+            }
+            if (!pass) for (int k = 0; k < 256 * 256; k++) cell_first[k + 1] += cell_first[k];
+            else { for (int k = 256 * 256; k > 0; k--) cell_first[k] = cell_first[k - 1]; cell_first[0] = 0; }
+        }
+        for (int o = 0; o < g_scene->count; o++) { obj_cos[o] = cosf(g_scene->obj[o].yaw); obj_sin[o] = sinf(g_scene->obj[o].yaw); }
+    }
     int cx = ((int)x + 0x100000) >> 13, cy = ((int)y + 0x100000) >> 13;
-    for (int ci = 0; ci < 9; ci++)
-        for (int o = 0; o < g_scene->count; o++) {
+    for (int ci = 0; ci < 9; ci++) {
+        int kx = cx + cell[ci][0], ky = cy + cell[ci][1];
+        if (kx < 0 || kx > 255 || ky < 0 || ky > 255) continue;
+        for (int at = cell_first[ky * 256 + kx]; at < cell_first[ky * 256 + kx + 1]; at++) {
+            int o = cell_obj[at];
             const scene_object *so = &g_scene->obj[o];
             const mesh *mm = so->m;
-            if (so->layer != 0 || !mm) continue;
-            if ((((int)so->x + 0x100000) >> 13) != cx + cell[ci][0]) continue;
-            if ((((int)so->y + 0x100000) >> 13) != cy + cell[ci][1]) continue;
             float dx = x - so->x, dy = y - so->y;
             float bx = dx - mm->bound_cx, by = dy - mm->bound_cz;
             if (bx * bx + by * by > mm->bound_r * mm->bound_r) continue;
-            float c = cosf(so->yaw), sn = sinf(so->yaw);
+            float c = obj_cos[o], sn = obj_sin[o];
             float lx = dx * c + dy * sn, lz = -dx * sn + dy * c;        /* into the piece's frame */
             for (int tries = 0; tries < 3; tries++, lx += 10.0f, lz += 10.0f)
                 for (int k = 0; k < mm->ncoll; k++) {
@@ -1535,6 +1570,7 @@ static int track_under(float x, float y, int want_height, float *out)
                     return 1;
                 }
         }
+    }
     return 0;
 }
 
