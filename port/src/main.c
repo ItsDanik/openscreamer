@@ -1318,6 +1318,39 @@ static void place(const scene_object *so, float c, float s, const vec3 *l,
     out[2] = so->z + t.y;
 }
 
+/*
+ * A face whose corners are in view space AND on the screen already (prj: x, y
+ * and 1/depth, worked out once a corner however many faces share it).  One
+ * that crosses the near or the far plane goes the long way, to be cut.  Of
+ * the rest, those with no pixel's centre in them are dropped here -- at a
+ * distance that is half of all there are -- and the others listed as they
+ * are, with no more dividing.
+ */
+static void emit_face(const vtx *in, float prj[][3], int nc, unsigned any, const material *m, int id)
+{
+    if (any & 3) { draw_poly_view(in, nc, m, id); return; }
+    float x0 = prj[0][0], x1 = x0, y0 = prj[0][1], y1 = y0;
+    for (int k = 1; k < nc; k++) {
+        if (prj[k][0] < x0) x0 = prj[k][0];
+        if (prj[k][0] > x1) x1 = prj[k][0];
+        if (prj[k][1] < y0) y0 = prj[k][1];
+        if (prj[k][1] > y1) y1 = prj[k][1];
+    }
+    if (!(x1 >= 0 && x0 <= FB_W && y1 >= 0 && y0 <= FB_H)) return;
+    if (x1 - x0 < 1.0f && iceil(x0 - 0.5f) > ifloor(x1 - 0.5f)) return;       /* between two columns of centres */
+    if (y1 - y0 < 1.0f && iceil(y0 - 0.5f) > ifloor(y1 - 0.5f)) return;       /* between two rows */
+    tri_job j;
+    j.m = m; j.id = id;
+    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias;
+    j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
+    j.ax = prj[0][0]; j.ay = prj[0][1]; j.ia = prj[0][2]; j.au = in[0].u; j.av = in[0].v;
+    for (int k = 1; k + 1 < nc; k++) {
+        j.bx = prj[k][0]; j.by = prj[k][1]; j.ib = prj[k][2]; j.bu = in[k].u; j.bv = in[k].v;
+        j.cx = prj[k + 1][0]; j.cy = prj[k + 1][1]; j.ic = prj[k + 1][2]; j.cu = in[k + 1].u; j.cv = in[k + 1].v;
+        raster_list(&j);
+    }
+}
+
 static int layer_wanted(const scene_object *so)
 {
     if (g_layer == 3) return 1;
@@ -1418,6 +1451,8 @@ static void draw_object(const scene_object *so, int id, int pass,
         static vtx seen[MESH_MAX_VERT];
         static unsigned seen_at[MESH_MAX_VERT], stamp;
         static unsigned char seen_out[MESH_MAX_VERT];    /* which sides of the picture the corner is outside of */
+        static float seen_prj[MESH_MAX_VERT][3];         /* where on the screen it is, and 1 / its depth */
+        const float half_w = FB_W * 0.5f;
         float ax_[3][3];                                 /* where the piece's x, y (up) and z point, in view space */
         const float dirs[3][3] = { { c, sn, 0.0f }, { 0.0f, 0.0f, 1.0f }, { -sn, c, 0.0f } };
         for (int a = 0; a < 3; a++) {
@@ -1453,6 +1488,7 @@ static void draw_object(const scene_object *so, int id, int pass,
                     (l0->x - ex_) * nr->x + (l0->y - ey_) * nr->y + (l0->z - ez_) * nr->z < 0.0f) continue;
             }
             vtx in[4];
+            float prj[4][3];
             int ok = 1;
             unsigned all = 0x3f, any = 0;                /* bits: 1 behind the eye, 2 beyond the far plane, 4 8 16 32 off a side */
             const float su = (float)mat->su * (1.0f / 256.0f), sv = (float)mat->sv * (1.0f / 256.0f);
@@ -1468,17 +1504,24 @@ static void draw_object(const scene_object *so, int id, int pass,
                     seen_out[vi] = (unsigned char)((z < NEAR_Z) | (far_z > 0.0f && z >= far_z) << 1 |
                                                    (x > z * side) << 2 | (x < -z * side) << 3 |
                                                    (y > z * top) << 4 | (y < -z * bottom) << 5);
+                    if (z >= NEAR_Z) {
+                        const float iz = 1.0f / z;
+                        seen_prj[vi][0] = half_w + x * g_focal_x * iz;
+                        seen_prj[vi][1] = g_cy - y * g_focal_y * iz;
+                        seen_prj[vi][2] = iz;
+                    }
                     seen_at[vi] = stamp;
                 }
                 const vtx *v = &seen[vi];
                 in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
                 in[k].u = (float)mm->uv[vi][0] * su;
                 in[k].v = (float)mm->uv[vi][1] * sv;
+                prj[k][0] = seen_prj[vi][0]; prj[k][1] = seen_prj[vi][1]; prj[k][2] = seen_prj[vi][2];
                 all &= seen_out[vi]; any |= seen_out[vi];
             }
             /* every corner behind the eye, or beyond the far plane; or none behind and all off one side */
             if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
-            draw_poly_view(in, nc, mat, id);
+            emit_face(in, prj, nc, any, mat, id);
             g_flat_colour = -1;
         }
         return;
@@ -1502,6 +1545,7 @@ static void draw_object(const scene_object *so, int id, int pass,
     static vtx q_seen[MESH_MAX_VERT];                 /* the quick way's corners in view space, and each block's turn and shift */
     static unsigned q_seen_at[MESH_MAX_VERT], q_block_at[32], q_stamp;
     static unsigned char q_out[MESH_MAX_VERT];
+    static float q_prj[MESH_MAX_VERT][3];
     static float q_m[32][4][3];
     const float q_side = FB_W * 0.5f / g_focal_x, q_top = g_cy / g_focal_y, q_bottom = ((float)g_vh - g_cy) / g_focal_y;
     q_stamp++;
@@ -1614,6 +1658,7 @@ static void draw_object(const scene_object *so, int id, int pass,
             }
             const float (*M)[3] = q_m[bi];
             vtx in[4];
+            float prj[4][3];
             int ok = 1;
             unsigned all = 0x3f, any = 0;
             const float su = (float)mat->su * (1.0f / 256.0f), sv = (float)mat->sv * (1.0f / 256.0f);
@@ -1629,12 +1674,19 @@ static void draw_object(const scene_object *so, int id, int pass,
                     q_out[vi] = (unsigned char)((z < NEAR_Z) | (g_far_z > 0.0f && z >= g_far_z) << 1 |
                                                 (x > z * q_side) << 2 | (x < -z * q_side) << 3 |
                                                 (y > z * q_top) << 4 | (y < -z * q_bottom) << 5);
+                    if (z >= NEAR_Z) {
+                        const float iz = 1.0f / z;
+                        q_prj[vi][0] = FB_W * 0.5f + x * g_focal_x * iz;
+                        q_prj[vi][1] = g_cy - y * g_focal_y * iz;
+                        q_prj[vi][2] = iz;
+                    }
                     q_seen_at[vi] = q_stamp;
                 }
                 const vtx *v = &q_seen[vi];
                 in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
                 in[k].u = (float)mm->uv[vi][0] * su;
                 in[k].v = (float)mm->uv[vi][1] * sv;
+                prj[k][0] = q_prj[vi][0]; prj[k][1] = q_prj[vi][1]; prj[k][2] = q_prj[vi][2];
                 all &= q_out[vi]; any |= q_out[vi];
             }
             if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
@@ -1648,7 +1700,7 @@ static void draw_object(const scene_object *so, int id, int pass,
                     if (in[0].x * nx + in[0].y * ny + in[0].z * nz < 0.0f) { g_flat_colour = -1; continue; }
                 }
             }
-            draw_poly_view(in, nc, mat, id);
+            emit_face(in, prj, nc, any, mat, id);
             g_flat_colour = -1;
             continue;
         }
