@@ -74,6 +74,8 @@ void mister_pad_mapping(void)
     }
 }
 
+static Uint64 g_work_from, g_work_sum;
+
 void mister_frame_done(void)
 {
     static uint32_t field0;
@@ -81,13 +83,39 @@ void mister_frame_done(void)
     if (on < 0) on = SDL_getenv("OS_FPSLOG") != NULL;
     if (!on || !MH_IsOpen()) return;
     uint32_t field = MH_FieldCounter();
-    if (!frames) field0 = field;
+    if (!frames) { field0 = field; g_work_sum = 0; }
     frames++;
     if (field - field0 >= 600) {
-        printf("speed: %.1f pictures a second (%d in %u fields)\n", (double)(frames - 1) * 59.64 / (double)(field - field0), frames - 1, field - field0);
+        printf("speed: %.1f pictures a second (%d in %u fields), %.1f ms to make one\n",
+               (double)(frames - 1) * 59.64 / (double)(field - field0), frames - 1, field - field0,
+               (double)g_work_sum * 1000.0 / (double)SDL_GetPerformanceFrequency() / (double)frames);
         fflush(stdout);
         frames = 0;
     }
+}
+
+void mister_show(void *window, const void *pixels, int w, int h)
+{
+    SDL_Surface *s = SDL_GetWindowSurface(window);
+    if (!s) return;
+    if (s->format->format == SDL_PIXELFORMAT_RGB565 && s->w >= w && s->h >= h) {
+        const uint32_t *src = pixels;
+        for (int y = 0; y < h; y++) {
+            uint16_t *dst = (uint16_t *)((uint8_t *)s->pixels + y * s->pitch);
+            for (int x = 0; x < w; x++) {
+                uint32_t p = *src++;
+                dst[x] = (uint16_t)(((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f));
+            }
+        }
+    } else {
+        SDL_ConvertPixels(w < s->w ? w : s->w, h < s->h ? h : s->h, SDL_PIXELFORMAT_ARGB8888, pixels, w * 4,
+                          s->format->format, s->pixels, s->pitch);
+    }
+    /* what went before this is the making of the picture; the rest is the wait for the field */
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (g_work_from) g_work_sum += now - g_work_from;
+    SDL_UpdateWindowSurface(window);
+    g_work_from = SDL_GetPerformanceCounter();
 }
 
 void mister_hires_there(int there)

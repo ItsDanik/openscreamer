@@ -29,8 +29,11 @@ void     mister_fm_gain(float gain);    /* 1 = the chip as it comes */
    Brake = B, Gear Up / Down = the shoulders, View = Y, Radar = X, Back, Start;
    the OSD's Menu OK / Menu Back arrive as the two stick buttons */
 void     mister_pad_mapping(void);
-/* once a picture: with OS_FPSLOG=1, pictures a second every ten seconds */
+/* once a picture: with OS_FPSLOG=1, pictures a second and the time a picture
+   took to make, every ten seconds */
 void     mister_frame_done(void);
+/* the picture (32 bits a pixel) to the screen, at the next field */
+void     mister_show(void *window, const void *pixels, int w, int h);
 
 /* what the process ends with: the launcher's contract */
 int      mister_exit_code(void);
