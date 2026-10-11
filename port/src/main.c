@@ -1571,6 +1571,8 @@ static void draw_object(const scene_object *so, int id, int pass,
     static unsigned q_seen_at[MESH_MAX_VERT], q_block_at[32], q_stamp;
     static unsigned char q_out[MESH_MAX_VERT];
     static float q_prj[MESH_MAX_VERT][3];
+    static float q_ref[MESH_MAX_VERT][2];             /* a reflecting corner's place in the reflected picture */
+    static unsigned q_ref_at[MESH_MAX_VERT];
     static float q_m[32][4][3];
     const float q_side = FB_W * 0.5f / g_focal_x, q_top = g_cy / g_focal_y, q_bottom = ((float)g_vh - g_cy) / g_focal_y;
     q_stamp++;
@@ -1648,7 +1650,8 @@ static void draw_object(const scene_object *so, int id, int pass,
          * share it, and the face is tested as the track's pieces' are.
          */
         const int bi = mm->face_block[fi];
-        if (!so->sprite && !(mat->type == 160 && blk->has_vnormal) && bi >= 0 && bi < 32) {
+        const int mirror = (mat->type == 160 && blk->has_vnormal);
+        if (!so->sprite && bi >= 0 && bi < 32) {
             if (q_block_at[bi] != q_stamp) {
                 static const float unit[4][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
                 float img[4][3];
@@ -1713,6 +1716,29 @@ static void draw_object(const scene_object *so, int id, int pass,
                 in[k].v = (float)mm->uv[vi][1] * sv;
                 prj[k][0] = q_prj[vi][0]; prj[k][1] = q_prj[vi][1]; prj[k][2] = q_prj[vi][2];
                 all &= q_out[vi]; any |= q_out[vi];
+                if (mirror) {
+                    /* A reflecting face (routine 160, see the long way below):
+                       the same sum in view space, where the eye is at the
+                       origin -- the corner's normal is turned as its block
+                       is, and the reflected line read along the camera's
+                       right and up before its lean.  Once a corner. */
+                    if (q_ref_at[vi] != q_stamp) {
+                        const vec3 *nv = &mm->vnormal[vi];
+                        const float nx = nv->x * M[0][0] + nv->y * M[1][0] + nv->z * M[2][0];
+                        const float ny = nv->x * M[0][1] + nv->y * M[1][1] + nv->z * M[2][1];
+                        const float nz = nv->x * M[0][2] + nv->y * M[1][2] + nv->z * M[2][2];
+                        float el = sqrtf(v->x * v->x + v->y * v->y + v->z * v->z);
+                        if (el < 1.0f) el = 1.0f;
+                        const float ex = v->x / el, ey = v->y / el, ez = v->z / el;
+                        const float d2 = 2.0f * (ex * nx + ey * ny + ez * nz);
+                        const float rx = d2 * nx - ex, ry = d2 * ny - ey;
+                        q_ref[vi][0] = rx * g_vcr - ry * g_vsr;
+                        q_ref[vi][1] = ry * g_vcr + rx * g_vsr;
+                        q_ref_at[vi] = q_stamp;
+                    }
+                    in[k].u = (127.0f + 127.0f * q_ref[vi][0]) * su;
+                    in[k].v = (127.0f + 127.0f * q_ref[vi][1] - (so->pose ? so->pose->env_scroll : 0.0f)) * sv;
+                }
             }
             if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
             if (g_cull) {
