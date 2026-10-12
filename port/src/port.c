@@ -8,6 +8,30 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <strings.h>
+#ifdef _WIN32
+/*
+ * WINDOWS (MinGW-w64; tools/release_windows.sh).  What differs is all in this
+ * file:
+ *   - a stream over a container's bytes: Linux has fopencookie; here the bytes
+ *     go to a temporary file that deletes itself when it is closed;
+ *   - the ends of the program's own statics, for putting them back between
+ *     its parts: the names MinGW's linker gives them.  SDL is a DLL, so its
+ *     statics are not among them;
+ *   - where the program is, where settings go (%APPDATA%\openscreamer), the
+ *     environment, mkdir;
+ *   - files are opened as they are (no translation of line ends), as on Linux;
+ *   - there is no console: what the program prints goes to the terminal it
+ *     was started from, or else to openscreamer.log in the settings folder.
+ */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <fcntl.h>
+#include <direct.h>
+#undef mkdir
+#define mkdir(path, mode) _mkdir(path)
+#define setenv(name, value, overwrite) _putenv_s(name, value)
+#define unsetenv(name) _putenv_s(name, "")
+#endif
 
 /* a block the port allocated: on a list, so that all of them can be let go at once */
 typedef struct block { struct block *prev, *next; size_t size; uint64_t magic; } block;
@@ -46,8 +70,18 @@ extern char __start_osdata[], __stop_osdata[], __start_osbss[], __stop_osbss[];
 #define _edata       __stop_osdata
 #define __bss_start  __start_osbss
 #define _end         __stop_osbss
+#elif defined(_WIN32)
+extern char __data_start__[], __data_end__[], __bss_start__[], __bss_end__[];
+#define __data_start __data_start__
+#define _edata       __data_end__
+#define __bss_start  __bss_start__
+#define _end         __bss_end__
 #else
 extern char __data_start[], _edata[], __bss_start[], _end[];
+#endif
+
+#ifdef _WIN32
+static void win_fatal(const char *text);
 #endif
 
 static int is_dir(const char *p)
@@ -162,6 +196,7 @@ static struct pack *pack_get(const char *name)
 }
 
 /* a file out of a container, held in memory and read like any other file */
+#ifndef _WIN32
 typedef struct { unsigned char *bytes; long len, at; } membuf;
 
 static ssize_t mem_read(void *c, char *out, size_t n)
@@ -192,6 +227,8 @@ static int mem_close(void *c)
     free(m);
     return 0;
 }
+
+#endif
 
 /* "<CONTAINER>/<FILE>" out of the game's containers, as a stream to read; NULL if it is not there */
 static FILE *packed_open(const char *rel)
@@ -230,6 +267,19 @@ static FILE *packed_open(const char *rel)
             FILE *o = fopen(fn, "wb");
             if (o) { fwrite(buf, 1, (size_t)real, o); fclose(o); }
         }
+#ifdef _WIN32
+        {
+            /* WINDOWS: the bytes in a temporary file ("T": kept in memory if
+               it can be; "D": gone when it is closed) */
+            char dir[MAX_PATH], name[MAX_PATH];
+            FILE *f = NULL;
+            if (GetTempPathA(sizeof dir, dir) && GetTempFileNameA(dir, "osc", 0, name)) f = fopen(name, "w+bTD");
+            if (f && (fwrite(buf, 1, (size_t)real, f) != (size_t)real || fflush(f) != 0)) { fclose(f); f = NULL; }
+            if (f) rewind(f);
+            free(buf);
+            return f;
+        }
+#else
         /* a stream over the bytes, which go when it is closed (mem_close) */
         membuf *m = malloc(sizeof *m);
         if (!m) { free(buf); return NULL; }
@@ -238,6 +288,7 @@ static FILE *packed_open(const char *rel)
         FILE *f = fopencookie(m, "rb", io);
         if (!f) { free(buf); free(m); }
         return f;
+#endif
     }
     return NULL;
 }
@@ -324,6 +375,14 @@ static void game_check(void)
         fprintf(stderr, "openscreamer: %d of the game's files cannot be used:%s\n"
                         "Say where a complete copy of Screamer is with -data DIR (the folder that holds its\n"
                         "DATA and GFX folders), or put it next to the program as \"screamer\".\n", nbad, bad);
+#ifdef _WIN32
+        {
+            char text[2600];
+            snprintf(text, sizeof text, "%d of the game's files are missing or damaged:%.1800s\n\nPut a complete copy of the "
+                     "original Screamer (the folder that holds DATA and GFX) next to openscreamer.exe, named \"screamer\".", nbad, bad);
+            win_fatal(text);
+        }
+#endif
         exit(1);
     }
     if (K->packed) printf("OK (%d containers, %d files", hi ? 31 : 25, files);
@@ -405,8 +464,44 @@ static void os_help(const char *me)
         me, me, me, me);
 }
 
+#ifdef _WIN32
+/* WINDOWS: a program without a console prints nowhere.  Started from a
+   terminal, what it prints goes there; else to openscreamer.log in the
+   settings folder.  If the game is not found, a box says so. */
+static int win_console;
+static void win_attach(void)
+{
+    _set_fmode(_O_BINARY);                           /* files as they are, as on Linux */
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN) win_console = 1;   /* sent to a file or a pipe */
+    else if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout); freopen("CONOUT$", "w", stderr);
+        win_console = 1;
+    }
+    setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+static void win_output(void)
+{
+    char log[900];
+    if (win_console) return;
+    snprintf(log, sizeof log, "%s/openscreamer.log", K->home);
+    if (freopen(log, "w", stdout)) freopen(log, "a", stderr);
+    setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+static void win_fatal(const char *text)
+{
+    if (!win_console && !getenv("SDL_VIDEODRIVER"))
+        MessageBoxA(NULL, text, "OpenScreamer", MB_OK | MB_ICONERROR);
+}
+#endif
+
 void os_init(int argc, char **argv)
 {
+#ifdef _WIN32
+    win_attach();
+#endif
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--version")) { printf("OpenScreamer %s\n", OS_VERSION); exit(0); }
     for (int i = 1; i < argc; i++)
@@ -426,8 +521,15 @@ void os_init(int argc, char **argv)
         else K->argv[K->argc++] = argv[i];
     }
     char exe[600] = "";
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe - 1);
+    exe[n < sizeof exe ? n : 0] = 0;
+    for (char *c = exe; *c; c++) if (*c == '\\') *c = '/';
+    { char *s = strrchr(exe, '/'); if (n > 0 && s) *s = 0; else strcpy(exe, "."); }
+#else
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (n > 0) { exe[n] = 0; char *s = strrchr(exe, '/'); if (s) *s = 0; } else strcpy(exe, ".");
+#endif
     if (data) snprintf(K->data, sizeof K->data, "%s", data);
     else {
         /* a copy of the game first, then files already unpacked */
@@ -453,6 +555,16 @@ void os_init(int argc, char **argv)
         strcpy(K->home, ".");
     else {
         const char *xdg = getenv("XDG_CONFIG_HOME"), *h = getenv("HOME");
+#ifdef _WIN32
+        char appdata[700];
+        xdg = getenv("APPDATA");                  /* WINDOWS: %APPDATA%\openscreamer */
+        if (xdg && *xdg) {
+            snprintf(appdata, sizeof appdata, "%s", xdg);
+            for (char *c = appdata; *c; c++) if (*c == '\\') *c = '/';
+            xdg = appdata;
+        }
+        h = NULL;
+#endif
         if (xdg && *xdg) snprintf(K->home, sizeof K->home, "%s/openscreamer", xdg);
         else if (h && *h) snprintf(K->home, sizeof K->home, "%s/.config/openscreamer", h);
         else strcpy(K->home, ".");
@@ -464,12 +576,19 @@ void os_init(int argc, char **argv)
         if (s && s != up) { *s = 0; mkdir(up, 0755); }
         mkdir(K->home, 0755);
     }
+#ifdef _WIN32
+    win_output();
+#endif
     if (!is_dir(K->data)) {
         printf("Checking game data ... FAILED\n");
         fflush(stdout);
         fprintf(stderr, "openscreamer: no game at \"%s\".\n"
                         "Say where your copy of Screamer is with -data DIR (the folder that holds its DATA and\n"
                         "GFX folders), or put it next to the program as \"screamer\".\n", K->data);
+#ifdef _WIN32
+        win_fatal("The game was not found.\n\nOpenScreamer needs a copy of the original Screamer: put the game's folder "
+                  "(the one that holds DATA and GFX) next to openscreamer.exe, named \"screamer\".");
+#endif
         exit(1);
     }
     game_check();

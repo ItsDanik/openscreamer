@@ -1,6 +1,6 @@
 # OpenScreamer
 
-A reimplementation of *Screamer* (Graffiti / Virgin Interactive, 1995, MS-DOS) for Linux,
+A reimplementation of *Screamer* (Graffiti / Virgin Interactive, 1995, MS-DOS) for Linux and Windows,
 written by reading the original program. It plays the whole game: the six tracks and their
 reversed versions, the championship, time attack, cone carnage and slalom, replays, records,
 the menus and the intro, with the original's sound and its FM music.
@@ -16,10 +16,14 @@ unpacked. At every start the files are checked and anything missing is listed by
 
 ## Download
 
-A built program for x86-64 Linux is on the [releases page](https://github.com/ItsDanik/openscreamer/releases):
-`openscreamer-<version>-linux-x86_64.tar.gz`. It needs SDL2 installed (`libsdl2-2.0-0`, `SDL2` or
-`sdl2`, by distribution) and runs on any distribution of 2018 or later. Unpack it, put the
-game's folder next to the program as `screamer`, and start `./openscreamer`.
+Built programs are on the [releases page](https://github.com/ItsDanik/openscreamer/releases):
+
+- **Linux** (x86-64): `openscreamer-<version>-linux-x86_64.tar.gz`. It needs SDL2 installed
+  (`libsdl2-2.0-0`, `SDL2` or `sdl2`, by distribution) and runs on any distribution of 2018 or
+  later. Unpack it, put the game's folder next to the program as `screamer`, start `./openscreamer`.
+- **Windows** (10 or 11, 64-bit): `openscreamer-<version>-windows-x86_64.zip`. Unpack it, put the
+  game's folder next to `openscreamer.exe` as `screamer`, and double-click the program. Settings
+  and saves go to `%APPDATA%\openscreamer`.
 
 ## Building
 
@@ -45,7 +49,7 @@ Settings and saves go to `~/.config/openscreamer` (or `-home DIR`).
 The same source runs on the MiSTer FPGA as a hybrid core:
 [openscreamer_MiSTer](https://github.com/ItsDanik/openscreamer_MiSTer) (the code for it is in
 `port/src/mister.c` and behind `MISTER_HYBRID`; an ordinary build has none of it).
-`tools/release_linux.sh` makes the Linux release.
+`tools/release_linux.sh` and `tools/release_windows.sh` (MinGW-w64, on Linux) make the releases.
 
 ## Credits
 

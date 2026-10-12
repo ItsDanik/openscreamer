@@ -72,3 +72,10 @@ if(NOT MISTER_HYBRID)
 endif()
 target_link_directories(openscreamer PRIVATE ${SDL2_LIBRARY_DIRS})
 target_link_libraries(openscreamer PRIVATE ${SDL2_LIBRARIES} m)
+if(WIN32)
+  # WINDOWS (MinGW-w64, tools/release_windows.sh): no console window, and
+  # nothing of the compiler's own to ship beside SDL2.dll.  SDL2 must stay a
+  # DLL: linked in, its statics would be among those port.c puts back
+  target_link_options(openscreamer PRIVATE -mwindows -static-libgcc)
+  target_compile_options(openscreamer PRIVATE ${SDL2_CFLAGS_OTHER})
+endif()

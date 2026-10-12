@@ -77,6 +77,13 @@ const char *os_getenv(const char *name);
 int  os_setenv(const char *name, const char *value, int overwrite);
 int  os_unsetenv(const char *name);
 
+#if defined(_WIN32) && !defined(OS_PORT_IMPL)
+/* WINDOWS: its mkdir has no second argument */
+#include <direct.h>
+#undef mkdir
+#define mkdir(path, mode) _mkdir(path)
+#endif
+
 #ifndef OS_PORT_IMPL
 #define getenv(n)        ((char *)(__builtin_constant_p(n) ? os_getenv(n) : (getenv)(n)))
 #define setenv(n, v, o)  os_setenv(n, v, o)

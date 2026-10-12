@@ -2450,11 +2450,27 @@ SDL (section 29) and the framework's is static; the 50 Hz physics against 59.64 
   than 2.0.9.  `dist/openscreamer-<version>-linux-x86_64.tar.gz`; GitHub release tagged
   `v<version>`, pre-release while it is a beta.  Tested from a clean folder with the robot
   (start-up check, a lap, a menu picture), headless; not on another distribution.
-- A Windows build was asked about and NOT made.  What stands in the way (port.c): the
-  read-only stream over a container's bytes is `fopencookie` (glibc only); the state restore
-  between the program's parts leans on GNU ld's `__data_start` / `_edata` / `__bss_start` /
-  `_end` (ELF); `setenv` / `unsetenv`, `mkdir(path, mode)`, `~/.config`.  MinGW-w64 and wine
-  are the way to build and to test it here.
+- **Windows build, 2026-10-12** (`tools/release_windows.sh`: MinGW-w64 on Linux, SDL2's own
+  MinGW package fetched for headers / import library / `SDL2.dll`; README in
+  `tools/release_windows_readme.txt`; `dist/openscreamer-<version>-windows-x86_64.zip`).
+  Everything that differs is in `port.c` under `_WIN32` (its comment lists it): a stream over
+  a container's bytes is a self-deleting temporary file (no `fopencookie`); the statics put
+  back between the program's parts are MinGW's `__data_start__` .. `__bss_end__` -- so **SDL2
+  must stay a DLL** (linked in, its statics would be among them: `-static` was tried by
+  mistake and took `libSDL2.a`); `%APPDATA%\openscreamer`; `_putenv_s`; files opened binary
+  (`_set_fmode`) as on Linux; no console (`-mwindows`): output to the terminal it was started
+  from, else `openscreamer.log` in the settings folder, and a message box when the game's
+  files are missing.  `long` is 32 bits there: nothing minded.
+  Tested under wine 11: the data check; a robot lap with telemetry the same as Linux to the
+  last digit; race and menu pictures byte-identical to Linux; four menu -> race -> menu rounds
+  (the state restore) hidden and two in a real window with the Direct3D renderer; the log
+  file.  Sound: identical but for a few thousand samples (the maths library's last digit in
+  the grid's revving, and `rand() % 3` choosing the commentator's recording).  **Not tried on
+  a real Windows**, nor with a controller there.  With `SDL_VIDEODRIVER=dummy` under wine the
+  Direct3D renderer makes the menu leave at once: test hidden with `SDL_RENDER_DRIVER=software`.
+- The PC builds keep their own two picture sizes, LOW 320x200 and HIGH 640x400 (the game's
+  two sets; both shown 4:3), in OPTIONS.  320x240 and the 640x200 / 640x240 "wide" sizes are
+  the MiSTer core's and on a PC only the test switches `OS_TALL` / `OS_WIDE` (Danik, 2026-10-12).
 
 ## Legal
 
