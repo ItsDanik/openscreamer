@@ -117,6 +117,23 @@ static void pad_find(void)
 
 void controls_menu_mode(int on) { g_menu = on; }
 
+/* the game controller's two motors, 0..1 each (the heavy one, the light one).
+   Called every picture: the controller is only told when the strength has
+   changed, or to keep it going. */
+void controls_rumble(float low, float high)
+{
+    static int was_low = -1, was_high = -1;
+    static Uint32 told;
+    int l = low <= 0.0f ? 0 : low >= 1.0f ? 65535 : (int)(low * 65535.0f);
+    int h = high <= 0.0f ? 0 : high >= 1.0f ? 65535 : (int)(high * 65535.0f);
+    l &= ~0x7ff; h &= ~0x7ff;                    /* (32 steps: no need to tell it of less) */
+    if (!g_pad) { was_low = was_high = -1; return; }
+    Uint32 now = SDL_GetTicks();
+    if (l == was_low && h == was_high && (!(l | h) || now - told < 300)) return;
+    SDL_GameControllerRumble(g_pad, (Uint16)l, (Uint16)h, 1000);
+    was_low = l; was_high = h; told = now;
+}
+
 /* an axis as the game makes it: +-0x3ff, and nothing under 0x66 (0x24ed4) */
 static int axis_word(int raw)
 {

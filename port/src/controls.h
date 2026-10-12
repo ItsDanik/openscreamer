@@ -32,6 +32,8 @@ int  controls_poll(SDL_Event *ev);
 /* 1 = the controller's buttons work the menus (arrows, ENTER, ESC);
    0 = they are the car's (only START, BACK and Y are turned into keys) */
 void controls_menu_mode(int on);
+/* the controller's heavy and light motor, 0..1 each; call it every picture */
+void controls_rumble(float low, float high);
 const char *controls_key_name(int i);
 
 #endif

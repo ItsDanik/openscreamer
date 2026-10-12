@@ -3194,6 +3194,89 @@ static void smoke_dump(void)
  * response are off (each tests the state), and the shadow stays flat.
  */
 static struct { int on, bounces, view; float vy, height, pitch, roll, pitch_rate, roll_rate; } g_crash;
+
+/*
+ * RUMBLE.  The port's own: the game of 1995 had nothing of the kind (its
+ * controls only read the keyboard and the game port).  A controller has a
+ * heavy, slow motor and a light, fast one; what the car goes through is
+ * turned into strengths 0..1 for the two.
+ *
+ *   KNOCKS (rumble_kick: a strength held for a moment, then dying away)
+ *     a wall            by the speed it cost: a scrape is a tremble, a square hit a thump
+ *     the crash         both motors full as the car is thrown up, then each landing,
+ *                       weaker every time
+ *     another car       a short thud for every moment of contact
+ *     a cone or sign    a tick, mostly the light motor
+ *   WHAT GOES ON AS LONG AS IT LASTS (rumble_step)
+ *     grass             the heavy motor, by the wheels on it and the speed, shuddering
+ *                       with the same  (x + y) & 15  that jolts the wheels' heights
+ *     skidding          the light motor, more the faster the car slides sideways
+ *     locked wheels     both, lightly
+ *     wheelspin off the line   mostly the light one
+ *     a spin            the heavy one
+ *
+ * Nothing while a replay or the intro runs, once the race is over, or while
+ * the race stands still (the question, the CD player).  OS_NORUMBLE=1 and, on
+ * the MiSTer, the core's Rumble option switch it off; OS_RUMBLELOG=1 prints
+ * what is sent.
+ */
+static float g_race_clock;                       /* (defined with the race's clocks, further down) */
+static struct { float low, high, hold; } g_kick;
+static float g_rumble_low, g_rumble_high;
+
+static void rumble_kick(float low, float high, float seconds)
+{
+    if (low > g_kick.low) g_kick.low = low;
+    if (high > g_kick.high) g_kick.high = high;
+    if (seconds > g_kick.hold) g_kick.hold = seconds;
+}
+
+/* one 1/50 s step of the race */
+static void rumble_step(float dt)
+{
+    const car_state *c = &g_pc;
+    float low = 0.0f, high = 0.0f;
+    if (g_kick.hold > 0.0f) g_kick.hold -= dt;
+    else {                                           /* a knock dies away in about a fifth of a second */
+        g_kick.low -= dt * 5.0f;  if (g_kick.low < 0.0f) g_kick.low = 0.0f;
+        g_kick.high -= dt * 5.0f; if (g_kick.high < 0.0f) g_kick.high = 0.0f;
+    }
+    if (!g_crash.on) {
+        float v = c->speed / 8000.0f;
+        if (v > 1.0f) v = 1.0f;
+        int on_grass = c->grass[0] + c->grass[1] + c->grass[2] + c->grass[3];
+        if (on_grass && v > 0.02f) {
+            float jolt = (float)(((int)c->x + (int)c->y) & 15) / 15.0f;
+            low += (float)on_grass * 0.25f * v * (0.3f + 0.5f * jolt);
+            high += (float)on_grass * 0.25f * v * 0.15f;
+        }
+        if (g_skidding && !c->launch) {
+            float s = c->slide / 3000.0f;
+            high += 0.25f + 0.3f * (s > 1.0f ? 1.0f : s);
+        }
+        if (c->lock != 0.0f) { high += 0.2f; low += 0.15f; }
+        if (c->launch) { high += 0.4f; low += 0.15f; }
+        if (c->spin) low += 0.3f;
+    }
+    low += g_kick.low; high += g_kick.high;
+    g_rumble_low = low > 1.0f ? 1.0f : low;
+    g_rumble_high = high > 1.0f ? 1.0f : high;
+}
+
+/* once a picture: `driving` is 0 whenever the player is not at the wheel */
+static void rumble_show(int driving)
+{
+    static int on = -1;
+    if (on < 0) on = !getenv("OS_NORUMBLE");
+    int go = on && driving;
+#ifdef MISTER_HYBRID
+    go = go && mister_rumble_on();
+#endif
+    if (!go) { g_kick.low = g_kick.high = g_kick.hold = 0.0f; g_rumble_low = g_rumble_high = 0.0f; }
+    controls_rumble(g_rumble_low, g_rumble_high);
+    if (getenv("OS_RUMBLELOG") && (g_rumble_low > 0.0f || g_rumble_high > 0.0f))
+        printf("rumble %.2fs  heavy %.2f  light %.2f\n", g_race_clock, g_rumble_low, g_rumble_high);
+}
 static int g_snd_engine = -1, g_snd_skid = -1, g_snd_wall = -1;
 static void view_change(int to);
 static int  g_view;
@@ -3207,6 +3290,7 @@ static void crash_start(void)
     g_crash.view = g_view;
     g_crash.vy = 3000.0f;
     g_crash.pitch_rate = g_crash.roll_rate = 12.0f;
+    rumble_kick(1.0f, 1.0f, 0.4f);
     g_pc.speed *= 0.6f;
     const scene_dir *d = nearest_dir(g_pc.x, g_pc.y);
     if (d) g_pc.yaw = d->angle;
@@ -3228,6 +3312,7 @@ static void crash_step(float dt)
     g_crash.roll += g_crash.roll_rate * dt;
     if (g_crash.height > 0.0f) return;
     g_crash.bounces++;
+    rumble_kick(1.0f / (float)g_crash.bounces, 0.6f / (float)g_crash.bounces, 0.15f);
     g_crash.height = 0.0f;
     g_crash.vy = -g_crash.vy * 0.4f;
     g_crash.pitch = g_crash.roll = 0.0f;
@@ -3456,7 +3541,14 @@ static void player_walls(void)
         if (off > 1.5707964f) off = 3.1415927f - off;
         if (c->speed * (off / 1.5707964f) > c->k_wall && !getenv("OS_NOCRASH")) { crash_start(); return; }
     }
-    drive_hit_wall(c, mx, my, (float)(out[2] - out[0]), wall_angle);
+    {
+        const float before = c->speed;
+        drive_hit_wall(c, mx, my, (float)(out[2] - out[0]), wall_angle);
+        float lost = (before - c->speed) / 4000.0f;      /* a scrape costs next to nothing, a square hit most of the speed */
+        if (lost < 0.0f) lost = 0.0f;
+        if (lost > 1.0f) lost = 1.0f;
+        rumble_kick(0.2f + 0.8f * lost, 0.2f + 0.5f * lost, 0.05f + 0.15f * lost);
+    }
 }
 
 /*
@@ -4341,6 +4433,7 @@ static void player_hits(opponent *o, float nx, float ny, float pen)
         static float last = -1.0f;
         if (g_race_clock < last || g_race_clock - last >= 1.0f / 30.0f) {
             snd_play(SND_CRASH);
+            rumble_kick(0.55f, 0.35f, 0.1f);
             last = g_race_clock;
         }
     }
@@ -5275,6 +5368,7 @@ static void props_step(void)
                 q->flying = 1;
                 if (!q->counted) { q->counted = 1; g_props_hit++; }   /* 0x124c0: once a prop */
                 snd_play(SND_HIT);                      /* 0x124c0 */
+                rumble_kick(0.25f, 0.5f, 0.06f);
             }
         /* OS_PROPKICK=prop,speed: throw one as if hit at that speed, and print its flight */
         if (getenv("OS_PROPKICK") && g_race_clock > 0.2f) {
@@ -8686,6 +8780,7 @@ static int session(int argc, char **argv)
                 dash_step();
                 smoke_step(DRIVE_DT);
                 sound_step();
+                rumble_step(DRIVE_DT);
                 if (g_pobj && g_pobj->m && !getenv("OS_NOLEAN"))
                     suspension_step(&g_ppose, &g_pc, g_pobj->m, DRIVE_DT);
                 if (getenv("OS_LEANDUMP") && fabsf(g_ppose.body_pitch) + fabsf(g_ppose.body_roll) > 0.0f) {
@@ -8836,6 +8931,7 @@ static int session(int argc, char **argv)
             }
             volumes_apply(g_fade_in);
         }
+        rumble_show(!g_replay && !g_intro && !g_finished && !g_game_over && !g_dialog && !g_cd.on);
         fps_draw();
         if (ddemo) {
             static int df = 0;

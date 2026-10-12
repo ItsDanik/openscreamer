@@ -16,6 +16,12 @@ int mister_on(void)
 }
 
 /* "O[24],Resolution,..." in core/OpenScreamer.sv */
+/* "O[25],Rumble,On,Off" */
+int mister_rumble_on(void)
+{
+    return MH_Open() ? !MH_OSD_GAME_BITS(MH_OSDStatus(), 25, 1) : 1;
+}
+
 int mister_res_tall(void)
 {
     return MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 24, 1) : 0;

@@ -13,6 +13,8 @@ int      mister_on(void);               /* the core is there */
 /* the core's OSD option Resolution: 0 = 320x200, 1 = 320x240 (more rows of
    the 3D view; the game's 200-row artwork is not stretched) */
 int      mister_res_tall(void);
+/* the core's OSD option Rumble */
+int      mister_rumble_on(void);
 /* the clock: milliseconds counted in the core's fields (59.64 a second), so
    that a picture is one field of game time however long it took to draw */
 unsigned mister_ticks(void);
