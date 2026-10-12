@@ -6349,7 +6349,7 @@ static menu_item g_page_options[] = {            /* the difficulty's highest val
        g_far_z); the port adds a fourth value, ULTRA, and a line of its own,
        the RESOLUTION (texts 60..65 are the port's: see menu_texts) */
 #ifdef MISTER_HYBRID
-    { 62, 1, &g_opt_detail, 3 },                 /* MISTER: the picture's size is the core's own option */
+    { 62, 1, &g_opt_detail, 2 },                 /* MISTER: the game's three levels only, and the picture's size is the core's own option */
 #define OPT_DIFF 1
 #define OPT_LINES 6
 #else
@@ -6902,6 +6902,9 @@ static int g_fps_on = -1, g_fps_shown;
 
 static void fps_toggle(void)
 {
+#ifdef MISTER_HYBRID
+    return;                                  /* MISTER: the core's own FPS Counter option (the hybrid library draws it) */
+#endif
     g_fps_on = !g_fps_on;
     if (g_fps_on) setenv("OS_FPS", "1", 1); else unsetenv("OS_FPS");
 }
@@ -6933,13 +6936,14 @@ static void fps_draw(void)
 {
     static Uint32 since;
     static int frames;
+#ifdef MISTER_HYBRID
+    mister_frame_done();                               /* MISTER: OS_FPSLOG=1 writes the real speed to the log; */
+    return;                                            /* the number on the screen is the core's FPS Counter option */
+#endif
     if (g_fps_on < 0) g_fps_on = getenv("OS_FPS") != NULL;
     Uint32 now = SDL_GetTicks();
     frames++;
     if (now - since >= 500) { g_fps_shown = (int)((float)frames * 1000.0f / (float)(now - since) + 0.5f); frames = 0; since = now; }
-#ifdef MISTER_HYBRID
-    mister_frame_done();                               /* MISTER: OS_FPSLOG=1 writes the real speed to the log */
-#endif
     if (g_fps_on) tiny_number(g_fps_shown, 0);
 }
 
@@ -7028,6 +7032,9 @@ static int menu_run(int *track, int *car)
     /* the options: as the settings file has them, or as the race just left hands them back */
     g_opt_res = (g_s == 2);
     g_opt_detail = g_cfg.detail;
+#ifdef MISTER_HYBRID
+    if (g_opt_detail > 2) g_opt_detail = 2;  /* MISTER: no ULTRA */
+#endif
     g_opt_diff = g_cfg.diff; g_opt_laps = g_cfg.laps;
     if (getenv("OS_MENU_GOTO")) { page = atoi(getenv("OS_MENU_GOTO")); unsetenv("OS_MENU_GOTO"); }
     if (getenv("OS_DIFF")) { g_opt_diff = atoi(getenv("OS_DIFF")); if (g_opt_diff > 3) g_opt_diff = 3; }
@@ -7988,9 +7995,13 @@ static int session(int argc, char **argv)
     /* the DETAIL option; OS_DETAIL=0..3 for one run, OS_DRAWDIST=<units> the
        old test switch (no far plane, pieces out to that distance) */
     g_detail = getenv("OS_DETAIL") ? atoi(getenv("OS_DETAIL")) & 3 : g_cfg.detail & 3;
+#ifdef MISTER_HYBRID
+    if (g_detail == 3) g_detail = 2;
+#endif
     if (g_detail == 3) { g_far_z = 0.0f; g_drawdist = DRAWDIST_FAR; }
     else { g_far_z = g_detail == 2 ? 43808.0f : 27808.0f; g_drawdist = DRAWDIST_ORIGINAL; }
     if (getenv("OS_DRAWDIST")) { g_far_z = 0.0f; g_drawdist = (float)atof(getenv("OS_DRAWDIST")); }
+    printf("detail %d: drawn to a depth of %.0f, pieces within %.0f\n", g_detail, g_far_z, g_drawdist);
     if (getenv("OS_FOG"))      g_fog      = (float)atof(getenv("OS_FOG"));
     if (getenv("OS_CULL"))     g_cull     = atoi(getenv("OS_CULL"));
     if (getenv("OS_SHOWEDGES")) g_show_edges = 1;

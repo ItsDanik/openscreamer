@@ -367,7 +367,11 @@ static void os_help(const char *me)
 "IN THE MENU\n"
 "  UP / DOWN      choose a line           LEFT / RIGHT  change an option, the car, the track\n"
 "  ENTER          go on                   ESC           back (on the first page: leave)\n"
+#ifdef MISTER_HYBRID
+"  OPTIONS has: DETAIL (LOW, MID, HI as the original),\n"
+#else
 "  OPTIONS has: DETAIL (LOW, MID, HI as the original; ULTRA draws much further),\n"
+#endif
 "  RESOLUTION (320x200 or 640x400), difficulty, laps, speech, music, records.\n"
 "\n"
 "IN A RACE\n"
@@ -384,7 +388,11 @@ static void os_help(const char *me)
 "  shoulders      gear up (right) / down (left)      Y  change view\n"
 "  START = ENTER, BACK = ESC; in the menus the d-pad or stick moves, A chooses, B goes back\n"
 "  BACKSPACE      back onto the road     ESC leave the race (it asks first)\n"
+#ifdef MISTER_HYBRID
+"  F12            screenshot (shot_NNN.ppm)\n"
+#else
 "  F5             FPS counter            F11 full screen    F12 screenshot (shot_NNN.ppm)\n"
+#endif
 "\n"
 "FILES IT KEEPS (in the home directory)\n"
 "  openscreamer.cfg       settings        openscreamer.records   best times, name, what is unlocked\n"
