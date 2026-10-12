@@ -10,9 +10,10 @@
 #define OS_MISTER_H
 
 int      mister_on(void);               /* the core is there */
-/* the core's OSD option Resolution: 0 = 320x200, 1 = 320x240 (more rows of
-   the 3D view; the game's 200-row artwork is not stretched) */
-int      mister_res_tall(void);
+/* the core's OSD option Resolution: bit 0 = 240 rows (more of the 3D view;
+   the game's 200-row artwork is not stretched), bit 1 = 640 columns (the
+   high set's flat artwork, every second row of it) */
+int      mister_res_mode(void);
 /* the core's OSD option Rumble: 0 off, 1 on, 2 strong */
 int      mister_rumble_on(void);
 /* the clock: milliseconds counted in the core's fields (59.64 a second), so

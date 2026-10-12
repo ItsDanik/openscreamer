@@ -15,17 +15,18 @@ int mister_on(void)
     return MH_Open();
 }
 
-/* "O[24],Resolution,..." in core/OpenScreamer.sv */
-/* "O[26:25],Rumble,Off,On,Strong": 0, 1 or 2 */
+/* "O[27:26],Rumble,Off,On,Strong" in core/OpenScreamer.sv: 0, 1 or 2 */
 int mister_rumble_on(void)
 {
-    int level = MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 25, 2) : 1;
+    int level = MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 26, 2) : 1;
     return level > 2 ? 2 : level;
 }
 
-int mister_res_tall(void)
+/* "O[25:24],Resolution,320x200,320x240,640x200,640x240": bit 0 = 240 rows,
+   bit 1 = 640 columns */
+int mister_res_mode(void)
 {
-    return MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 24, 1) : 0;
+    return MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 24, 2) : 0;
 }
 
 unsigned mister_ticks(void)
@@ -193,6 +194,18 @@ static void wait_done(Uint64 since)
     g_mark_at = g_work_from;
 }
 
+/* "O[28],Lock to 30 FPS,Off,On": a picture every second field, for the
+   resolutions (640 wide) at which one field is not time enough -- an even
+   30 a second instead of a pace that wanders between 30 and 40.
+   OS_LOCK30=0|1 fixes it for a test. */
+static int lock30(void)
+{
+    static int fixed = -2;
+    if (fixed == -2) fixed = SDL_getenv("OS_LOCK30") ? SDL_atoi(SDL_getenv("OS_LOCK30")) != 0 : -1;
+    if (fixed >= 0) return fixed;
+    return MH_IsOpen() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 28, 1) : 0;
+}
+
 void mister_show(void *window, const void *pixels, int w, int h)
 {
     mister_show_wait();
@@ -211,6 +224,7 @@ void mister_show(void *window, const void *pixels, int w, int h)
     Uint64 now = SDL_GetPerformanceCounter();
     work_done(now);
     mister_mark(4);
+    if (lock30() && MH_IsOpen()) MH_WaitField(g_shown_field + 1);      /* not before the second field after the last picture */
     SDL_UpdateWindowSurface(window);
     g_shown_field = MH_FieldCounter();
     wait_done(now);
@@ -230,6 +244,7 @@ int mister_show_later(void *window, const void *pixels, int w, int h)
     work_done(now);
     mister_mark(4);
     MH_WaitFrame(g_shown_field);                 /* one picture a field (two with an interlaced mode) */
+    if (lock30()) MH_WaitField(g_shown_field + 1);
     g_shown_field = MH_FieldCounter();
     wait_done(now);
     g_later.pixels = pixels; g_later.w = w; g_later.h = h;

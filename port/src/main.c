@@ -55,6 +55,20 @@ static void tall_follow(void);          /* MISTER: once a picture, the core's Re
 static int FB_W = 320, FB_H = 200;
 static int g_s = 1;                /* 1 low, 2 high */
 /*
+ * A WIDE PICTURE (the MiSTer core's 640x200 and 640x240; OS_WIDE=1 tries it
+ * anywhere): twice the columns, the same rows.  The artwork is the game's
+ * high set (g_s = 2, as for 640x400) and everything flat is still worked
+ * out in that set's own pixels; g_yd = 2 says that the screen has only every
+ * second ROW of it, and the few routines that put a pixel down (hud_put,
+ * dash_line, pkc_draw, pic_put, the darkenings) leave the odd rows out.  No
+ * picture is stretched or squeezed by anything but that.  The 3D view has
+ * the lens of the high set across and of the low set down.
+ */
+static int g_yd = 1;
+#define ART_W (320 * g_s)
+#define ART_H (200 * g_s)
+#define SY    (g_s / g_yd)         /* screen rows to one row of the 320 x 200 layout */
+/*
  * A TALLER PICTURE (the MiSTer core's 320x240; OS_TALL=1 tries it anywhere).
  * The game's artwork is all made for 200 rows and none of it is stretched:
  * g_tall is the extra rows (0 or 40) and g_oy how far down the flat thing
@@ -67,7 +81,6 @@ static int g_s = 1;                /* 1 low, 2 high */
  */
 static int g_tall, g_oy;
 #define TALL_ROWS 40
-#define PIC_H     (FB_H - g_tall)
 #define LAY_TOP() (g_oy = g_tall ? 8 : 0)
 #define LAY_MID() (g_oy = g_tall / 2)
 #define LAY_BOT() (g_oy = g_tall ? g_tall - 8 : 0)
@@ -403,14 +416,28 @@ static void res_init(void)
     }
 #ifdef MISTER_HYBRID
     /* MISTER: the resolution is the core's OSD option, not the settings file's */
-    if (mister_on()) g_tall = mister_res_tall() ? TALL_ROWS : 0;
+    int wide = 0;
+    if (mister_on()) { g_tall = (mister_res_mode() & 1) ? TALL_ROWS : 0; wide = mister_res_mode() >> 1; }
+#else
+    int wide = 0;
 #endif
     if (getenv("OS_TALL")) g_tall = atoi(getenv("OS_TALL")) ? TALL_ROWS : 0;
+    if (getenv("OS_WIDE")) wide = atoi(getenv("OS_WIDE")) != 0;
     int hi = getenv("OS_RES") ? !strcmp(getenv("OS_RES"), "high") : g_cfg.res;
 #ifdef MISTER_HYBRID
     hi = 0;                                  /* MISTER: there is no high resolution -- the machine cannot fill it */
 #endif
-    if (hi) g_tall = 0;
+    if (hi) { g_tall = 0; wide = 0; }
+    if (wide) {
+        /* (the high set's flat artwork must be there) */
+        static const char *need[] = {
+            "build/dec/GAME/GAMEH.FNT", "build/dec/GAME/GAMEH.SPR", "build/dec/GAME/IMPLET_H.PKC",
+            "build/dec/GRAF/MENUH.FNT", "build/dec/GRAF/MENUH.SPR", "build/dec/GRAF/MENU1H.PCX",
+        };
+        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++)
+            if (!os_exists(need[i])) { fprintf(stderr, "a wide picture needs %s: not there\n", need[i]); wide = 0; break; }
+    }
+    if (wide) { g_s = 2; g_yd = 2; FB_W = 640; FB_H = 200; }
     if (hi && g_cfg.starting && !getenv("OS_RES"))
         res_fail("the last start in it did not get as far as a picture");
     if (hi) {
@@ -433,17 +460,36 @@ static void res_init(void)
     g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H;
 }
 
+static float g_focal_x, g_focal_y;
 #ifdef MISTER_HYBRID
+static int g_in_race;                                /* a race (or the intro) is set up and running */
+static void race_art_load(void);
 /* MISTER: the core's Resolution option is followed at once, wherever the
    program is (called once a picture, before anything is drawn) */
 static void tall_follow(void)
 {
     static int quiet = -1;
     if (quiet < 0) quiet = getenv("OS_TALL") != NULL || !mister_on();
-    if (quiet || !fb || g_s != 1) return;
-    const int tall = mister_res_tall() ? TALL_ROWS : 0;
-    if (tall == g_tall) return;
+    if (quiet || !fb || (g_s == 2 && g_yd == 1)) return;
+    const int tall = (mister_res_mode() & 1) ? TALL_ROWS : 0;
+    const int wide = mister_res_mode() >> 1;
+    if (tall == g_tall && wide == (g_yd == 2)) return;
     mister_show_wait();                              /* (the last picture may still be on its way out) */
+    if (wide != (g_yd == 2)) {
+        /* the width is another set of artwork: the menu begins again in it,
+           a race loads its flat pictures again and goes on */
+        if (!g_in_race) {
+            if (g_argv && g_next_part)
+                os_go(g_argc, g_argc > 1 ? g_argv[1] : NULL, g_argc > 2 ? g_argv[2] : NULL);
+            return;
+        }
+        if (wide && !os_exists("build/dec/GAME/GAMEH.FNT")) return;
+        g_s = wide ? 2 : 1; g_yd = wide ? 2 : 1;
+        FB_W = 320 * g_s; FB_H = 200 + g_tall;
+        g_clip[1] = FB_W;
+        g_focal_x = GAME_FOCAL * (float)g_s; g_focal_y = GAME_FOCAL * (float)SY;
+        race_art_load();
+    }
     FB_H += tall - g_tall;
     g_tall = tall;
     LAY_MID();
@@ -457,12 +503,15 @@ static void tall_follow(void)
 /* a whole-screen picture (200 rows) put in the middle of the screen */
 static void pic_put(const uint8_t *pic, int scene)
 {
-    const int top = g_tall / 2 * FB_W, n = FB_W * PIC_H;
+    const int top = g_tall / 2 * FB_W, rows = FB_H - g_tall, n = FB_W * rows;
     for (int i = 0; i < top; i++) fb[i] = fb[top + n + i] = 0xff000000u;
-    for (int i = 0; i < n; i++) fb[top + i] = g_pal[pic[i]];
-    if (!scene) return;
-    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
-    for (int i = 0; i < n; i++) pxi[top + i] = (int16_t)pic[i];
+    if (scene) for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
+    for (int y = 0; y < rows; y++) {                 /* (g_yd: every second row of the picture in a wide one) */
+        const uint8_t *from = pic + (size_t)(y * g_yd) * ART_W;
+        uint32_t *to = fb + top + y * FB_W;
+        for (int x = 0; x < FB_W; x++) to[x] = g_pal[from[x]];
+        if (scene) for (int x = 0; x < FB_W; x++) pxi[top + y * FB_W + x] = (int16_t)from[x];
+    }
 }
 
 /* the backdrop as whole pixels, made once (and by the main thread: sky_paint
@@ -490,8 +539,11 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
     float heading = (yaw + 1.5707964f) * (1024.0f / (float)M_PI);
     float off = (2047.0f - heading) * 0.5f;
     off -= floorf(off / (float)s->w) * (float)s->w;
-    const float sc = (float)g_s;      /* the backdrop is the same picture in both sets: doubled in high */
-    float top = g_cy + (22.0f - (float)s->h) * sc + focal_y * sinf(pitch);
+    /* the backdrop is the same picture in both sets: doubled in high, and
+       in a wide picture doubled across only -- so it is worked out in the
+       backdrop's own pixels, sx screen columns and sy screen rows to one */
+    const float sx = (float)g_s, sy = (float)SY;
+    const float top = g_cy / sy + (22.0f - (float)s->h) + focal_y / sy * sinf(pitch);
 
     sky_ready(s);
     const uint32_t *const packed = g_sky_packed;
@@ -505,14 +557,14 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
      */
     const uint32_t ground = g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_GROUND;
     const int w = s->w, h = s->h, pow2 = (w & (w - 1)) == 0;
-    const int du = (int)(cr / sc * 65536.0f), dv = (int)(-sr / sc * 65536.0f);
+    const int du = (int)(cr / sx * 65536.0f), dv = (int)(-sr / sx * 65536.0f);
     for (int y = 0; y < g_vh; y++) {
         uint32_t *row = fb + (size_t)y * FB_W;
-        const float ax = -FB_W * 0.5f, ay = g_cy - (float)y;
+        const float ax = -FB_W * 0.5f / sx, ay = (g_cy - (float)y) / sy;
         const float ux = ax * cr - ay * sr, uy = ax * sr + ay * cr;
-        float fu = off + (FB_W * 0.5f + ux) / sc;
+        float fu = off + FB_W * 0.5f / sx + ux;
         fu -= floorf(fu / (float)w) * (float)w;                 /* (a whole number of times round) */
-        int ui = (int)(fu * 65536.0f), vi = (int)floorf((g_cy - uy - top) / sc * 65536.0f);
+        int ui = (int)(fu * 65536.0f), vi = (int)floorf((g_cy / sy - uy - top) * 65536.0f);
         if (dv == 0) {
             /* upright: the whole row is one row of the backdrop, or ground */
             const int v = vi >> 16;
@@ -758,7 +810,6 @@ static void pal_load(const char *path)
 /* a vertex in VIEW space: x right, y up, z forward; u, v in texels */
 typedef struct { float x, y, z, u, v; } vtx;
 
-static float g_focal_x, g_focal_y;
 static float g_vc, g_vs, g_vcp, g_vsp;     /* camera yaw / pitch, cached */
 static float g_vcr = 1.0f, g_vsr = 0.0f;   /* camera roll */
 static camera g_cam;
@@ -3407,6 +3458,7 @@ static void player_reset(const path *r, int sample)
 
 static void cockpit_load(int model, int livery);
 static void dash_load(int model);
+static int g_art_model = -1, g_art_livery;
 
 static void opp_assign_cars(void);
 /* choose which car is driven: the row of CARS.DTR, and its model */
@@ -3431,6 +3483,7 @@ static void player_car(const path *r, int which)
     g_pobj->phase = sp->livery;                     /* the second paint job: frame 4 of 8 */
     cockpit_load(model, sp->livery != 0);
     dash_load(model);
+    g_art_model = model; g_art_livery = sp->livery != 0;
     g_pobj->radius = 1200.0f;
 
     /*
@@ -3625,18 +3678,18 @@ static int     g_have_cockpit;
 
 static int pkc_load(const char *file, int16_t *out)
 {
-    for (int i = 0; i < FB_W * PIC_H; i++) out[i] = -1;
+    for (int i = 0; i < ART_W * ART_H; i++) out[i] = -1;
     file = res_name(file);
     FILE *f = fopen(file, "rb");
     if (!f) { fprintf(stderr, "note: no picture at %s\n", file); return 0; }
     long at = 0;
     int32_t n;
-    while (at < FB_W * PIC_H && fread(&n, 4, 1, f) == 1) {
+    while (at < ART_W * ART_H && fread(&n, 4, 1, f) == 1) {
         if (n < 0) { at += -(long)n; continue; }
         for (int k = 0; k < n; k++) {
             int ch = fgetc(f);
             if (ch == EOF) break;
-            if (at < FB_W * PIC_H) out[at] = (int16_t)ch;
+            if (at < ART_W * ART_H) out[at] = (int16_t)ch;
             at++;
         }
     }
@@ -3644,34 +3697,42 @@ static int pkc_load(const char *file, int16_t *out)
     return 1;
 }
 
+static int g_pkc_loads;                 /* goes up whenever the pictures are read again: what pkc_draw remembers is stale */
+
 static void pkc_draw(const int16_t *pic)
 {
-    /* where a picture has pixels at all is found once (most of it is see-through) */
-    static struct { const int16_t *pic; int n; int *run; } known[6];
+    /* where a picture has pixels at all is found once (most of it is
+       see-through): runs of them, a row at a time, with where on the screen
+       each goes -- in a wide picture only the even rows have a place */
+    static struct { const int16_t *pic; int n, loads; int *run; } known[6];
     int k = 0;
-    uint32_t *const to = fb + g_oy * FB_W;                 /* (a picture is 200 rows: see g_tall) */
+    uint32_t *const to = fb + g_oy * FB_W;                 /* (a picture is 200 rows of the layout: see g_tall) */
     while (k < 6 && known[k].pic && known[k].pic != pic) k++;
-    if (k == 6) {
-        for (int i = 0; i < FB_W * PIC_H; i++)
-            if (pic[i] >= 0) to[i] = g_pal[pic[i]];
-        return;
-    }
-    if (!known[k].pic) {
+    if (k == 6) k = 0;
+    if (known[k].pic != pic || known[k].loads != g_pkc_loads) {
         int n = 0;
-        for (int i = 0; i < FB_W * PIC_H; i++)
-            if (pic[i] >= 0 && (i == 0 || pic[i - 1] < 0)) n++;
-        known[k].run = malloc(sizeof(int) * 2 * (size_t)(n + 1));
-        known[k].n = n; known[k].pic = pic;
-        n = 0;
-        for (int i = 0; i < FB_W * PIC_H; i++)
-            if (pic[i] >= 0) {
-                if (i == 0 || pic[i - 1] < 0) { known[k].run[2 * n] = i; known[k].run[2 * n + 1] = 0; n++; }
-                known[k].run[2 * n - 1]++;
-            }
+        for (int pass = 0; pass < 2; pass++) {
+            n = 0;
+            for (int y = 0; y < ART_H; y++)
+                for (int x = 0; x < ART_W; x++) {
+                    /* (WIDE: an odd row only where the even row over it is open: see hud_text) */
+#define PKC_SHOWS(xx) (pic[y * ART_W + (xx)] >= 0 && !(g_yd == 2 && (y & 1) && pic[(y - 1) * ART_W + (xx)] >= 0))
+                    if (!PKC_SHOWS(x)) continue;
+                    int x1 = x;
+                    while (x1 < ART_W && PKC_SHOWS(x1)) x1++;
+                    if (pass) { known[k].run[3 * n] = y * ART_W + x; known[k].run[3 * n + 1] = y / g_yd * FB_W + x; known[k].run[3 * n + 2] = x1 - x; }
+                    n++;
+                    x = x1;
+                }
+            if (!pass) known[k].run = malloc(sizeof(int) * 3 * (size_t)(n + 1));
+        }
+        known[k].n = n; known[k].pic = pic; known[k].loads = g_pkc_loads;
     }
     for (int r = 0; r < known[k].n; r++) {
-        const int at = known[k].run[2 * r], len = known[k].run[2 * r + 1];
-        for (int i = at; i < at + len; i++) to[i] = g_pal[pic[i]];
+        const int16_t *from = pic + known[k].run[3 * r];
+        uint32_t *at = to + known[k].run[3 * r + 1];
+        const int len = known[k].run[3 * r + 2];
+        for (int i = 0; i < len; i++) at[i] = g_pal[from[i]];
     }
 }
 
@@ -3685,9 +3746,7 @@ static void cockpit_load(int model, int livery)
 static void cockpit_draw(void)
 {
     if (!g_have_cockpit) return;
-    uint32_t *const to = fb + g_oy * FB_W;
-    for (int i = 0; i < FB_W * PIC_H; i++)
-        if (g_cockpit[i] >= 0) to[i] = g_pal[g_cockpit[i]];
+    pkc_draw(g_cockpit);
 }
 
 static float wrap_pi(float a)
@@ -3735,7 +3794,7 @@ static void chase_camera(camera *cam)
            game (0x1a2ac takes it off the draw list every frame) */
         g_vh = FB_H;
     } else {
-        g_vh = g_views[g_view].height * g_s + g_tall;      /* (what covers the rest sits at the bottom) */
+        g_vh = g_views[g_view].height * SY + g_tall;      /* (what covers the rest sits at the bottom) */
     }
     g_cy = 0.65f * (float)g_vh;
 }
@@ -4603,7 +4662,9 @@ static void dash_line(int x0, int y0, int x1, int y1, uint32_t col)
 {
     int dx = abs(x1 - x0), dy = abs(y1 - y0), n = dx > dy ? dx : dy;
     for (int i = 0; i <= n; i++) {
-        int x = n ? x0 + (x1 - x0) * i / n : x0, y = (n ? y0 + (y1 - y0) * i / n : y0) + g_oy;
+        int x = n ? x0 + (x1 - x0) * i / n : x0, y = n ? y0 + (y1 - y0) * i / n : y0;
+        if (g_yd == 2) { if (y & 1) continue; y >>= 1; }
+        y += g_oy;
         if (x >= 0 && y >= 0 && x < FB_W && y < FB_H) fb[y * FB_W + x] = col;
     }
 }
@@ -4686,6 +4747,8 @@ static const char *g_spr_file = "build/dec/GAME/GAMEL.SPR";
 
 static void hud_load(void)
 {
+    g_pkc_loads++;
+    g_nfont = g_nspr = 0;
     FILE *f = fopen(res_name(g_fnt_file), "rb");
     if (f) {
         int n = fgetc(f) + 1;
@@ -4736,6 +4799,7 @@ static void hud_load(void)
 
 static void hud_put(int x, int y, int idx)
 {
+    if (g_yd == 2) y >>= 1;                          /* (a wide picture: two rows of the high set to one of the screen) */
     y += g_oy;
     if (x < g_clip[0] || x >= g_clip[1] || y < g_clip[2] || y >= g_clip[3]) return;
     fb[y * FB_W + x] = g_pal[idx & 255];
@@ -4765,7 +4829,16 @@ static int hud_text(int x, int y, const char *str, int font, int colour, int dra
                 for (int c = 0; c < w; c++) {
                     int b = px[r * bw + c / 2];
                     int shade = (c & 1) ? (b & 15) : (b >> 4);
-                    if (shade) hud_put(gx + c, y + r, colour * 16 + shade);
+                    if (!shade) continue;
+                    if (g_yd == 2 && ((y + r) & 1) && r > 0) {
+                        /* WIDE: the odd row shares a screen row with the even
+                           one above it, which is the one that shows; the odd
+                           row only fills what that one leaves open, so that
+                           no stroke one row thick is lost */
+                        int above = px[(r - 1) * bw + c / 2];
+                        if ((c & 1) ? (above & 15) : (above >> 4)) continue;
+                    }
+                    hud_put(gx + c, y + r, colour * 16 + shade);
                 }
         }
         x += fixed ? cell : w + g_s + gap;
@@ -4787,7 +4860,9 @@ static void hud_sprite_px(int x, int y, int n)
     for (int r = 0; r < sp->h; r++)
         for (int c = 0; c < sp->w; c++) {
             int v = g_spr_px[sp->at + r * sp->w + c];
-            if (v) hud_put(x + sp->ox + c, y + sp->oy + r, v);
+            if (!v) continue;
+            if (g_yd == 2 && ((y + sp->oy + r) & 1) && r > 0 && g_spr_px[sp->at + (r - 1) * sp->w + c]) continue;   /* (as in hud_text) */
+            hud_put(x + sp->ox + c, y + sp->oy + r, v);
         }
 }
 
@@ -4819,7 +4894,7 @@ static void hud_radar(void)
 {
     if (!g_radar_zoom) return;
     const car_state *c = &g_pc;
-    g_clip[0] = 4 * g_s; g_clip[1] = 0x4c * g_s; g_clip[2] = 0x7c * g_s + g_oy; g_clip[3] = 0xc4 * g_s + g_oy;
+    g_clip[0] = 4 * g_s; g_clip[1] = 0x4c * g_s; g_clip[2] = 0x7c * SY + g_oy; g_clip[3] = 0xc4 * SY + g_oy;
     /* The search through the palette for every pixel of the window was 45 %
        of a hi-res frame.  The answer only depends on the pixel's colour, so
        it is looked up once a colour and remembered (the game does the same
@@ -5046,8 +5121,8 @@ static void cd_draw(float dt)
         volumes_apply(g_cd.fade);
     }
     g_oy = 0;
-    champ_darken(0, 0, 320, FB_H / g_s);
-    champ_darken(0, 0, 320, FB_H / g_s);
+    champ_darken(0, 0, 320, FB_H / SY);
+    champ_darken(0, 0, 320, FB_H / SY);
     LAY_MID();
     if (g_have_cdfront) pkc_draw(g_cdfront);
     char buf[8];
@@ -5062,7 +5137,7 @@ static void cd_draw(float dt)
     if (g_cd.sel >= 4) {                                         /* 0x23dac */
         hud_text(0x40, 0x45, name[g_cd.chan], 5, 3, 1);
         for (int i = 0; i < *vol[g_cd.chan] / 1024; i++)
-            for (int y = 0x45 * g_s + g_oy; y <= 0x4a * g_s + g_s - 1 + g_oy; y++)
+            for (int y = 0x45 * SY + g_oy; y <= 0x4a * SY + SY - 1 + g_oy; y++)
                 for (int x = (0x55 + i * 3) * g_s; x < (0x55 + i * 3) * g_s + g_s; x++)
                     if (x < FB_W && y < FB_H) fb[y * FB_W + x] = g_pal[bar_colour[(i / 10) & 3]];
     }
@@ -6317,12 +6392,12 @@ static int pcx_load(const char *file, uint8_t *pix, uint32_t pal[256])
     int w = (d[8] | d[9] << 8) - (d[4] | d[5] << 8) + 1, h = (d[10] | d[11] << 8) - (d[6] | d[7] << 8) + 1;
     int bpl = d[66] | d[67] << 8;
     long p = 128;
-    for (int y = 0; y < h && y < FB_H; y++) {
+    for (int y = 0; y < h && y < ART_H; y++) {
         int x = 0;
         while (x < bpl && p < n - 769) {
             int c = d[p++], run = 1;
             if ((c & 0xc0) == 0xc0) { run = c & 0x3f; c = d[p++]; }
-            while (run-- > 0 && x < bpl) { if (x < FB_W && x < w) pix[y * FB_W + x] = (uint8_t)c; x++; }
+            while (run-- > 0 && x < bpl) { if (x < ART_W && x < w) pix[y * ART_W + x] = (uint8_t)c; x++; }
         }
     }
     const uint8_t *q = d + n - 768;
@@ -6633,7 +6708,7 @@ static int champ_enter(void)
 
 static void champ_darken(int x0, int y0, int w, int h)           /* 0x25cc8: to 75% */
 {
-    x0 *= g_s; y0 = y0 * g_s + g_oy; w *= g_s; h *= g_s;
+    x0 *= g_s; y0 = y0 * SY + g_oy; w *= g_s; h *= SY;
     for (int y = y0; y < y0 + h && y < FB_H; y++)
         for (int x = x0; x < x0 + w && x < FB_W; x++) {
             uint32_t c = fb[y * FB_W + x];
@@ -6997,6 +7072,16 @@ static void ms_enter(int scr, int pick_car, int pick_track, int letter)
  * 3 x 5 figure of its own so that it works on every screen whatever font is
  * loaded.  Remembered for the session through OS_FPS.
  */
+#ifdef MISTER_HYBRID
+/* MISTER: the race's flat artwork read again, in the set that goes with the
+   picture's new width (tall_follow) */
+static void race_art_load(void)
+{
+    hud_load();
+    if (g_art_model >= 0) { cockpit_load(g_art_model, g_art_livery); dash_load(g_art_model); }
+}
+#endif
+
 static int g_fps_on = -1, g_fps_shown;
 
 static void fps_toggle(void)
@@ -7081,11 +7166,11 @@ static int menu_run(int *track, int *car)
         fprintf(stderr, "menu: its files are missing under build/dec (GRAF, MENU, LOCAL)\n");
         return 0;
     }
-    g_focal_x = g_focal_y = GAME_FOCAL * (float)g_s;
-    fb  = malloc(sizeof(uint32_t) * FB_W * (FB_H + TALL_ROWS));
-    zb  = malloc(sizeof(float)    * FB_W * (FB_H + TALL_ROWS));
-    idb = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
-    pxi = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
+    g_focal_x = GAME_FOCAL * (float)g_s; g_focal_y = GAME_FOCAL * (float)SY;
+    fb  = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
+    zb  = malloc(sizeof(float)    * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    idb = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    pxi = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
     if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
     static scene empty;                      /* draw_object looks at the scene's count */
     g_scene = &empty;
@@ -8089,7 +8174,7 @@ static int session(int argc, char **argv)
     float cam_height  = (argc > 6) ? (float)atof(argv[6]) : 600.0f;
     if (argc > 7) g_layer = atoi(argv[7]);
     char gfxdir[512];
-    snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c", track, g_s == 2 ? 'H' : 'L');
+    snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c", track, g_s == 2 && g_yd == 1 ? 'H' : 'L');     /* (a wide picture has the low set's tracks) */
 
     /* the DETAIL option; OS_DETAIL=0..3 for one run, OS_DRAWDIST=<units> the
        old test switch (no far plane, pieces out to that distance) */
@@ -8163,13 +8248,17 @@ static int session(int argc, char **argv)
         trackside_init(data, track);
     }
 
-    g_focal_x = g_focal_y = (getenv("OS_FOCAL") ? (float)atof(getenv("OS_FOCAL")) : GAME_FOCAL) * (float)g_s;
+    g_focal_x = (getenv("OS_FOCAL") ? (float)atof(getenv("OS_FOCAL")) : GAME_FOCAL) * (float)g_s;
+    g_focal_y = g_focal_x / (float)g_yd;
+#ifdef MISTER_HYBRID
+    g_in_race = 1;
+#endif
     float base_pitch = -0.10f;
 
-    fb  = malloc(sizeof(uint32_t) * FB_W * (FB_H + TALL_ROWS));
-    zb  = malloc(sizeof(float)    * FB_W * (FB_H + TALL_ROWS));
-    idb = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
-    pxi = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
+    fb  = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
+    zb  = malloc(sizeof(float)    * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    idb = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    pxi = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
     if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
 
     /* OS_WALLCHECK=1: for every wall segment, is the track really there just
