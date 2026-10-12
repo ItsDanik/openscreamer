@@ -16,7 +16,7 @@ int mister_on(void)
 }
 
 /* "O[24],Resolution,..." in core/OpenScreamer.sv */
-int mister_res_high(void)
+int mister_res_tall(void)
 {
     return MH_Open() ? MH_OSD_GAME_BITS(MH_OSDStatus(), 24, 1) : 0;
 }
@@ -235,11 +235,6 @@ void mister_show_job(void)
     to_565(g_later.pixels, (uint8_t *)screen, g_later.w * 2, g_later.w, g_later.h);
     MH_Present(screen, g_later.w * 2);
     SDL_AtomicSet(&g_later_due, 0);
-}
-
-void mister_hires_there(int there)
-{
-    if (MH_IsOpen()) MH_SetMenuMask(there ? 0 : 1);
 }
 
 void mister_second_cpu(void)

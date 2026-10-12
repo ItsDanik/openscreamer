@@ -10,10 +10,9 @@
 #define OS_MISTER_H
 
 int      mister_on(void);               /* the core is there */
-/* the core's OSD option Resolution: 0 Lores 320x200, 1 Hires 640x400 */
-int      mister_res_high(void);
-/* whether the game's hi-res files are there: the OSD greys Hires out without */
-void     mister_hires_there(int there);
+/* the core's OSD option Resolution: 0 = 320x200, 1 = 320x240 (more rows of
+   the 3D view; the game's 200-row artwork is not stretched) */
+int      mister_res_tall(void);
 /* the clock: milliseconds counted in the core's fields (59.64 a second), so
    that a picture is one field of game time however long it took to draw */
 unsigned mister_ticks(void);

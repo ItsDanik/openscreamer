@@ -49,6 +49,19 @@
 #define FB_MAXH 400
 static int FB_W = 320, FB_H = 200;
 static int g_s = 1;                /* 1 low, 2 high */
+/*
+ * A TALLER PICTURE (the MiSTer core's 320x240; OS_TALL=1 tries it anywhere).
+ * The game's artwork is all made for 200 rows and none of it is stretched:
+ * g_tall is the extra rows (0 or 40) and g_oy how far down the flat thing
+ * being drawn is put -- the middle for whole-screen pictures and menus (the
+ * default), LAY_TOP / LAY_BOT for what belongs at an edge of the race's
+ * screen.  The 3D view has all the rows.
+ */
+static int g_tall, g_oy;
+#define PIC_H     (FB_H - g_tall)
+#define LAY_TOP() (g_oy = 0)
+#define LAY_MID() (g_oy = g_tall / 2)
+#define LAY_BOT() (g_oy = g_tall)
 static int g_clip[4] = { 0, 320, 0, 200 };     /* where flat things may be drawn: x0, x1, y0, y1, in pixels */
 
 /*
@@ -363,9 +376,6 @@ static void res_started(void)
 static void res_fail(const char *why)
 {
     fprintf(stderr, "high resolution: %s -- going back to low\n", why);
-#ifdef MISTER_HYBRID
-    setenv("OS_NOHIGH", "1", 1);                        /* MISTER: whatever the OSD says from now on */
-#endif
     g_cfg.res = 0; g_cfg.starting = 0;
     cfg_save();
     setenv("OS_RES", "low", 1);
@@ -384,12 +394,14 @@ static void res_init(void)
     }
 #ifdef MISTER_HYBRID
     /* MISTER: the resolution is the core's OSD option, not the settings file's */
-    if (mister_on()) {
-        mister_hires_there(os_exists("build/dec/MAP1H/MAP1.UNR") && os_exists("build/dec/GAME/GAMEH.FNT"));
-        setenv("OS_RES", mister_res_high() && !getenv("OS_NOHIGH") ? "high" : "low", 1);
-    }
+    if (mister_on()) g_tall = mister_res_tall() ? 40 : 0;
 #endif
+    if (getenv("OS_TALL")) g_tall = atoi(getenv("OS_TALL")) ? 40 : 0;
     int hi = getenv("OS_RES") ? !strcmp(getenv("OS_RES"), "high") : g_cfg.res;
+#ifdef MISTER_HYBRID
+    hi = 0;                                  /* MISTER: there is no high resolution -- the machine cannot fill it */
+#endif
+    if (hi) g_tall = 0;
     if (hi && g_cfg.starting && !getenv("OS_RES"))
         res_fail("the last start in it did not get as far as a picture");
     if (hi) {
@@ -406,8 +418,21 @@ static void res_init(void)
         g_s = 2; FB_W = 640; FB_H = 400;
         if (!getenv("OS_RES")) { g_cfg.starting = 1; cfg_save(); if (os_once(1)) atexit(res_started); }
     }
+    FB_H += g_tall;
+    LAY_MID();
     g_vh = FB_H; g_cy = 0.65f * (float)FB_H;
     g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H;
+}
+
+/* a whole-screen picture (200 rows) put in the middle of the screen */
+static void pic_put(const uint8_t *pic, int scene)
+{
+    const int top = g_tall / 2 * FB_W, n = FB_W * PIC_H;
+    for (int i = 0; i < top; i++) fb[i] = fb[top + n + i] = 0xff000000u;
+    for (int i = 0; i < n; i++) fb[top + i] = g_pal[pic[i]];
+    if (!scene) return;
+    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
+    for (int i = 0; i < n; i++) pxi[top + i] = (int16_t)pic[i];
 }
 
 /* the backdrop as whole pixels, made once (and by the main thread: sky_paint
@@ -3472,18 +3497,18 @@ static int     g_have_cockpit;
 
 static int pkc_load(const char *file, int16_t *out)
 {
-    for (int i = 0; i < FB_W * FB_H; i++) out[i] = -1;
+    for (int i = 0; i < FB_W * PIC_H; i++) out[i] = -1;
     file = res_name(file);
     FILE *f = fopen(file, "rb");
     if (!f) { fprintf(stderr, "note: no picture at %s\n", file); return 0; }
     long at = 0;
     int32_t n;
-    while (at < FB_W * FB_H && fread(&n, 4, 1, f) == 1) {
+    while (at < FB_W * PIC_H && fread(&n, 4, 1, f) == 1) {
         if (n < 0) { at += -(long)n; continue; }
         for (int k = 0; k < n; k++) {
             int ch = fgetc(f);
             if (ch == EOF) break;
-            if (at < FB_W * FB_H) out[at] = (int16_t)ch;
+            if (at < FB_W * PIC_H) out[at] = (int16_t)ch;
             at++;
         }
     }
@@ -3496,20 +3521,21 @@ static void pkc_draw(const int16_t *pic)
     /* where a picture has pixels at all is found once (most of it is see-through) */
     static struct { const int16_t *pic; int n; int *run; } known[6];
     int k = 0;
+    uint32_t *const to = fb + g_oy * FB_W;                 /* (a picture is 200 rows: see g_tall) */
     while (k < 6 && known[k].pic && known[k].pic != pic) k++;
     if (k == 6) {
-        for (int i = 0; i < FB_W * FB_H; i++)
-            if (pic[i] >= 0) fb[i] = g_pal[pic[i]];
+        for (int i = 0; i < FB_W * PIC_H; i++)
+            if (pic[i] >= 0) to[i] = g_pal[pic[i]];
         return;
     }
     if (!known[k].pic) {
         int n = 0;
-        for (int i = 0; i < FB_W * FB_H; i++)
+        for (int i = 0; i < FB_W * PIC_H; i++)
             if (pic[i] >= 0 && (i == 0 || pic[i - 1] < 0)) n++;
         known[k].run = malloc(sizeof(int) * 2 * (size_t)(n + 1));
         known[k].n = n; known[k].pic = pic;
         n = 0;
-        for (int i = 0; i < FB_W * FB_H; i++)
+        for (int i = 0; i < FB_W * PIC_H; i++)
             if (pic[i] >= 0) {
                 if (i == 0 || pic[i - 1] < 0) { known[k].run[2 * n] = i; known[k].run[2 * n + 1] = 0; n++; }
                 known[k].run[2 * n - 1]++;
@@ -3517,7 +3543,7 @@ static void pkc_draw(const int16_t *pic)
     }
     for (int r = 0; r < known[k].n; r++) {
         const int at = known[k].run[2 * r], len = known[k].run[2 * r + 1];
-        for (int i = at; i < at + len; i++) fb[i] = g_pal[pic[i]];
+        for (int i = at; i < at + len; i++) to[i] = g_pal[pic[i]];
     }
 }
 
@@ -3531,8 +3557,9 @@ static void cockpit_load(int model, int livery)
 static void cockpit_draw(void)
 {
     if (!g_have_cockpit) return;
-    for (int i = 0; i < FB_W * FB_H; i++)
-        if (g_cockpit[i] >= 0) fb[i] = g_pal[g_cockpit[i]];
+    uint32_t *const to = fb + g_oy * FB_W;
+    for (int i = 0; i < FB_W * PIC_H; i++)
+        if (g_cockpit[i] >= 0) to[i] = g_pal[g_cockpit[i]];
 }
 
 static float wrap_pi(float a)
@@ -3580,7 +3607,7 @@ static void chase_camera(camera *cam)
            game (0x1a2ac takes it off the draw list every frame) */
         g_vh = FB_H;
     } else {
-        g_vh = g_views[g_view].height * g_s;
+        g_vh = g_views[g_view].height * g_s + g_tall;      /* (what covers the rest sits at the bottom) */
     }
     g_cy = 0.65f * (float)g_vh;
 }
@@ -4447,7 +4474,7 @@ static void dash_line(int x0, int y0, int x1, int y1, uint32_t col)
 {
     int dx = abs(x1 - x0), dy = abs(y1 - y0), n = dx > dy ? dx : dy;
     for (int i = 0; i <= n; i++) {
-        int x = n ? x0 + (x1 - x0) * i / n : x0, y = n ? y0 + (y1 - y0) * i / n : y0;
+        int x = n ? x0 + (x1 - x0) * i / n : x0, y = (n ? y0 + (y1 - y0) * i / n : y0) + g_oy;
         if (x >= 0 && y >= 0 && x < FB_W && y < FB_H) fb[y * FB_W + x] = col;
     }
 }
@@ -4580,6 +4607,7 @@ static void hud_load(void)
 
 static void hud_put(int x, int y, int idx)
 {
+    y += g_oy;
     if (x < g_clip[0] || x >= g_clip[1] || y < g_clip[2] || y >= g_clip[3]) return;
     fb[y * FB_W + x] = g_pal[idx & 255];
 }
@@ -4662,7 +4690,7 @@ static void hud_radar(void)
 {
     if (!g_radar_zoom) return;
     const car_state *c = &g_pc;
-    g_clip[0] = 4 * g_s; g_clip[1] = 0x4c * g_s; g_clip[2] = 0x7c * g_s; g_clip[3] = 0xc4 * g_s;
+    g_clip[0] = 4 * g_s; g_clip[1] = 0x4c * g_s; g_clip[2] = 0x7c * g_s + g_oy; g_clip[3] = 0xc4 * g_s + g_oy;
     /* The search through the palette for every pixel of the window was 45 %
        of a hi-res frame.  The answer only depends on the pixel's colour, so
        it is looked up once a colour and remembered (the game does the same
@@ -4888,8 +4916,10 @@ static void cd_draw(float dt)
         if (g_cd.fade <= 0.0f) { g_cd.fade = 0.0f; snd_music("build/dec/MUSIC", 0); }
         volumes_apply(g_cd.fade);
     }
-    champ_darken(0, 0, 320, 200);
-    champ_darken(0, 0, 320, 200);
+    LAY_TOP();
+    champ_darken(0, 0, 320, FB_H / g_s);
+    champ_darken(0, 0, 320, FB_H / g_s);
+    LAY_MID();
     if (g_have_cdfront) pkc_draw(g_cdfront);
     char buf[8];
     int blink = ((SDL_GetTicks() - born) / 320) & 1;
@@ -4903,7 +4933,7 @@ static void cd_draw(float dt)
     if (g_cd.sel >= 4) {                                         /* 0x23dac */
         hud_text(0x40, 0x45, name[g_cd.chan], 5, 3, 1);
         for (int i = 0; i < *vol[g_cd.chan] / 1024; i++)
-            for (int y = 0x45 * g_s; y <= 0x4a * g_s + g_s - 1; y++)
+            for (int y = 0x45 * g_s + g_oy; y <= 0x4a * g_s + g_s - 1 + g_oy; y++)
                 for (int x = (0x55 + i * 3) * g_s; x < (0x55 + i * 3) * g_s + g_s; x++)
                     if (x < FB_W && y < FB_H) fb[y * FB_W + x] = g_pal[bar_colour[(i / 10) & 3]];
     }
@@ -4913,7 +4943,11 @@ static void hud_draw(int instruments)
 {
     char buf[64];
     if (g_replay) instruments = 0;
+    /* (a taller picture: the labels and what goes with them at the top, the
+       instruments and the radar at the bottom, the end's words in the middle) */
+    LAY_TOP();
     if (g_have_implet) pkc_draw(g_implet);
+    LAY_BOT();
     if (instruments && g_views[g_view].cockpit) {
         cockpit_draw();
         if (g_have_dash) {
@@ -4933,6 +4967,7 @@ static void hud_draw(int instruments)
         dash_needle(0x10f, 0xa8, 0x1e, g_needle_rpm, 0x75);
     }
 
+    LAY_TOP();
     snprintf(buf, sizeof buf, "%d", (int)(g_timer));
     hud_text_centred(8, buf, 6, 2);
     int lap = g_laps < g_total_laps ? g_laps + 1 : g_laps;
@@ -4944,7 +4979,7 @@ static void hud_draw(int instruments)
     hud_text(0x114, 0xb, buf, 1, 5, 1);
     if (g_replay) {
         if (((int)(g_race_clock * 30.0f)) & 0x80 || ((int)(g_race_clock * 2.0f) & 1))
-            hud_text(8, 0xaa, "R", 0, 6, 1);
+            { LAY_BOT(); hud_text(8, 0xaa, "R", 0, 6, 1); LAY_TOP(); }
     } else {
         hud_clock(buf, sizeof buf, g_total_time);
         hud_text(8, 0x38, buf, 3, 2, 1);
@@ -4952,10 +4987,13 @@ static void hud_draw(int instruments)
         hud_text(8, 0x48, buf, 3, 2, 1);
         hud_clock(buf, sizeof buf, g_record_shown);     /* 0x23658: the record, not this race's best */
         hud_text(8, 0x58, buf, 3, 2, 1);
+        LAY_BOT();
         hud_radar();
+        LAY_TOP();
     }
 
     if (g_race_clock < 8.0f) hud_sprite_draw(0x78, 0x36, (int)(g_race_clock) / 2);
+    LAY_MID();
 
     /*
      * THE END OF THE RACE (0x20eb8 finished, 0x20f88 out of time, 0x21048 draws
@@ -6190,9 +6228,7 @@ static int text_lines(const char *file, char out[][40], int max)
 
 static void menu_frame(int screen, int pick, float turn, const uint8_t *bg, mesh *model, int livery)
 {
-    if (bg) for (int i = 0; i < FB_W * FB_H; i++) {
-        fb[i] = g_pal[bg[i]]; zb[i] = 0.0f; idb[i] = -1; pxi[i] = (int16_t)bg[i];
-    }
+    if (bg) pic_put(bg, 1);
     g_vh = FB_H; g_cy = (float)FB_H * 0.5f;
     if (model && model->nface) {
         static scene_object o;
@@ -6281,8 +6317,15 @@ static menu_item g_page_options[] = {            /* the difficulty's highest val
     /* the game's first line is its DETAIL option (how far it draws: see
        g_far_z); the port adds a fourth value, ULTRA, and a line of its own,
        the RESOLUTION (texts 60..65 are the port's: see menu_texts) */
+#ifdef MISTER_HYBRID
+    { 62, 1, &g_opt_detail, 3 },                 /* MISTER: the picture's size is the core's own option */
+#define OPT_DIFF 1
+#define OPT_LINES 6
+#else
     { 62, 1, &g_opt_detail, 3 }, { 60, 1, &g_opt_res, 1 },
 #define OPT_DIFF 2
+#define OPT_LINES 7
+#endif
     { 8, 1, &g_opt_diff, 2 }, { 13, 1, &g_opt_laps, 3 },
     { 17, 1, &g_opt_speech, 1 }, { 19, 1, &g_opt_music, 1 }, { 21, 1, NULL, 0 },
 };
@@ -6297,7 +6340,7 @@ static void records_draw(const uint8_t *bg, int track, int sel)
 {
     const track_records *r = &g_save.t[track];
     char buf[64];
-    for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[bg[i]];
+    pic_put(bg, 0);
     champ_darken(0x30, 0x24, 0xe2, 0xa0);
     champ_darken(0x30, 0x24, 0xe2, 0xa0);
     hud_text_centred(2, g_menu_text[31 + track], 3, 0);
@@ -6319,7 +6362,7 @@ static void records_draw(const uint8_t *bg, int track, int sel)
 static void name_draw(const uint8_t *bg, int pos)
 {
     char buf[16];
-    if (bg) for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[bg[i]];
+    if (bg) pic_put(bg, 0);
     hud_text_centred(2, g_menu_text[46], 3, 2);
     snprintf(buf, sizeof buf, "\x01%s", g_save.name);
     hud_text(0x83, 0x4c, buf, 2, 2, 1);
@@ -6460,7 +6503,7 @@ static int champ_enter(void)
 
 static void champ_darken(int x0, int y0, int w, int h)           /* 0x25cc8: to 75% */
 {
-    x0 *= g_s; y0 *= g_s; w *= g_s; h *= g_s;
+    x0 *= g_s; y0 = y0 * g_s + g_oy; w *= g_s; h *= g_s;
     for (int y = y0; y < y0 + h && y < FB_H; y++)
         for (int x = x0; x < x0 + w && x < FB_W; x++) {
             uint32_t c = fb[y * FB_W + x];
@@ -6480,7 +6523,7 @@ static void champ_draw(const uint8_t *bg, int tick)
 {
     champ_stage st = champ_stage_at(g_ch.stage);
     char buf[64];
-    for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[bg[i]];
+    pic_put(bg, 0);
     if (st.kind == 3) {                                           /* 0x2ce58 */
         champ_darken(0x10, 0x24, 0x120, 0x88);
         champ_darken(0x10, 0x24, 0x120, 0x88);
@@ -6627,9 +6670,7 @@ static void ms_draw(const mesh *m, float x, float h, float z, float pitch, float
 
 static void ms_begin(const uint8_t *bg)
 {
-    for (int i = 0; i < FB_W * FB_H; i++) {
-        fb[i] = g_pal[bg[i]]; zb[i] = 0.0f; idb[i] = -1; pxi[i] = (int16_t)bg[i];
-    }
+    pic_put(bg, 1);
     g_vh = FB_H; g_cy = (float)FB_H * 0.5f;
 }
 
@@ -7270,7 +7311,7 @@ static int menu_run(int *track, int *car)
         if (page >= 0) {
             const menu_item *items = page == 0 ? g_page_main : page == 1 ? g_page_options
                                    : page == 2 ? g_page_special : page == 7 ? g_page_records : g_page_attack;
-            int n = page == 0 ? 5 : page == 1 ? 7 : page == 2 ? 3 : page == 7 ? 6 : 2;      /* 3 and 5: NEW / RESUME */
+            int n = page == 0 ? 5 : page == 1 ? OPT_LINES : page == 2 ? 3 : page == 7 ? 6 : 2;      /* 3 and 5: NEW / RESUME */
             memcpy(g_pal, pal_main, sizeof g_pal);
             {
                 /* a page, or a line of it, that is not what the cubes spell: they
@@ -7804,7 +7845,7 @@ static int loading_show(int track)
     snprintf(file, sizeof file, "build/dec/GRAF/LOAD%dL.PCX", track);
     if (!pcx_load(file, pic, pal)) return 1;
     memcpy(g_pal, pal, sizeof g_pal);
-    for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[pic[i]];
+    pic_put(pic, 0);
     int cheat = getenv("OS_CHEAT") ? atoi(getenv("OS_CHEAT")) : 0;
     if (cheat & 0x10)
         for (int y = 0; y < FB_H; y++)
