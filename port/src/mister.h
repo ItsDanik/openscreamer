@@ -37,8 +37,13 @@ float    mister_last_work(void);         /* how long the last picture took to ma
 void     mister_second_cpu(void);        /* the calling thread goes to the processor the game's main thread is not on */
 extern long mister_stat[4];           /* the two threads' sharing, for the log */
 extern long mister_pixels, mister_rows, mister_tris;   /* counted by the rasteriser */
-/* the picture (32 bits a pixel) to the screen, at the next field */
+/* the picture (32 bits a pixel) to the screen, at the next field; or (later)
+   only the wait for the field here, and the rest by the thread that calls
+   mister_show_job() -- 1 when it was left to that thread.  See mister.c. */
 void     mister_show(void *window, const void *pixels, int w, int h);
+int      mister_show_later(void *window, const void *pixels, int w, int h);
+void     mister_show_job(void);
+void     mister_show_wait(void);
 
 /* what the process ends with: the launcher's contract */
 int      mister_exit_code(void);

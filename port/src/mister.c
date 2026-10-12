@@ -127,45 +127,114 @@ void mister_frame_done(void)
     }
 }
 
+/* the picture's 32 bits a pixel to the screen's 16 */
+static void to_565(const uint32_t *src, uint8_t *to, int pitch, int w, int h)
+{
+    for (int y = 0; y < h; y++) {
+        uint16_t *dst = (uint16_t *)(to + y * pitch);
+        int x = 0;
+#ifdef __ARM_NEON
+        /* eight pixels at a time */
+        for (; x + 8 <= w; x += 8, src += 8) {
+            const uint8x8x4_t p = vld4_u8((const uint8_t *)src);          /* b, g, r, a */
+            uint16x8_t o = vshll_n_u8(vshr_n_u8(p.val[2], 3), 8);
+            o = vshlq_n_u16(o, 3);
+            o = vorrq_u16(o, vshlq_n_u16(vmovl_u8(vshr_n_u8(p.val[1], 2)), 5));
+            o = vorrq_u16(o, vmovl_u8(vshr_n_u8(p.val[0], 3)));
+            vst1q_u16(dst + x, o);
+        }
+#endif
+        for (; x < w; x++) {
+            uint32_t p = *src++;
+            dst[x] = (uint16_t)(((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f));
+        }
+    }
+}
+
+/*
+ * A picture can be handed over in two ways.  mister_show() does it all here
+ * and now, through SDL (which also sets the core's video mode when the size
+ * has changed).  mister_show_later() only waits for the field and leaves the
+ * conversion and the copy to another thread -- the one that fills the scene,
+ * idle at that moment -- which calls mister_show_job(): a millisecond of the
+ * main thread a picture.  The picture must then not be drawn on until the job
+ * is done (mister_show_wait()); the race does not draw on it before the next
+ * scene is filled, by that same thread.
+ */
+static struct { const void *pixels; int w, h; } g_later;
+static SDL_atomic_t g_later_due;
+static int g_shown_w, g_shown_h;                 /* the size mister_show() last showed (the core is in that mode) */
+static uint32_t g_shown_field;
+
+void mister_show_wait(void)
+{
+    while (SDL_AtomicGet(&g_later_due)) SDL_Delay(0);
+}
+
+static void work_done(Uint64 now)
+{
+    if (g_work_from) { g_work_sum += now - g_work_from; g_last_work = (float)((double)(now - g_work_from) * 1000.0 / (double)SDL_GetPerformanceFrequency()); }
+}
+
+static void wait_done(Uint64 since)
+{
+    g_work_from = SDL_GetPerformanceCounter();
+    g_wait_sum += g_work_from - since;
+    if (g_work_from - since > g_wait_max) g_wait_max = g_work_from - since;
+    g_mark_at = g_work_from;
+}
+
 void mister_show(void *window, const void *pixels, int w, int h)
 {
+    mister_show_wait();
     SDL_Surface *s = SDL_GetWindowSurface(window);
     if (!s) return;
     mister_mark(3);
     if (s->format->format == SDL_PIXELFORMAT_RGB565 && s->w >= w && s->h >= h) {
-        const uint32_t *src = pixels;
-        for (int y = 0; y < h; y++) {
-            uint16_t *dst = (uint16_t *)((uint8_t *)s->pixels + y * s->pitch);
-            int x = 0;
-#ifdef __ARM_NEON
-            /* eight pixels at a time */
-            for (; x + 8 <= w; x += 8, src += 8) {
-                const uint8x8x4_t p = vld4_u8((const uint8_t *)src);          /* b, g, r, a */
-                uint16x8_t o = vshll_n_u8(vshr_n_u8(p.val[2], 3), 8);         /* r: placed below, shifted on */
-                o = vshlq_n_u16(o, 3);
-                o = vorrq_u16(o, vshlq_n_u16(vmovl_u8(vshr_n_u8(p.val[1], 2)), 5));
-                o = vorrq_u16(o, vmovl_u8(vshr_n_u8(p.val[0], 3)));
-                vst1q_u16(dst + x, o);
-            }
-#endif
-            for (; x < w; x++) {
-                uint32_t p = *src++;
-                dst[x] = (uint16_t)(((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f));
-            }
-        }
+        to_565(pixels, s->pixels, s->pitch, w, h);
+        g_shown_w = w; g_shown_h = h;
     } else {
         SDL_ConvertPixels(w < s->w ? w : s->w, h < s->h ? h : s->h, SDL_PIXELFORMAT_ARGB8888, pixels, w * 4,
                           s->format->format, s->pixels, s->pitch);
+        g_shown_w = g_shown_h = 0;
     }
     /* what went before this is the making of the picture; the rest is the wait for the field */
     Uint64 now = SDL_GetPerformanceCounter();
-    if (g_work_from) { g_work_sum += now - g_work_from; g_last_work = (float)((double)(now - g_work_from) * 1000.0 / (double)SDL_GetPerformanceFrequency()); }
+    work_done(now);
     mister_mark(4);
     SDL_UpdateWindowSurface(window);
-    g_work_from = SDL_GetPerformanceCounter();
-    g_wait_sum += g_work_from - now;
-    if (g_work_from - now > g_wait_max) g_wait_max = g_work_from - now;
-    g_mark_at = g_work_from;
+    g_shown_field = MH_FieldCounter();
+    wait_done(now);
+}
+
+int mister_show_later(void *window, const void *pixels, int w, int h)
+{
+    static int never = -1;
+    if (never < 0) never = SDL_getenv("OS_SHOWNOW") != NULL;
+    if (never || !MH_IsOpen() || w != g_shown_w || h != g_shown_h || w * h > 640 * 400) {
+        mister_show(window, pixels, w, h);
+        return 0;
+    }
+    mister_show_wait();
+    mister_mark(3);
+    Uint64 now = SDL_GetPerformanceCounter();
+    work_done(now);
+    mister_mark(4);
+    MH_WaitFrame(g_shown_field);                 /* one picture a field (two with an interlaced mode) */
+    g_shown_field = MH_FieldCounter();
+    wait_done(now);
+    g_later.pixels = pixels; g_later.w = w; g_later.h = h;
+    SDL_AtomicSet(&g_later_due, 1);
+    return 1;
+}
+
+void mister_show_job(void)
+{
+    static uint16_t screen[640 * 400];
+    if (!SDL_AtomicGet(&g_later_due)) return;
+    to_565(g_later.pixels, (uint8_t *)screen, g_later.w * 2, g_later.w, g_later.h);
+    MH_Present(screen, g_later.w * 2);
+    SDL_AtomicSet(&g_later_due, 0);
 }
 
 void mister_hires_there(int there)

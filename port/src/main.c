@@ -1140,6 +1140,7 @@ typedef struct {
        depths (it has nothing else to do while the first triangles are being
        worked out): 1 = asked for, 2 = done */
     SDL_atomic_t before;
+    SDL_atomic_t show;                   /* MISTER: a finished picture to hand over first (mister_show_later) */
     float yaw, pitch, roll, focal_x, focal_y;
     const sky *backdrop;
 } tri_helper;
@@ -1206,6 +1207,9 @@ static int tri_helper_run(void *arg)
 #endif
     for (;;) {
         SDL_SemWait(h->wake);
+#ifdef MISTER_HYBRID
+        if (SDL_AtomicGet(&h->show)) { mister_show_job(); SDL_AtomicSet(&h->show, 0); }
+#endif
         if (!SDL_AtomicGet(&h->busy)) continue;
         Uint64 t0_ = SDL_GetPerformanceCounter();
         if (SDL_AtomicGet(&h->before) == 1) {
@@ -7767,6 +7771,9 @@ int main(int argc, char **argv)
             if (!os_has_next()) return r;
 #endif
         }
+#ifdef MISTER_HYBRID
+        mister_show_wait();
+#endif
         snd_close();
         os_state_restore();
     }
@@ -8789,13 +8796,27 @@ static int session(int argc, char **argv)
                        cam.z - feet);
             if (demo_frame++ >= demo) { write_ppm("demo.ppm"); break; }
         }
+#ifdef MISTER_HYBRID
+        {
+            /* MISTER: the helper thread turns the picture into the screen's and
+               copies it; nothing draws on it until that thread has filled the
+               next scene */
+            tri_helper *h = tri_helper_get();
+            if (!h) mister_show(os_slot(0), fb, FB_W, FB_H);
+            else if (mister_show_later(os_slot(0), fb, FB_W, FB_H)) { SDL_AtomicSet(&h->show, 1); SDL_SemPost(h->wake); }
+        }
+#else
         SDL_UpdateTexture(tex, NULL, fb, FB_W * sizeof(uint32_t));
+#endif
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren); res_started();
         /* no vsync (software renderer, some drivers)?  do not spin flat out */
         if (SDL_GetTicks() - now < 4) SDL_Delay(8);
     }
+#ifdef MISTER_HYBRID
+    mister_show_wait();
+#endif
 
     if (records_ok) records_enter(track);        /* 0x2a1a8, 0x28f42 */
     if (!g_window_closed && !g_intro && !getenv("OS_DRIVE_DEMO") && !getenv("OS_DEMO") && !shot) {      /* 0x21d8c */
