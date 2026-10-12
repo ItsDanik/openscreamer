@@ -1,5 +1,6 @@
 # the game itself and everything made from it: never in the repository
 /screamer/
+/screamer2/
 /build/
 # builds
 /port/build/
