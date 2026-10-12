@@ -3217,10 +3217,12 @@ static struct { int on, bounces, view; float vy, height, pitch, roll, pitch_rate
  *
  * Nothing while a replay or the intro runs, once the race is over, or while
  * the race stands still (the question, the CD player).  OS_NORUMBLE=1 and, on
- * the MiSTer, the core's Rumble option switch it off; OS_RUMBLELOG=1 prints
+ * the MiSTer, the core's Rumble option (Off / On / Strong) switch it off;
+ * OS_RUMBLE_GAIN=x multiplies it; OS_RUMBLELOG=1 prints
  * what is sent.
  */
 static float g_race_clock;                       /* (defined with the race's clocks, further down) */
+#define RUMBLE_STRONG 1.75f                      /* the MiSTer core's "Strong": everything this much more, up to the motors' most */
 static struct { float low, high, hold; } g_kick;
 static float g_rumble_low, g_rumble_high;
 
@@ -3269,11 +3271,14 @@ static void rumble_show(int driving)
     static int on = -1;
     if (on < 0) on = !getenv("OS_NORUMBLE");
     int go = on && driving;
+    float gain = 1.0f;
 #ifdef MISTER_HYBRID
     go = go && mister_rumble_on();
+    if (mister_rumble_on() == 2) gain = RUMBLE_STRONG;
 #endif
+    if (getenv("OS_RUMBLE_GAIN")) gain = (float)atof(getenv("OS_RUMBLE_GAIN"));
     if (!go) { g_kick.low = g_kick.high = g_kick.hold = 0.0f; g_rumble_low = g_rumble_high = 0.0f; }
-    controls_rumble(g_rumble_low, g_rumble_high);
+    controls_rumble(g_rumble_low * gain, g_rumble_high * gain);
     if (getenv("OS_RUMBLELOG") && (g_rumble_low > 0.0f || g_rumble_high > 0.0f))
         printf("rumble %.2fs  heavy %.2f  light %.2f\n", g_race_clock, g_rumble_low, g_rumble_high);
 }
