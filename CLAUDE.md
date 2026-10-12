@@ -2431,6 +2431,31 @@ SDL (section 29) and the framework's is static; the 50 Hz physics against 59.64 
   `--rename-section`) so that the state save covers only those, by `__start_` / `__stop_`
   symbols -- no dependence on how SDL is linked.
 
+**2026-10-12: the MiSTer branch is merged into `main`, and there is a Linux release.**
+- `main` was fast-forwarded to `mister` (25 commits; Danik's decision, reversing "no MiSTer
+  work here"). What that brought to the PC build: the renderer rewritten for speed (triangles
+  listed, then filled by two threads in lanes; fast paths for plain pieces and for cars; the
+  backdrop in whole-number steps -- pictures checked against the old ones while it was done),
+  `track_under` by cell, RUMBLE on a game controller (the port's own: `rumble_*` in main.c,
+  `OS_NORUMBLE=1`), the taller and the wide picture (`OS_TALL=1`: 240 rows, `OS_WIDE=1`: 640
+  columns with the high set's flat artwork; the MiSTer core's four sizes -- not in the PC
+  menu), and the files of the MiSTer core itself (`port/src/mister.[ch]`, everything behind
+  `MISTER_HYBRID`: off in an ordinary build).  The MiSTer side's own notes are in
+  `~/MiSTer-openscreamer/CLAUDE.md` (the core is released: `ItsDanik/openscreamer_MiSTer`).
+  From now on `mister` is kept equal to `main`: work on either, fast-forward the other.
+- **Linux release** (`tools/release_linux.sh`, README text in `tools/release_linux_readme.txt`):
+  built in a Debian 11 container (the hybrid cores' `mister-hybrid-tc` image; Debian 11's
+  package servers are gone, so SDL2 is built there from source as a bare shared library to
+  link against), dynamic SDL2.  The binary asks for glibc 2.27 and for nothing of SDL2 newer
+  than 2.0.9.  `dist/openscreamer-<version>-linux-x86_64.tar.gz`; GitHub release tagged
+  `v<version>`, pre-release while it is a beta.  Tested from a clean folder with the robot
+  (start-up check, a lap, a menu picture), headless; not on another distribution.
+- A Windows build was asked about and NOT made.  What stands in the way (port.c): the
+  read-only stream over a container's bytes is `fopencookie` (glibc only); the state restore
+  between the program's parts leans on GNU ld's `__data_start` / `_edata` / `__bss_start` /
+  `_end` (ELF); `setenv` / `unsetenv`, `mkdir(path, mode)`, `~/.config`.  MinGW-w64 and wine
+  are the way to build and to test it here.
+
 ## Legal
 
 The game is **still sold on GOG and Steam** — it is not abandonware. Follow the Dethrace

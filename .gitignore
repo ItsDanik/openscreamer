@@ -16,3 +16,5 @@ __pycache__/
 # Ghidra's project
 /openscreamer.gpr
 /openscreamer.rep/
+# release packages (tools/release_linux.sh)
+/dist/

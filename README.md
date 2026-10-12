@@ -14,6 +14,13 @@ copy its folder — the one that holds `DATA` and `GFX` — next to the program 
 or name it with `-data DIR`. The game's own files are read as they are; nothing has to be
 unpacked. At every start the files are checked and anything missing is listed by name.
 
+## Download
+
+A built program for x86-64 Linux is on the [releases page](https://github.com/ItsDanik/openscreamer/releases):
+`openscreamer-<version>-linux-x86_64.tar.gz`. It needs SDL2 installed (`libsdl2-2.0-0`, `SDL2` or
+`sdl2`, by distribution) and runs on any distribution of 2018 or later. Unpack it, put the
+game's folder next to the program as `screamer`, and start `./openscreamer`.
+
 ## Building
 
 SDL2, CMake and a C compiler:
@@ -35,7 +42,10 @@ Settings and saves go to `~/.config/openscreamer` (or `-home DIR`).
 | `CLAUDE.md` | the notebook of the whole project: every file format, where each rule of the game is in the original program, what is exact and what is the port's own |
 | `VERSION`, `tools/version.sh` | the version: the number in `VERSION`, its last part raised by one with every commit since |
 
-A MiSTer FPGA core built from this source is planned as `openscreamer_MiSTer`.
+The same source runs on the MiSTer FPGA as a hybrid core:
+[openscreamer_MiSTer](https://github.com/ItsDanik/openscreamer_MiSTer) (the code for it is in
+`port/src/mister.c` and behind `MISTER_HYBRID`; an ordinary build has none of it).
+`tools/release_linux.sh` makes the Linux release.
 
 ## Credits
 
