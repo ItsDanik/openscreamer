@@ -71,7 +71,9 @@ void mister_pad_mapping(void)
         char guid[40], map[400];
         SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof guid);
         SDL_snprintf(map, sizeof map, "%s,%s,a:b0,b:b1,rightshoulder:b2,leftshoulder:b3,y:b4,x:b5,back:b6,start:b7,"
-                     "leftstick:b28,rightstick:b29,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,leftx:a0,lefty:a1,",
+                     "leftstick:b28,rightstick:b29,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,leftx:a0,lefty:a1,"
+                     /* the analog triggers, which the hybrid library reads from Linux (MH_ReadTriggers) */
+                     "lefttrigger:+a4,righttrigger:+a5,",
                      guid, SDL_JoystickNameForIndex(i) ? SDL_JoystickNameForIndex(i) : "MiSTer Joystick");
         SDL_GameControllerAddMapping(map);
     }
