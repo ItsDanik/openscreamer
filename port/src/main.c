@@ -35,7 +35,12 @@
 #include <setjmp.h>
 
 /* every event loop gets the game controller's buttons as keys (controls.c) */
+#ifdef MISTER_HYBRID
+static void tall_follow(void);          /* MISTER: once a picture, the core's Resolution option */
+#define SDL_PollEvent(e) (tall_follow(), controls_poll(e))
+#else
 #define SDL_PollEvent(e) controls_poll(e)
+#endif
 
 
 /*
@@ -55,13 +60,17 @@ static int g_s = 1;                /* 1 low, 2 high */
  * g_tall is the extra rows (0 or 40) and g_oy how far down the flat thing
  * being drawn is put -- the middle for whole-screen pictures and menus (the
  * default), LAY_TOP / LAY_BOT for what belongs at an edge of the race's
- * screen.  The 3D view has all the rows.
+ * screen: 8 rows in from it, a television's edge being what it is (Danik).
+ * The 3D view has all the rows.  The picture's memory is always 40 rows more
+ * than it needs, so that the height can change while the program runs
+ * (tall_follow).
  */
 static int g_tall, g_oy;
+#define TALL_ROWS 40
 #define PIC_H     (FB_H - g_tall)
-#define LAY_TOP() (g_oy = 0)
+#define LAY_TOP() (g_oy = g_tall ? 8 : 0)
 #define LAY_MID() (g_oy = g_tall / 2)
-#define LAY_BOT() (g_oy = g_tall)
+#define LAY_BOT() (g_oy = g_tall ? g_tall - 8 : 0)
 static int g_clip[4] = { 0, 320, 0, 200 };     /* where flat things may be drawn: x0, x1, y0, y1, in pixels */
 
 /*
@@ -394,9 +403,9 @@ static void res_init(void)
     }
 #ifdef MISTER_HYBRID
     /* MISTER: the resolution is the core's OSD option, not the settings file's */
-    if (mister_on()) g_tall = mister_res_tall() ? 40 : 0;
+    if (mister_on()) g_tall = mister_res_tall() ? TALL_ROWS : 0;
 #endif
-    if (getenv("OS_TALL")) g_tall = atoi(getenv("OS_TALL")) ? 40 : 0;
+    if (getenv("OS_TALL")) g_tall = atoi(getenv("OS_TALL")) ? TALL_ROWS : 0;
     int hi = getenv("OS_RES") ? !strcmp(getenv("OS_RES"), "high") : g_cfg.res;
 #ifdef MISTER_HYBRID
     hi = 0;                                  /* MISTER: there is no high resolution -- the machine cannot fill it */
@@ -423,6 +432,27 @@ static void res_init(void)
     g_vh = FB_H; g_cy = 0.65f * (float)FB_H;
     g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H;
 }
+
+#ifdef MISTER_HYBRID
+/* MISTER: the core's Resolution option is followed at once, wherever the
+   program is (called once a picture, before anything is drawn) */
+static void tall_follow(void)
+{
+    static int quiet = -1;
+    if (quiet < 0) quiet = getenv("OS_TALL") != NULL || !mister_on();
+    if (quiet || !fb || g_s != 1) return;
+    const int tall = mister_res_tall() ? TALL_ROWS : 0;
+    if (tall == g_tall) return;
+    mister_show_wait();                              /* (the last picture may still be on its way out) */
+    FB_H += tall - g_tall;
+    g_tall = tall;
+    LAY_MID();
+    g_vh = FB_H; g_cy = 0.65f * (float)FB_H;
+    g_clip[3] = FB_H;
+    for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xff000000u; zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
+    sys_texture(FB_W, FB_H);                         /* the window's size is the core's video mode */
+}
+#endif
 
 /* a whole-screen picture (200 rows) put in the middle of the screen */
 static void pic_put(const uint8_t *pic, int scene)
@@ -2007,11 +2037,12 @@ static void render_frame(const camera *cam, const sky *s)
      * DETAIL setting, section 30 of CLAUDE.md) comes a little nearer, and
      * when there is time to spare it goes back out -- never nearer than the
      * game's own MID and LOW, 27808, and never further than what is set.
-     * OS_FIXEDFAR=1 leaves it where it is set.
+     * OFF since 2026-10-12 (Danik: things at the far plane came and went
+     * while the speed was on the edge); OS_ADAPTFAR=1 tries it.
      */
     static float reach = 1.0f;
     const float set = g_far_z;
-    if (set > 27808.0f && !getenv("OS_FIXEDFAR")) {
+    if (set > 27808.0f && getenv("OS_ADAPTFAR")) {
         const float took = mister_last_work();
         if (took > 14.6f) reach -= 0.02f;
         else if (took > 0.0f && took < 13.4f) reach += 0.005f;
@@ -4916,7 +4947,7 @@ static void cd_draw(float dt)
         if (g_cd.fade <= 0.0f) { g_cd.fade = 0.0f; snd_music("build/dec/MUSIC", 0); }
         volumes_apply(g_cd.fade);
     }
-    LAY_TOP();
+    g_oy = 0;
     champ_darken(0, 0, 320, FB_H / g_s);
     champ_darken(0, 0, 320, FB_H / g_s);
     LAY_MID();
@@ -6948,10 +6979,10 @@ static int menu_run(int *track, int *car)
         return 0;
     }
     g_focal_x = g_focal_y = GAME_FOCAL * (float)g_s;
-    fb  = malloc(sizeof(uint32_t) * FB_W * FB_H);
-    zb  = malloc(sizeof(float)    * FB_W * FB_H);
-    idb = malloc(sizeof(int16_t)  * FB_W * FB_H);
-    pxi = malloc(sizeof(int16_t)  * FB_W * FB_H);
+    fb  = malloc(sizeof(uint32_t) * FB_W * (FB_H + TALL_ROWS));
+    zb  = malloc(sizeof(float)    * FB_W * (FB_H + TALL_ROWS));
+    idb = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
+    pxi = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
     if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
     static scene empty;                      /* draw_object looks at the scene's count */
     g_scene = &empty;
@@ -8025,10 +8056,10 @@ static int session(int argc, char **argv)
     g_focal_x = g_focal_y = (getenv("OS_FOCAL") ? (float)atof(getenv("OS_FOCAL")) : GAME_FOCAL) * (float)g_s;
     float base_pitch = -0.10f;
 
-    fb  = malloc(sizeof(uint32_t) * FB_W * FB_H);
-    zb  = malloc(sizeof(float)    * FB_W * FB_H);
-    idb = malloc(sizeof(int16_t)  * FB_W * FB_H);
-    pxi = malloc(sizeof(int16_t)  * FB_W * FB_H);
+    fb  = malloc(sizeof(uint32_t) * FB_W * (FB_H + TALL_ROWS));
+    zb  = malloc(sizeof(float)    * FB_W * (FB_H + TALL_ROWS));
+    idb = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
+    pxi = malloc(sizeof(int16_t)  * FB_W * (FB_H + TALL_ROWS));
     if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
 
     /* OS_WALLCHECK=1: for every wall segment, is the track really there just
