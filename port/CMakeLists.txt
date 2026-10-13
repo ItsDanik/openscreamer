@@ -28,6 +28,7 @@ set(OS_SOURCES
   src/nuked/opl3.c
   src/port.c
   src/controls.c
+  src/s2_hooks.c
 )
 
 # MISTER (branch mister): the hybrid core.  SDL is the framework's, linked

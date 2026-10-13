@@ -31,6 +31,7 @@
 #include "drive.h"
 #include "sound.h"
 #include "port.h"
+#include "s2_port.h"
 #include "controls.h"
 #include <setjmp.h>
 
@@ -2489,6 +2490,10 @@ static int piece_covers(const scene_object *so, float x, float y)
  * one nearest the car's present height.  The game does no such thing.
  */
 static int g_under_obj;        /* the piece found */
+/* a point that falls between two faces is tried again a little further on: three times,
+   10 apart, in Screamer (0x11ccc); five times, 4 apart, in Screamer 2 (0x28db7) */
+static int   g_under_tries = 3;
+static float g_under_step = 10.0f;
 static float g_under_n[3];     /* its face's normal in world axes (x, y, up), as stored: not unit, either sign */
 
 static int track_under(float x, float y, int want_height, float *out)
@@ -2534,7 +2539,7 @@ static int track_under(float x, float y, int want_height, float *out)
             if (bx * bx + by * by > mm->bound_r * mm->bound_r) continue;
             float c = obj_cos[o], sn = obj_sin[o];
             float lx = dx * c + dy * sn, lz = -dx * sn + dy * c;        /* into the piece's frame */
-            for (int tries = 0; tries < 3; tries++, lx += 10.0f, lz += 10.0f)
+            for (int tries = 0; tries < g_under_tries; tries++, lx += g_under_step, lz += g_under_step)
                 for (int k = 0; k < mm->ncoll; k++) {
                     int f = mm->coll[k];
                     if (f < 0) continue;
@@ -2564,6 +2569,22 @@ static int track_under(float x, float y, int want_height, float *out)
         }
     }
     return 0;
+}
+
+/* SCREAMER 2's routines ask what is under a wheel (the hook for 0x28ce6, s2_hooks.c): the
+   same search, and besides the height the surface's normal -- turned to point UP, as the
+   wheel routine wants it (0x19cac pushes the car along its level part) -- and the piece's
+   road kind */
+int s2p_ground(int x, int y, int *height, int normal[3], int *kind)
+{
+    float z;
+    g_under_tries = 5; g_under_step = 4.0f;
+    if (!track_under((float)x, (float)y, 1, &z)) return 0;
+    const float s = g_under_n[2] < 0.0f ? -1.0f : 1.0f;
+    *height = (int)z;
+    normal[0] = (int)(g_under_n[0] * s); normal[1] = (int)(g_under_n[2] * s); normal[2] = (int)(g_under_n[1] * s);
+    *kind = g_scene->obj[g_under_obj].kind;
+    return 1;
 }
 
 static int on_track(float x, float y)
@@ -2648,6 +2669,22 @@ static const scene_dir *nearest_dir(float x, float y)
         if (d < bd) { bd = d; best = w; }
     }
     return best;
+}
+
+/* for SCREAMER 2's routines (the hook for 0x2a371): the record of the road-centre point or
+   wall segment nearest a place, as the track's file has it */
+int s2p_nearest(int walls, int x, int y, float rec[7])
+{
+    if (walls) {
+        const scene_wall *w = nearest_wall((float)x, (float)y);
+        if (!w) return 0;
+        rec[0] = w->angle; rec[1] = w->x; rec[2] = w->y; rec[3] = w->x1; rec[4] = w->y1; rec[5] = w->x2; rec[6] = w->y2;
+        return 1;
+    }
+    const scene_dir *d = nearest_dir((float)x, (float)y);
+    if (!d) return 0;
+    rec[0] = d->angle; rec[1] = d->x; rec[2] = d->y;
+    return 1;
 }
 
 static mesh g_shadow_mesh;
@@ -8462,6 +8499,36 @@ static int session(int argc, char **argv)
     path_drape(r);
     if (g_scene && !getenv("OS_NOCARS") && os_game() != 2) cars_load(gfxdir);
     if (g_scene && !getenv("OS_NOCARS") && os_game() == 2) s2_cars_show(r);       /* Screamer 2: standing cars so far */
+    if (g_scene && os_game() == 2 && getenv("OS_S2PHYS")) {
+        /* a test of the game's own car routines: a car on the grid, the accelerator down
+           (OS_S2KEYS: letters A B L R), OS_S2PHYS frames at 50 a second; a line every 25 */
+        static const int team[4] = { 0, 1, 2, 3 }, model[4] = { 0, 0, 0, 0 };
+        const char *keys = getenv("OS_S2KEYS") ? getenv("OS_S2KEYS") : "A";
+        const int frames = atoi(getenv("OS_S2PHYS"));
+        if (!s2_race_start(track, g_s2_cond, 1, team, model)) { fprintf(stderr, "screamer 2: the race did not start\n"); return 1; }
+        s2_go();
+        if (getenv("OS_S2PEEK")) { unsigned from = 0; int n = 8; sscanf(getenv("OS_S2PEEK"), "%x,%d", &from, &n); s2_peek(0, from, n); }
+        for (int f = 0; f <= frames; f++) {
+            s2_car_state c;
+            if (f % 25 == 0) {
+                s2_car(0, &c);
+                printf("s2 %4d  at %7d %7d  height %6d  heading %6.3f  tilt %6.3f %6.3f  speed %8.2f  gear %d  rpm %6.0f  steer %5.2f\n",
+                       f, c.x, c.y, c.height, c.angle[1], c.angle[0], c.angle[2], c.speed, c.gear, c.rpm, c.steer);
+                if (getenv("OS_S2WHEELS"))
+                    printf("        wheels on the ground %d %d %d %d  ground at %d %d %d %d  kinds %d %d %d %d\n", c.wheel_down[0], c.wheel_down[1],
+                           c.wheel_down[2], c.wheel_down[3], c.wheel_ground[0], c.wheel_ground[1], c.wheel_ground[2], c.wheel_ground[3],
+                           c.wheel_kind[0], c.wheel_kind[1], c.wheel_kind[2], c.wheel_kind[3]);
+            }
+            if (getenv("OS_S2TRACE") && f < atoi(getenv("OS_S2TRACE"))) {
+                unsigned from = 0x574; int n = 28;
+                if (getenv("OS_S2PEEK")) sscanf(getenv("OS_S2PEEK"), "%x,%d", &from, &n);
+                printf("frame %d\n", f); s2_peek(0, from, n);
+            }
+            s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
+            s2_frame(0.02f);
+        }
+        return 0;
+    }
     if (g_scene && g_ncar >= 0 && car_mesh_ok[0]) {
         g_nspec = cars_dtr_load(g_spec, CAR_SPECS_MAX, "build/dec/GEN/CARS.DTR");
         if (g_nspec == 0) fprintf(stderr, "note: no build/dec/GEN/CARS.DTR -- no driving\n");

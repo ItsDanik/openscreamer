@@ -112,6 +112,8 @@ typedef struct {
     int   v;          /* MAPn.UNR object index */
     int   t;          /* record +0x18, raw */
     int   layer;      /* 0 or 1: which of the cell's two record runs */
+    int   kind;       /* record +0x3C: Screamer 2's ROAD KIND (the id of a row of the track's
+                         ROAD KINDS table: grip, smoke); always 0 in Screamer */
     int   phase;      /* record +0x20: which frame of its textures, 0..65535 over
                          all of them; -1 (every track piece) = the animation clock */
 } scene_object;

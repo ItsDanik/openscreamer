@@ -1,0 +1,5 @@
+# Small tables of the program's initialised data that the converted routines read
+# (tools/s2c.py --tables): <address> <bytes>   what
+0x112e20 0x64   steering range; the gears' factors (0x112e24); tyre tables (0x112e38, 0x112e44); masks (0x112e50); 0x112e64
+0x112f00 0x20   the wheels' block names: flx fli blx rli frx fri brx rri
+0x113738 0x18   the fade's distances and flags as the program starts

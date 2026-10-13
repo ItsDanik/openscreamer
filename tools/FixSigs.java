@@ -54,6 +54,19 @@ public class FixSigs extends GhidraScript {
                 n++;
                 continue;
             }
+            if (ret != null) {
+                /* registers AND the stack AND a float result: the default convention with
+                   all four register parameters written out (those not used stay names),
+                   so that what follows them falls on the stack and the result in ST0 */
+                List<Variable> dyn = new ArrayList<>();
+                for (int i = 0; i < 4; i++) dyn.add(new ParameterImpl("r" + i, IntegerDataType.dataType, currentProgram));
+                for (int i = nreg; i < ps.size(); i++) dyn.add(new ParameterImpl(ps.get(i).getName(), ps.get(i).getDataType(), currentProgram));
+                f.setCustomVariableStorage(false);
+                f.updateFunction("__watcall", new ReturnParameterImpl(DoubleDataType.dataType, currentProgram), dyn,
+                        Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+                n++;
+                continue;
+            }
             if (ret == null) ret = new ReturnParameterImpl(VoidDataType.dataType, VariableStorage.VOID_STORAGE, currentProgram);
             f.updateFunction(null, ret, ps, Function.FunctionUpdateType.CUSTOM_STORAGE, true, SourceType.USER_DEFINED);
             n++;

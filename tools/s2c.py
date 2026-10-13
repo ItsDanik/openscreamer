@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Screamer 2: turn decompiled routines into C the port compiles.
 
-    python3 tools/s2c.py <out.c> <root entry>... [--hook <entry>...] [--fix tools/s2c_fix.txt]
+    python3 tools/s2c.py <out.c> <root entry>... [--hook <entry>...] [--take <entry>...]
+                         [--fix tools/s2c_fix.txt]
 
 The car's physics is some 5,000 lines of decompiled text.  Rewriting it from an understanding
 of it is how the feel of a game gets lost, so it is carried over as it is: every routine
@@ -14,7 +15,7 @@ files) is left as a call to a HOOK the port answers (port/src/s2_hooks.c).
 Input: build/decomp2/f_<entry>.c as tools/DecompRange.java writes them (parameters as plain
 ints, a `// GLOBAL` line for every global with its type, constants annotated by
 tools/s2consts.py).  The roots and every routine they reach inside 0x10000-0x4a000 (the game's logic) are
-taken, except the hooks.  `--fix` names a file of corrections for what the decompiler gets
+taken, except the hooks; `--take` names routines above that range to take as well.  `--fix` names a file of corrections for what the decompiler gets
 wrong (a float argument passed on the stack, mostly):
     @<entry>                      the routine the following lines are for
     s/<regex>/<replacement>/      applied to its converted text
@@ -28,11 +29,15 @@ LO, HI = 0x10000, 0x4a000        # above: the engine and the libraries, always h
 
 args = sys.argv[1:]
 out = args.pop(0)
-roots, hooks, fixfile = [], set(), None
+roots, hooks, fixfile, take, tables = [], set(), None, set(), None
 mode = "root"
 for a in args:
     if a == "--hook": mode = "hook"
     elif a == "--fix": mode = "fix"
+    elif a == "--take": mode = "take"
+    elif a == "--tables": mode = "tables"
+    elif mode == "tables": tables = a; mode = "root"
+    elif mode == "take": take.add(int(a, 16))
     elif mode == "fix": fixfile = a; mode = "root"
     elif mode == "hook": hooks.add(int(a, 16))
     else: roots.append(int(a, 16))
@@ -73,7 +78,7 @@ while todo:
     for c in re.findall(r"FUN_([0-9a-f]{8})", t):
         c = int(c, 16)
         if c == e: continue
-        if c in hooks or not (LO <= c < HI): externs.add(c)
+        if c in hooks or not (LO <= c < HI or c in take): externs.add(c)
         elif c not in funcs: todo.append(c)
 externs |= hooks
 
@@ -114,28 +119,50 @@ def convert(entry, t):
         return f"(*(%s *)MP(0x{a:x}u))" % CT.get(ty, "uint32_t")
     body = re.sub(r"\b(_?)(?:DAT|INT)_([0-9a-f]{8})(?:/\*[^*]*\*/)?(\._\d+_\d+_)?", g_val, body)
     body = re.sub(r"\bPTR_\w*?_([0-9a-f]{8})\b", lambda m: f"(*(uint32_t *)MP(0x{int(m.group(1),16):x}u))", body)
+    # an int kept for a moment in half of a double's place on the stack: nothing reads it
+    body = re.sub(r"^\s*(\w+) = \(double\)CONCAT44\(\1\._4_4_,[^;]*\);\n", "", body, flags=re.M)
     # variables the engine keeps in its CODE object (the ground query's results)
-    body = re.sub(r"\b_FUN_(0004[0-9a-f]{4})\b(?!\()", lambda m: f"(*(int32_t *)MP(0x{int(m.group(1),16):x}u))", body)
+    body = re.sub(r"\b_FUN_(000[0-9a-f]{5})\b(?!\()", lambda m: f"(*(int32_t *)MP(0x{int(m.group(1),16):x}u))", body)
     # a float compared with a hexadecimal number is compared as its BITS (cmp dword, imm)
     body = re.sub(r"\(int\)([A-Za-z_]\w*) (<=|>=|==|!=|<|>) (0x[0-9a-f]{8})\b", r"BITS(\1) \2 \3", body)
     body = re.sub(r"\b(0x[0-9a-f]{8}) (<=|>=|==|!=|<|>) \(int\)([A-Za-z_]\w*)", r"\1 \2 BITS(\3)", body)
+    # *(T **)(E): the address kept at E, itself to be read
+    def close(text, i):                      # index of the bracket matching the one at i
+        d = 0
+        for k in range(i, len(text)):
+            if text[k] == "(": d += 1
+            elif text[k] == ")":
+                d -= 1
+                if d == 0: return k
+        return -1
+    while True:
+        m = re.search(r"(\*?)\*\((\w+) \*\*\)\s*\(", body)
+        if not m: break
+        e = close(body, m.end() - 1)
+        inner = "(*(uint32_t *)MP%s)" % body[m.end() - 1:e + 1]
+        body = body[:m.start()] + ("*(%s *)MP%s" % (m.group(2), inner) if m.group(1) else inner) + body[e + 1:]
     # a cast to a pointer followed by a bracket is an address being read
-    body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)\(",
+    body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)\s*\(",
                   r"(\1 *)MP(", body)
     body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)(?!MP\()([A-Za-z_]\w*)",
                   r"(\1 *)MP(\2)", body)
-    # LOCALS WHOSE ADDRESS IS TAKEN (and every local array) live in the block too, on a stack
-    # of its own: `&local` is then an address like any other.  The routine becomes a body and
-    # a wrapper that gives the stack back.
-    stacked = []
+    # THE ROUTINE'S STACK FRAME is in the block too, every local at the offset its name
+    # carries (local_9c is 0x9c below the return address): a structure the compiler laid
+    # out on the stack is seen by the decompiler as several locals, and a routine that
+    # fills it through the address of the first must find the others where they were.
+    # So `&local` is an address like any other.  The routine becomes a body and a wrapper
+    # that gives the stack back.
+    stacked, frame = [], 0
     def decl(m):
-        ind, ty, name, arr = m.group(1), m.group(2), m.group(3), m.group(4)
-        if not arr and not re.search(r"&%s\b" % name, body): return m.group(0)
-        n = arr.strip()[1:-1] if arr else "1"
+        nonlocal_frame[0] = max(nonlocal_frame[0], int(m.group(4), 16))
+        ind, ty, name, arr = m.group(1), m.group(2), m.group(3), m.group(5)
         stacked.append((name, bool(arr)))
-        acc = "((%s *)MP(%s_a))" % (ty, name) if arr else "(*(%s *)MP(%s_a))" % (ty, name)
-        return "%suint32_t %s_a = s2_push(sizeof(%s) * (%s));\n#define %s %s" % (ind, name, ty, n, name, acc)
-    body = re.sub(r"^(\s+)(\w+) (\w+)( \[\d+\])?;$", decl, body, flags=re.M)
+        at = "s2_fp - 0x%s" % m.group(4)
+        acc = "((%s *)MP(%s))" % (ty, at) if arr else "(*(%s *)MP(%s))" % (ty, at)
+        return "#define %s %s\n#define %s_a (%s)" % (name, acc, name, at)
+    nonlocal_frame = [0]
+    body = re.sub(r"^(\s+)(?!return\b|goto\b)(\w+) ((?:local|[a-z]+Stack)_([0-9a-f]+))( \[\d+\])?;$", decl, body, flags=re.M)
+    frame = (nonlocal_frame[0] + 15) & ~15
     for name, is_arr in stacked:
         body = re.sub(r"\(int\)&%s\b|&%s\b" % (name, name), name + "_a", body)
         if is_arr:
@@ -144,12 +171,14 @@ def convert(entry, t):
         m = re.search(r"^(\w[\w \*]*?)\s*\n?(FUN_[0-9a-f]{8})\(([^)]*)\)\s*\n\{", body, re.M)
         ret, fn, params = m.group(1).strip(), m.group(2), m.group(3)
         names = ",".join(q.split()[-1].lstrip("*") for q in params.split(",") if q.strip() and q.strip() != "void")
-        body = body[:m.start()] + "static %s %s_body(%s)\n{" % (ret, fn, params) + body[m.end():]
-        body += "\n" + "".join("#undef %s\n" % n for n, _ in stacked)
+        sep = "," if names else ""
+        body = body[:m.start()] + "static %s %s_body(%s%suint32_t s2_fp)\n{" % (ret, fn, params if names else "", sep) + body[m.end():]
+        body += "\n" + "".join("#undef %s\n#undef %s_a\n" % (n, n) for n, _ in stacked)
+        call = "%s_body(%s%ss2_push(0x%x) + 0x%x)" % (fn, names, sep, frame, frame)
         if ret == "void":
-            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s_body(%s);\n  s2_sp = sp;\n}\n" % (ret, fn, params, fn, names)
+            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s;\n  s2_sp = sp;\n}\n" % (ret, fn, params, call)
         else:
-            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s r = %s_body(%s);\n  s2_sp = sp;\n  return r;\n}\n" % (ret, fn, params, ret, fn, names)
+            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s r = %s;\n  s2_sp = sp;\n  return r;\n}\n" % (ret, fn, params, ret, call)
     # a local that is a C pointer, handed on as an address: back to the number
     for name in set(re.findall(r"^\s+\w+ \*(\w+);", body, re.M)):
         body = re.sub(r"\(int\)\((%s\b[^()]*)\)" % name, r"PM(\1)", body)
@@ -172,10 +201,50 @@ for m in re.finditer(r"\t(f[a-z0-9]+) +(DWORD|QWORD) PTR ds:0x(1[1-3][0-9a-f]{4}
 
 texts = {e: convert(e, t) for e, t in sorted(funcs.items())}
 
+# a call that passes fewer arguments than the routine is written with (the decompiler gives a
+# routine register parameters it does not use, and leaves them out at some calls): noughts
+nparams = {}
+for e, t in texts.items():
+    m = None
+    for m in re.finditer(r"^static [\w \*]+? (FUN_[0-9a-f]{8})\(([^)]*)\)\s*\n\{", t, re.M): pass
+    if m:
+        ps = [q for q in m.group(2).split(",") if q.strip() and q.strip() != "void"]
+        nparams[m.group(1)] = len(ps)
+def pad(t):
+    out, i = [], 0
+    for m in re.finditer(r"\b(FUN_[0-9a-f]{8})(_body)?\(", t):
+        name = m.group(1)
+        if m.group(2) or name not in nparams or m.start() < i: continue
+        ls = t.rfind("\n", 0, m.start()) + 1
+        if t[ls:m.start()].startswith("static "): continue          # its own heading
+        d, k, commas, empty = 0, m.end() - 1, 0, True
+        while k < len(t):
+            c = t[k]
+            if c == "(": d += 1
+            elif c == ")":
+                d -= 1
+                if d == 0: break
+            elif c == "," and d == 1: commas += 1
+            elif d >= 1 and not c.isspace(): empty = False
+            k += 1
+        have = 0 if empty else commas + 1
+        if have < nparams[name]:
+            out.append(t[i:k]); out.append(("" if empty else ",") + ",".join(["0"] * (nparams[name] - have))); i = k
+    out.append(t[i:])
+    return "".join(out)
+texts = {e: pad(t) for e, t in texts.items()}
+
 def proto(body):
     m = None
     for m in re.finditer(r"^static ([\w \*]+?) (FUN_[0-9a-f]{8})\(([^)]*)\)", body, re.M): pass
     return f"static {m.group(1)} {m.group(2)}({m.group(3)});" if m else None
+
+# a bare address that is a name in the program's data (a block's name handed to a hook)
+for t in texts.values():
+    for m in re.finditer(r"(?<!MP\()\b0x(11[0-8][0-9a-f]{3})u?\b(?! \+| \*)", t):
+        a = int(m.group(1), 16)
+        e = IMG.index(b"\0", a)
+        if 2 <= e - a <= 24 and all(32 < c < 127 for c in IMG[a:e]) and IMG[a - 1] == 0: strings[a] = IMG[a:e]
 
 with open(out, "w") as f:
     f.write("/* MADE BY tools/s2c.py FROM THE GAME'S ROUTINES -- do not edit: change the tool, its\n"
@@ -195,6 +264,18 @@ with open(out, "w") as f:
     for a in sorted(strings):
         f.write(f'    s2_str(0x{a:x}u, "{strings[a].decode("latin1")}");\n')
     f.write("}\n")
+if tables:
+    with open(out, "a") as f:
+        f.write("\n/* tables of the program's that the routines read (tools/s2_tables.txt) */\nvoid s2_gen_tables(void)\n{\n")
+        for line in open(tables):
+            if not line.strip() or line.startswith("#"): continue
+            w = line.split()
+            a0, n = int(w[0], 16), int(w[1], 16)
+            f.write("    /* 0x%x: %s */\n" % (a0, " ".join(w[2:])))
+            for a in range(a0, a0 + n, 4):
+                v = struct.unpack_from("<I", IMG, a)[0]
+                if v: f.write("    *(uint32_t *)MP(0x%xu) = 0x%08xu;\n" % (a, v))
+        f.write("}\n")
 print(f"{len(texts)} routines, {sum(t.count(chr(10)) for t in texts.values())} lines -> {out}")
 print("hooks wanted:", " ".join(f"{e:05x}" for e in sorted(externs)))
 print("to look at (stack / register artefacts):", " ".join(f"{e:05x}" for e in sorted(review)))

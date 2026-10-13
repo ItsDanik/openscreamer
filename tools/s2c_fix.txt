@@ -1,1 +1,9 @@
-# Corrections to the converted routines (tools/s2c.py --fix): @entry, then s/regex/replacement/
+# Corrections to the converted routines (tools/s2c.py --fix): @entry, then s|regex|replacement|
+# The power routine 0xafed2 takes its arguments on the FPU stack (ST0 to the power ST1) and
+# the decompiler drops them; each call is rewritten from the instructions before it.
+@19409   0x1fxxx: fld [car+0x4d4]; cos; fabs; fld 4.0 (0x110548); fxch; call pow
+s|  fcos\(\(float10\)\*\(float \*\)MP\(param_1 \+ 0x4d4\)\);\n  fVar2 = \(float10\)FUN_000afed2\(\);|  fVar2 = pow(fabs(cos((double)*(float *)MP(param_1 + 0x4d4))), 4.0);|
+@1f756   0x1fa7b-0x1fb60: r = car[0xc78] / car[0x60]; G = table 0x112e24[gear]; (1 - (G*0.22 + r*c - 1)^2) * G^2 * 0.8, c = 1.6, or 1.5 in gear 0
+s|  if \(\*\(int \*\)MP\(param_1 \+ 0xc7c\) == 0\) \{\s+FUN_000afed2\(\);[\s\S]*?\n  \}\n  else \{[\s\S]*?\n  \}|  { double r_ = (double)(*(float *)MP(param_1 + 0xc78) / *(float *)MP(param_1 + 0x60)), G_ = (double)*(float *)MP(0x112e24u + *(int *)MP(param_1 + 0xc7c) * 4), c_ = *(int *)MP(param_1 + 0xc7c) == 0 ? 1.5 : 1.6; fVar3 = (1.0 - pow(G_ * 0.22 + r_ * c_ + -1.0, 2.0)) * pow(G_, 2.0) * 0.8; }|
+@2d59c   0x2d720: fld [cursor+0x1c]; call arc cosine
+s|fVar1 = \(float10\)FUN_0004ea98\(\);|fVar1 = acos((double)*(float *)MP(param_2 + 0x1c));|

@@ -19,17 +19,13 @@
 extern uint8_t s2_mem[S2_SIZE];
 void s2_bad_address(uint32_t a);
 
-/* the engine keeps a few variables in its CODE object (0x4c000-0x4cfff: what the ground
-   query found); they get a page of their own */
-extern uint8_t s2_code_page[0x1000];
+/* the engine keeps a few variables in its CODE object (0x4cb98: what the ground query
+   found; 0xb04a8); those pages are given out as they are asked for */
+uint8_t *s2_code_var(uint32_t a);
 
 static inline uint8_t *MP(uint32_t a)
 {
-    if (a - S2_BASE >= S2_SIZE - 16) {
-        if (a - 0x4c000u < 0x1000u - 16) return s2_code_page + (a - 0x4c000u);
-        s2_bad_address(a);
-        return s2_mem;
-    }
+    if (a - S2_BASE >= S2_SIZE - 16) return s2_code_var(a);
     return s2_mem + (a - S2_BASE);
 }
 /* the address of a byte of the block */
@@ -65,6 +61,7 @@ typedef uint8_t  bool;
 #define fsin(x)  sin((double)(x))
 #define fsqrt(x) sqrt((double)(x))
 #define SQRT(x)  sqrt((double)(x))
+#define fpatan(y, x) atan2((double)(y), (double)(x))
 /* the game's float-to-whole-number helper (0x4ea12) cuts the fraction off */
 #define ROUND(x) trunc((double)(x))
 #define ABS(x)   fabs((double)(x))
