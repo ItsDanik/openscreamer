@@ -134,11 +134,11 @@ static int read_mmp(scene *sc, const char *path)
  */
 static int load_unr(mesh **out, const char *gfxdir, int track, int *count)
 {
-    static mesh    unr_mesh[UNR_MAX_OBJ];
+    static mesh   *unr_mesh;            /* one per object of the file: allocated, a track has what it has */
     static unr     u;
     char path[512];
 
-    *out = unr_mesh;
+    *out = NULL;
     *count = 0;
 
     snprintf(path, sizeof path, "%s/MAP%d.UNR", gfxdir, track);
@@ -147,6 +147,9 @@ static int load_unr(mesh **out, const char *gfxdir, int track, int *count)
         return 0;
     }
 
+    unr_mesh = calloc((size_t)u.count, sizeof *unr_mesh);
+    if (!unr_mesh) return 0;
+    *out = unr_mesh;
     int ok = 0;
     for (int k = 0; k < u.count; k++) {
         long len = 0;

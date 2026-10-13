@@ -54,7 +54,9 @@ typedef struct {
     void  *slot[8];
     /* the game's own containers, read as they are (see packed_open) */
     int    packed;                      /* the data directory is a copy of the GAME, with its DATA and GFX folders */
-    char   dir_data[800], dir_gfx[800];
+    int    game;                        /* 1 = Screamer, 2 = Screamer 2 */
+    int    both;                        /* both games were found and none was asked for */
+    char   dir_data[800], dir_gfx[800], dir_anims[800];
     struct pack { char name[16]; unsigned char *bytes; long len, dir; int nent; unsigned stamp; } pack[PACKS];
     unsigned pack_clock;
 } keep;
@@ -176,7 +178,8 @@ static struct pack *pack_get(const char *name)
     }
     char file[32], path[1024];
     snprintf(file, sizeof file, "%.15s.DAT", name);
-    if (!ci_find(K->dir_data, file, path, sizeof path) && !ci_find(K->dir_gfx, file, path, sizeof path)) return NULL;
+    if (!ci_find(K->dir_data, file, path, sizeof path) && !ci_find(K->dir_gfx, file, path, sizeof path) &&
+        !(K->dir_anims[0] && ci_find(K->dir_anims, file, path, sizeof path))) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
@@ -338,19 +341,25 @@ static int pack_whole(const char *path, int *files)
 
 static void game_check(void)
 {
-    static const char *const data[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
-                                        "MAP1I", "MAP2I", "MAP3I", "MAP4I", "MAP5I", "MAP6I" };
-    static const char *const gfx[]  = { "GAME", "GRAF", "MENU", "MAP1L", "MAP2L", "MAP3L", "MAP4L", "MAP5L", "MAP6L" };
-    static const char *const high[] = { "MAP1H", "MAP2H", "MAP3H", "MAP4H", "MAP5H", "MAP6H" };
+    static const char *const data1[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
+                                         "MAP1I", "MAP2I", "MAP3I", "MAP4I", "MAP5I", "MAP6I", NULL };
+    static const char *const gfx1[]  = { "GAME", "GRAF", "MENU", "MAP1L", "MAP2L", "MAP3L", "MAP4L", "MAP5L", "MAP6L", NULL };
+    static const char *const high1[] = { "MAP1H", "MAP2H", "MAP3H", "MAP4H", "MAP5H", "MAP6H", NULL };
+    /* SCREAMER 2: what the port reads so far (the 256-colour low-resolution sets) */
+    static const char *const data2[] = { "GEN", "GAME", "LOCAL", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6", "MAP7", NULL };
+    static const char *const gfx2[]  = { "GAME1", "GRAF1", "MAP1L01", "MAP2L01", "MAP3L01", "MAP4L01", "MAP5L01", "MAP6L01", "MAP7L01",
+                                         "MAP1L11", "MAP2L11", "MAP3L11", "MAP4L11", "MAP6L11",
+                                         "CARS101", "CARS201", "CARS301", "CARS401", NULL };
+    static const char *const high2[] = { "MAP1H01", "MAP2H01", "MAP3H01", "MAP4H01", "MAP5H01", "MAP6H01", "MAP7H01", NULL };
     char bad[1200] = "", path[1024], file[32];
-    int files = 0, nbad = 0, hi = 1;
+    int files = 0, nbad = 0, hi = 1, packs = 0;
     printf("OpenScreamer %s\n", OS_VERSION);
-    printf("Checking game data in %s ... ", K->data);
+    printf("Checking %s data in %s ... ", K->game == 2 ? "Screamer 2" : "Screamer", K->data);
     fflush(stdout);
     for (int set = 0; set < 3; set++) {
-        const char *const *list = set == 0 ? data : set == 1 ? gfx : high;
-        int n = set == 0 ? 16 : set == 1 ? 9 : 6;
-        for (int i = 0; i < n; i++) {
+        const char *const *list = K->game == 2 ? (set == 0 ? data2 : set == 1 ? gfx2 : high2)
+                                               : (set == 0 ? data1 : set == 1 ? gfx1 : high1);
+        for (int i = 0; list[i]; i++) {
             int ok;
             const char *what = "missing";
             if (K->packed) {
@@ -361,7 +370,7 @@ static void game_check(void)
                 snprintf(path, sizeof path, "%s/%s", K->data, list[i]);
                 ok = is_dir(path);
             }
-            if (ok) continue;
+            if (ok) { packs++; continue; }
             if (set == 2) { hi = 0; continue; }
             size_t at = strlen(bad);
             snprintf(bad + at, sizeof bad - at, "\n  %s/%s%s  %s", set == 0 ? "DATA" : "GFX", list[i],
@@ -373,8 +382,9 @@ static void game_check(void)
         printf("FAILED\n");
         fflush(stdout);
         fprintf(stderr, "openscreamer: %d of the game's files cannot be used:%s\n"
-                        "Say where a complete copy of Screamer is with -data DIR (the folder that holds its\n"
-                        "DATA and GFX folders), or put it next to the program as \"screamer\".\n", nbad, bad);
+                        "Say where a complete copy of the game is with -data DIR (the folder that holds its\n"
+                        "DATA and GFX folders), or put it next to the program as \"%s\".\n", nbad, bad,
+                        K->game == 2 ? "screamer2" : "screamer");
 #ifdef _WIN32
         {
             char text[2600];
@@ -385,7 +395,7 @@ static void game_check(void)
 #endif
         exit(1);
     }
-    if (K->packed) printf("OK (%d containers, %d files", hi ? 31 : 25, files);
+    if (K->packed) printf("OK (%d containers, %d files", packs, files);
     else           printf("OK (unpacked files");
     printf("%s)\n", hi ? "" : "; no high-resolution files: low resolution only");
     fflush(stdout);
@@ -415,6 +425,8 @@ static void os_help(const char *me)
 "  -data DIR      your copy of the game: the folder that holds its DATA and GFX folders\n"
 "                 default: $OPENSCREAMER_DATA, ./screamer, <program>/screamer\n"
 "                 (a folder of files already unpacked with tools/extract.sh works too)\n"
+"  -game N        1 = Screamer, 2 = Screamer 2 (in work: tracks only).  Default: the one whose\n"
+"                 files are found (./screamer, ./screamer2); -data DIR names either game's folder\n"
 "  -home DIR      where settings and saves are kept\n"
 "                 default: $OPENSCREAMER_HOME, this directory if it already holds them,\n"
 "                 else ~/.config/openscreamer\n"
@@ -497,6 +509,21 @@ static void win_fatal(const char *text)
 }
 #endif
 
+/* which game a data directory holds: Screamer 2's tracks are MAP1L01 (track, resolution,
+   look, colours), Screamer's MAP1L.  0 = neither */
+static int which_game(const char *dir)
+{
+    char gfx[800], path[1024];
+    if (!is_dir(dir)) return 0;
+    if (ci_find(dir, "GFX", gfx, sizeof gfx) && is_dir(gfx)) {
+        if (ci_find(gfx, "MAP1L01.DAT", path, sizeof path)) return 2;
+        if (ci_find(gfx, "MAP1L.DAT", path, sizeof path)) return 1;
+    }
+    if (ci_find(dir, "MAP1L01", path, sizeof path) && is_dir(path)) return 2;
+    if (ci_find(dir, "MAP1L", path, sizeof path) && is_dir(path)) return 1;
+    return 0;
+}
+
 void os_init(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -513,11 +540,13 @@ void os_init(int argc, char **argv)
     K = calloc(1, sizeof *K);
     if (!K) exit(1);
     const char *data = getenv("OPENSCREAMER_DATA"), *home = getenv("OPENSCREAMER_HOME");
+    int game = getenv("OPENSCREAMER_GAME") ? atoi(getenv("OPENSCREAMER_GAME")) : 0;    /* 0: whichever is found */
     K->argv[K->argc++] = argv[0];
     for (int i = 1; i < argc && K->argc < 15; i++) {
         if (!strcmp(argv[i], "-d")) K->dev = 1;
         else if (!strcmp(argv[i], "-data") && i + 1 < argc) data = argv[++i];
         else if (!strcmp(argv[i], "-home") && i + 1 < argc) home = argv[++i];
+        else if (!strcmp(argv[i], "-game") && i + 1 < argc) game = atoi(argv[++i]);
         else K->argv[K->argc++] = argv[i];
     }
     char exe[600] = "";
@@ -530,26 +559,34 @@ void os_init(int argc, char **argv)
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (n > 0) { exe[n] = 0; char *s = strrchr(exe, '/'); if (s) *s = 0; } else strcpy(exe, ".");
 #endif
-    if (data) snprintf(K->data, sizeof K->data, "%s", data);
-    else {
-        /* a copy of the game first, then files already unpacked */
-        char cand[7][700];
-        snprintf(cand[0], 700, "screamer");
-        snprintf(cand[1], 700, "%s/screamer", exe);
-        snprintf(cand[2], 700, "%s/../../screamer", exe);
-        snprintf(cand[3], 700, "build/dec");
-        snprintf(cand[4], 700, "%s/data", exe);
-        snprintf(cand[5], 700, "%s/../../build/dec", exe);
-        snprintf(cand[6], 700, "data");
-        snprintf(K->data, sizeof K->data, "%.700s", cand[0]);
-        for (int i = 0; i < 7; i++)
-            if (is_dir(cand[i])) { snprintf(K->data, sizeof K->data, "%.700s", cand[i]); break; }
+    if (game != 1 && game != 2) game = 0;
+    if (data) {
+        snprintf(K->data, sizeof K->data, "%s", data);
+        if (!game) game = which_game(K->data);
+    } else {
+        /* a copy of the game first, then files already unpacked; Screamer 2's are
+           the same places with a 2 at the end of the name */
+        static const char *const where[7] = { "screamer%s", "%s/screamer%s", "%s/../../screamer%s", "build/dec%s",
+                                              "%s/data%s", "%s/../../build/dec%s", "data%s" };
+        char found[3][700] = { "", "", "" };
+        for (int g = 1; g <= 2; g++)
+            for (int i = 0; i < 7 && !found[g][0]; i++) {
+                char cand[700];
+                if (where[i][0] == '%' && where[i][1] == 's' && where[i][2] == '/') snprintf(cand, sizeof cand, where[i], exe, g == 2 ? "2" : "");
+                else snprintf(cand, sizeof cand, where[i], g == 2 ? "2" : "");
+                if (is_dir(cand) && which_game(cand) == g) snprintf(found[g], 700, "%s", cand);
+            }
+        /* no -game: the one that is there; both there: Screamer (the choice between them is the menu's) */
+        if (!game) { K->both = found[1][0] && found[2][0]; game = found[1][0] || !found[2][0] ? 1 : 2; }
+        snprintf(K->data, sizeof K->data, "%.700s", found[game][0] ? found[game] : game == 2 ? "screamer2" : "screamer");
     }
+    K->game = game ? game : 1;
     /* the game itself (its DATA and GFX folders, whatever their letters' case),
        or files unpacked from it? */
     K->packed = ci_find(K->data, "DATA", K->dir_data, sizeof K->dir_data)
              && ci_find(K->data, "GFX", K->dir_gfx, sizeof K->dir_gfx)
              && is_dir(K->dir_data) && is_dir(K->dir_gfx);
+    if (!K->packed || !ci_find(K->data, "ANIMS", K->dir_anims, sizeof K->dir_anims) || !is_dir(K->dir_anims)) K->dir_anims[0] = 0;
     if (home) snprintf(K->home, sizeof K->home, "%s", home);
     else if (is_file(".", "openscreamer.cfg") || is_file(".", "openscreamer.records") || is_file(".", "openscreamer.champ"))
         strcpy(K->home, ".");
@@ -595,6 +632,8 @@ void os_init(int argc, char **argv)
 }
 
 int   os_dev(void)  { return K && K->dev; }
+int   os_game(void) { return K ? K->game : 1; }
+int   os_both_games(void) { return K && K->both; }
 int   os_argc(void) { return K->has_next ? K->next_argc : K->argc; }
 char **os_argv(void) { return K->has_next ? K->next_argv : K->argv; }
 const char *os_data_dir(void) { return K ? K->data : "build/dec"; }

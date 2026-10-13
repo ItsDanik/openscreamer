@@ -10,8 +10,11 @@ import ghidra.util.task.ConsoleTaskMonitor;
 public class CreateEntry extends GhidraScript {
     @Override
     public void run() throws Exception {
+        // entry address as the script's argument (Screamer 2: 0xB3D10); default Screamer 1's
+        String[] args = getScriptArgs();
+        long entry = args.length > 0 ? Long.decode(args[0]) : 0x2FEB8L;
         Address ea = currentProgram.getAddressFactory()
-                .getDefaultAddressSpace().getAddress(0x2FEB8L);
+                .getDefaultAddressSpace().getAddress(entry);
         ConsoleTaskMonitor mon = new ConsoleTaskMonitor();
         new DisassembleCommand(ea, null, true).applyTo(currentProgram, mon);
         if (currentProgram.getFunctionManager().getFunctionAt(ea) == null) {

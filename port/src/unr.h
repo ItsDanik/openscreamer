@@ -56,7 +56,7 @@
 #include <stdint.h>
 
 /* The object count varies per track: 192, 356, 353, 236, 360, 307 for 1..6. */
-#define UNR_MAX_OBJ 512
+#define UNR_MAX_OBJ 2048     /* Screamer's tracks have up to 261 objects, Screamer 2's 594 and more */
 
 typedef struct {
     uint8_t *file;      /* the whole file, kept alive for unr_object() */

@@ -45,7 +45,17 @@ music driver; the port does not use them). In older notes `DATA/…` means `scre
 
 **Legal: the game is still sold (GOG, Steam). Never publish `screamer/` or anything made
 from it** (`build/dec`, `build/png`, `build/screamer_flat*.bin`, `build/decomp`). Check
-`git status` before every commit. `screamer2/` holds the Screamer 2 game files (ignored; support for it is the next work).
+`git status` before every commit.
+
+**Screamer 2** (`screamer2/`, ignored; the same legal rule, also for `build/dec2`,
+`build/screamer2_flat.bin`, `build/ghidra2`, `build/decomp2`) is the work in hand: its record is
+**`docs/NOTES2.md`** (sections S2-n: decisions, files, what stayed the same, tools, DOSBox,
+plan). Containers, `.3DX` and the track files are Screamer 1's formats; the game logic is new.
+`openscreamer -game 2` (or `-data screamer2`) rides round its tracks (`OS_TRACK=1..7`,
+`OS_COND=1|2` = night / fog, NOTES2 S2-5d): tracks only so far. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
+Its image is made with `tools/unle.py --fixups` (real relocation records, no
+`RelocateRefs.java`). `screamer-dos [1|2]` runs the originals in DOSBox (`~/dosgames`).
+**The MiSTer port is not to be touched until Danik says so.**
 
 ---
 
@@ -238,6 +248,8 @@ MODELOG TILTCHECK STACKED DOPPLERLOG INTRO_LOG`.
   driving view; the striped wall `V81` "missing half" (it is right).
 - Sign traps: the game's wheel `track` is negative (car leans the wrong way otherwise);
   the port's lean is + when the RIGHT side is higher; the skid really is lop-sided.
+- Moving scenery (objects with frames) is modelled Z-up; a frame is the block's whole matrix on
+  (x, y, z) as stored (NOTES2 S2-5b). Check such an object from four sides, in both games.
 - Only the hub disc spins, not the tyre block. A car drawn anywhere needs a `car_pose`.
 - Per-FRAME quantities in the game (Doppler, lean kicks, prop lift, wheel turn): the port
   assumes 30 frames/s.

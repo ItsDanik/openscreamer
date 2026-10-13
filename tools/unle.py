@@ -84,11 +84,71 @@ def parse_le(data: bytes):
     return hdr, objects
 
 
+def apply_fixups(data, hdr, objects, img):
+    """Apply the LE fixup records to the flat image.
+
+    Fixup page table (LE +0x68): one uint32 per page (+1), offsets into the
+    fixup record table (LE +0x6C).  Record: source type, flags, int16 source
+    offset in the page (or a count, then a list, when source & 0x20), target
+    object (byte, or word when flags & 0x40), target offset (word, or dword
+    when flags & 0x10).  Only internal targets (flags & 3 == 0) occur here.
+    Source type 7 = 32-bit offset: the only kind that is a flat pointer.
+    """
+    le = hdr["le_offset"]
+    u32 = lambda o: struct.unpack_from("<I", data, o)[0]
+    fpt, frt = le + u32(le + 0x68), le + u32(le + 0x6C)
+    ps = hdr["page_size"]
+    page_va = {}
+    for ob in objects:
+        for p in range(ob["npages"]):
+            page_va[ob["pagemap_idx"] - 1 + p] = ob["base"] + p * ps
+    base = {ob["index"]: ob["base"] for ob in objects}
+    applied = skipped = 0
+    kinds, sites = {}, []
+    for page in range(hdr["n_pages"]):
+        o, end = frt + u32(fpt + 4 * page), frt + u32(fpt + 4 * page + 4)
+        while o < end:
+            src, flags = data[o], data[o + 1]
+            o += 2
+            assert flags & 3 == 0, f"fixup with an external target (flags {flags:#x})"
+            if src & 0x20:
+                n = data[o]; o += 1
+                offs = None
+            else:
+                offs = [struct.unpack_from("<h", data, o)[0]]; o += 2
+            if flags & 0x40:
+                obj = struct.unpack_from("<H", data, o)[0]; o += 2
+            else:
+                obj = data[o]; o += 1
+            toff = 0
+            if src & 0x0F != 2:                      # a selector fixup has no offset
+                if flags & 0x10:
+                    toff = u32(o); o += 4
+                else:
+                    toff = struct.unpack_from("<H", data, o)[0]; o += 2
+            if offs is None:
+                offs = list(struct.unpack_from(f"<{n}h", data, o)); o += 2 * n
+            for so in offs:
+                if src & 0x0F == 7:
+                    va = page_va[page] + so
+                    if so >= 0 and va + 4 <= len(img):   # so < 0: done from the page before
+                        struct.pack_into("<I", img, va, (base[obj] + toff) & 0xFFFFFFFF)
+                        sites.append(va)
+                    applied += 1
+                else:
+                    skipped += 1
+                    kinds[src & 0x0F] = kinds.get(src & 0x0F, 0) + 1
+    return {"applied": applied, "skipped": skipped, "kinds": kinds, "sites": sorted(set(sites))}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exe")
     ap.add_argument("-o", "--out", default="screamer_flat.bin")
     ap.add_argument("--map", default=None, help="write a JSON layout map here")
+    ap.add_argument("--fixups", action="store_true",
+                    help="apply the LE fixup records: every pointer in the image "
+                         "becomes its real flat address (no RelocateRefs.java needed)")
     args = ap.parse_args()
 
     data = Path(args.exe).read_bytes()
@@ -128,14 +188,22 @@ def main():
 
     assert len(img) == top, f"image shrank: {len(img)} != {top}"
 
+    fix = None
+    if args.fixups:
+        fix = apply_fixups(data, hdr, objects, img)
+        print(f"fixups applied         : {fix['applied']:,} 32-bit offsets "
+              f"({fix['skipped']:,} of other kinds left alone: {fix['kinds']})")
+
     Path(args.out).write_bytes(img)
     print(f"\nwrote {args.out}: {len(img):,} bytes of flat VA space "
           f"(0x0 .. 0x{top:X})")
 
     if args.map:
         Path(args.map).write_text(json.dumps(
-            {"header": hdr, "objects": objects, "entry_va": entry_va},
-            indent=2))
+            {"header": hdr, "objects": objects, "entry_va": entry_va,
+             "fixups": fix and {k: fix[k] for k in ("applied", "skipped")},
+             "fixup_sites": fix and fix["sites"]},
+            indent=None if fix else 2))
         print(f"wrote {args.map}")
 
 

@@ -39,16 +39,18 @@
 typedef struct { float x, y, z; } vec3;
 
 typedef struct {
-    vec3    vert[MESH_MAX_VERT];
-    uint8_t ncorner[MESH_MAX_FACE];   /* 3 or 4 */
-    int32_t idx[MESH_MAX_FACE][4];
+    /* the arrays are allocated by mesh_load_at() to the size the object needs (the
+       MESH_MAX_* numbers are only the most one object may have) */
+    vec3   *vert;
+    uint8_t *ncorner;                 /* 3 or 4 */
+    int32_t (*idx)[4];
     /*
      * The face's own normal, in LOCAL space -- exact, not derived from the
      * geometry.  Three int16 at +0x12, +0x16 and +0x1a, scaled so that 16384 is
      * 1.0 (the engine's 14-bit fixed point; a face pointing straight down reads
      * -16383).  The words between them are 0 or -1 and are not part of it.
      */
-    vec3    normal[MESH_MAX_FACE];
+    vec3   *normal;
     /*
      * The MATERIAL field.  This is the int16 at face+0x04, and it is an OFFSET
      * INTO MAPn.MLB's 16-byte material record table.  Read out of the renderer
@@ -68,10 +70,10 @@ typedef struct {
      * mesh_load_at()'s `r` is the true base + 2 (how its field offsets were
      * first written down) -- so the material is at r+2.
      */
-    int32_t material[MESH_MAX_FACE];
+    int32_t *material;
     /* face record +0x02: the palette colour of a face whose material is
        routine 128 -- no texture, one flat colour (0xd8846) */
-    int16_t colour[MESH_MAX_FACE];
+    int16_t *colour;
     /*
      * TEXTURE COORDINATES -- one (u, v) pair per VERTEX, raw values 0..255.
      *
@@ -94,7 +96,7 @@ typedef struct {
      * record carries no texture coordinates" was true and beside the point:
      * they are per vertex, not per face.
      */
-    int16_t uv[MESH_MAX_VERT][2];
+    int16_t (*uv)[2];
     /* distance between the front and rear axles, from the positions of the
        wheel blocks (0 for anything that is not a car).  The game derives the
        same number when it sets a car up (0x136c8). */
@@ -128,20 +130,25 @@ typedef struct {
      */
     float   bound_r, bound_cx, bound_cz;
     int     ncoll;
-    int16_t coll[MESH_MAX_FACE];
+    int16_t *coll;
     int     nvert;
     int     nface;
     /*
      * MOVING PARTS.  When the object's header +0x10 is not -1 it is a number
      * of FRAMES, and every block's position record (block header +0x0C) is
      * followed, from its +0x1C, by one 0x30-byte entry per frame: 12 int16 --
-     * a 3x3 rotation, 16383 = 1.0, and a translation -- and then the same
-     * again for the inverse.  Both are written with the model's Z before its
-     * Y (Y is up):
+     * a 3x3 matrix, 16383 = 1.0, and a translation -- and then the same again
+     * for the inverse.  The engine copies the twelve to where a block's matrix
+     * and position go (0x8ad14; Screamer 2 0x7ec30), so they are applied to
+     * the vertex as it is stored -- a row vector times the matrix, the result
+     * in the order x, up, z:
      *
-     *     x' = (m0*x + m1*z + m2*y) / 16383 + t0
-     *     y' = (m3*x + m4*z + m5*y) / 16383 + t2
-     *     z' = (m6*x + m7*z + m8*y) / 16383 + t1
+     *     x' = (m0*x + m3*y + m6*z) / 16383 + t0
+     *     y' = (m1*x + m4*y + m7*z) / 16383 + t1
+     *     z' = (m2*x + m5*y + m8*z) / 16383 + t2
+     *
+     * These objects are modelled with Z up and every frame carries the turn to
+     * Y up: a part that does not move has (1,0,0 / 0,0,1 / 0,1,0).
      *
      * The frame shown is  frames * clock >> 16  with the animation clock that
      * also runs the textures (0x8abf8, 0x8ad14): the whole movement takes 3.33
@@ -154,10 +161,10 @@ typedef struct {
     /* per-VERTEX normals: block header +0x20 is the offset of an int32 count
        and that many (float x, y, z) unit vectors.  Only blocks that are drawn
        with reflections have them (a car's body, nose and tail). */
-    vec3    vnormal[MESH_MAX_VERT];
+    vec3   *vnormal;
     struct mesh_block { int vbase, vcount, fbase, fcount, flags, has_vnormal; float ox, oy, oz; }
             block[MESH_MAX_PARTS];
-    uint8_t face_block[MESH_MAX_FACE];
+    uint8_t *face_block;
     int     nframes;
     int     nparts;
     struct mesh_part {

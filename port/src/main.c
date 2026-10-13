@@ -132,6 +132,28 @@ static uint8_t   g_smg[64 * 256];   /* MAPn.SMG, see raster_tri */
 static int       g_have_smg;
 static const scene *g_scene;
 static uint32_t g_pal[256];   /* MAPn.COL, scaled to 8 bits */
+/*
+ * SCREAMER 2: A TRACK'S CONDITION (0x130c50, the race record's third word) and what the
+ * track loader (0x2ef4e) and the face routines make of it:
+ *   0  textures and backdrop of look 0 (MAPnL0c), DEPTH1.DPT, no fade, the picture
+ *      cleared to TRACK_DATA's "background 256" colour
+ *   1  look 1 (MAPnL1c: the digit is condition & 1, 0x2e69a), DEPTH1.DPT, faces faded by
+ *      distance (not on the fourth track), cleared to colour 0
+ *   2  look 0, DEPTH2.DPT, faded, NO backdrop, cleared to colour 0x13
+ * and the seventh track: no fade whatever the condition.
+ * THE FADE (0xbd5e9, and the same in four more face routines) is per FACE, not per pixel:
+ *     z = ((z0 + z1) / 2 + z2) / 2            the depths of its first three corners
+ *     d = |z - near|, held below  range = far - near
+ *     row = (d * 16384 / range & 0x3f80) >> 6          128 steps, the table's EVEN rows
+ *     pixel = DEPTH[row * 256 + texel]
+ * near / far (0x12d31, set when the view changes): condition 1 -- 0 / 27000 in view 1,
+ * else 6000 / 35000; condition 2 -- 0 / 25000.
+ */
+static int      g_s2_cond;
+static int      g_fade_on;
+static float    g_fade_near, g_fade_far;
+static uint8_t  g_dpt[65536];
+static const uint8_t *g_fade_row;       /* the face being drawn: its row of the table, or NULL */
 static int      g_ground_colour = -1;   /* TRACK_DATA `color`: the palette index the game
                                            fills the screen below the backdrop with (0x1337d) */
 
@@ -446,8 +468,11 @@ static void res_init(void)
             "build/dec/GRAF/MENUH.FNT", "build/dec/GRAF/MENUH.SPR", "build/dec/GRAF/MENU1H.PCX",
             "build/dec/MAP1H/MAP1.UNR",
         };
-        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++)
-            if (!os_exists(need[i]) || getenv("OS_RES_TESTFAIL")) {      /* the second: a test of the fall-back */
+        static const char *need2[] = { "build/dec/MAP1H01/MAP1.UNR" };       /* Screamer 2, as far as it goes */
+        const char **list = os_game() == 2 ? need2 : need;
+        size_t nlist = os_game() == 2 ? sizeof need2 / sizeof need2[0] : sizeof need / sizeof need[0];
+        for (size_t i = 0; i < nlist; i++)
+            if (!os_exists(list[i]) || getenv("OS_RES_TESTFAIL")) {      /* the second: a test of the fall-back */
                 if (getenv("OS_RES")) unsetenv("OS_RES");
                 res_fail("its files are not there");
             }
@@ -532,7 +557,9 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
 {
     (void)focal_x;
     if (!s->pix) {
-        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = COL_SKY_FALLBACK;
+        /* no backdrop (Screamer 2: indoors, or the condition without one): the clear colour */
+        const uint32_t clear = os_game() == 2 && g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_SKY_FALLBACK;
+        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = clear;
         return;
     }
     float cr = cosf(roll), sr = sinf(roll);
@@ -664,6 +691,70 @@ static int path_build(path *r, const char *file)
     return r->count >= 8 ? 0 : -1;
 }
 
+/*
+ * SCREAMER 2's ride: along the middle of the road.  Its MAPnOPP.SPL is one line
+ * for all the cars, the same curve as Screamer's (0x1099a, 0x4a831: a quadratic
+ * B-spline over the handles) -- but the cars there steer for themselves and the
+ * line is only what they aim at: it runs up to two road-widths wide of the road
+ * in places.  So the ride is laid over the MMP's road-centre points instead,
+ * taken in order: from the one nearest the grid, always the nearest not yet
+ * used that lies ahead, then smoothed and set out at the even PATH_STEP.
+ */
+static void path_from_road(path *r, const scene *sc)
+{
+    static float px[SCENE_MAX_WALL + 1], py[SCENE_MAX_WALL + 1];
+    static unsigned char used[SCENE_MAX_WALL];
+    int n = 0, at = 0;
+    if (sc->ndir < 16 || r->count < 8) return;
+    float best = 1e30f, dx = r->p[4][0] - r->p[0][0], dy = r->p[4][1] - r->p[0][1];
+    for (int i = 0; i < sc->ndir; i++) {
+        float d = (sc->dir[i].x - r->p[0][0]) * (sc->dir[i].x - r->p[0][0]) + (sc->dir[i].y - r->p[0][1]) * (sc->dir[i].y - r->p[0][1]);
+        used[i] = 0;
+        if (d < best) { best = d; at = i; }
+    }
+    for (;;) {
+        px[n] = sc->dir[at].x; py[n] = sc->dir[at].y; n++;
+        used[at] = 1;
+        int next = -1;
+        best = 6000.0f * 6000.0f;                       /* further than that is not the next point: the lap is closed */
+        for (int i = 0; i < sc->ndir; i++) {
+            if (used[i]) continue;
+            float ex = sc->dir[i].x - px[n - 1], ey = sc->dir[i].y - py[n - 1], d = ex * ex + ey * ey;
+            if (d < best && ex * dx + ey * dy > 0.0f) { best = d; next = i; }
+        }
+        if (next < 0) break;
+        dx = sc->dir[next].x - px[n - 1]; dy = sc->dir[next].y - py[n - 1];
+        at = next;
+    }
+    if (n < sc->ndir * 3 / 4) {                         /* not one loop: keep the cars' line */
+        fprintf(stderr, "ride: the road's centre points do not make one lap (%d of %d): along the cars' line\n", n, sc->ndir);
+        return;
+    }
+    for (int pass = 0; pass < 4; pass++) {              /* the points are whole numbers on a grid: round the corners off */
+        float fx = px[0], fy = py[0], lx = px[n - 1], ly = py[n - 1];
+        for (int k = 0; k < n; k++) {
+            float cx = px[k], cy = py[k];
+            float nx = k + 1 < n ? px[k + 1] : fx, ny = k + 1 < n ? py[k + 1] : fy;
+            px[k] = 0.25f * lx + 0.5f * cx + 0.25f * nx; py[k] = 0.25f * ly + 0.5f * cy + 0.25f * ny;
+            lx = cx; ly = cy;
+        }
+    }
+    px[n] = px[0]; py[n] = py[0];
+    r->count = 0;
+    float carry = PATH_STEP;
+    for (int k = 0; k < n; k++) {
+        float sx = px[k + 1] - px[k], sy = py[k + 1] - py[k], len = sqrtf(sx * sx + sy * sy);
+        for (float d = PATH_STEP - carry; d < len && r->count < MAX_SAMPLES; d += PATH_STEP) {
+            r->p[r->count][0] = px[k] + sx * d / len;
+            r->p[r->count][1] = py[k] + sy * d / len;
+            r->p[r->count][2] = 0.0f;
+            r->count++;
+            carry = 0.0f;
+        }
+        carry = fmodf(carry + len, PATH_STEP);
+    }
+}
+
 /* ------------------------------------------------------- palette, materials */
 
 /*
@@ -741,13 +832,33 @@ static int32_t rd32(const uint8_t *p)
                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
 }
 
+static int mlb_read(const char *path, int base);
 static void mlb_load(const char *path)
 {
     memset(g_mat, 0, sizeof g_mat);
     g_nmat = 0;
+    mlb_read(path, 0);
+}
 
+/* ANOTHER material library after the ones there are (Screamer 2: each car has its own;
+   the engine keeps the library's address with every object loaded while it was the
+   current one, object +0xb4, 0x4b4d4).  Gives the number its first material gets --
+   mesh_rebase() moves an object's faces onto it -- or -1. */
+static int mlb_add(const char *path)
+{
+    const int base = g_nmat;
+    return mlb_read(path, base) ? base : -1;
+}
+
+static void mesh_rebase(mesh *m, int base)
+{
+    for (int f = 0; f < m->nface; f++) m->material[f] += base * 16;
+}
+
+static int mlb_read(const char *path, int base)
+{
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "note: no materials at %s\n", path); return; }
+    if (!f) { fprintf(stderr, "note: no materials at %s\n", path); return 0; }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -755,16 +866,17 @@ static void mlb_load(const char *path)
     if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
         free(buf); fclose(f);
         fprintf(stderr, "note: cannot read %s\n", path);
-        return;
+        return 0;
     }
     fclose(f);
-    g_mlb = buf;
+    if (base == 0) g_mlb = buf;
 
     /* the material table runs up to the first texture record */
     long table_end = len;
     int ntex = 0;
-    for (int i = 0; i < MAT_MAX && (long)(i + 1) * 16 <= table_end; i++) {
-        const uint8_t *p = buf + i * 16;
+    for (int k = 0; base + k < MAT_MAX && (long)(k + 1) * 16 <= table_end; k++) {
+        const int i = base + k;
+        const uint8_t *p = buf + k * 16;
         int ro = rd32(p + 4);
         g_mat[i].type = rd32(p);
         g_mat[i].su   = rd32(p + 8);
@@ -786,7 +898,9 @@ static void mlb_load(const char *path)
         }
         ntex++;
     }
+    if (base) return 1;
     fprintf(stderr, "materials: %d records, %d with a texture\n", g_nmat, ntex);
+    return 1;
 }
 
 static void pal_load(const char *path)
@@ -893,6 +1007,7 @@ typedef struct {
     float au, av, bu, bv, cu, cv;       /* texture coordinates at each */
     const material *m;
     int   id, flat, sprite, tex_phase, env_phase;
+    const uint8_t *fade;
     float zbias;
 } tri_job;
 
@@ -923,7 +1038,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     }
     j.au = a->u; j.av = a->v; j.bu = b->u; j.bv = b->v; j.cu = c->u; j.cv = c->v;
     j.m = m; j.id = id;
-    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias;
+    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias; j.fade = g_fade_row;
     j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
     raster_list(&j);
 }
@@ -1014,6 +1129,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     const int   fogged = fog > 0.0f;
     const int   plain = !glass && !fogged && flat < 0 && !wraps;
     const uint32_t *const pal = g_pal;
+    const uint8_t *const fade = j->fade;
     for (int y = ys; y <= ye; y++) {
         if (!(rows >> (y & 7) & 1)) continue;               /* another lane's row */
         const float py = (float)y + 0.5f;
@@ -1066,8 +1182,9 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                   }
                   const long o = (long)tv * 256 + tu;
                   if (o >= avail) continue;
-                  const unsigned idx = page[o];
+                  unsigned idx = page[o];
                   if (keyed && idx == 0) continue;
+                  if (fade) idx = fade[idx];
                   cp[k_] = pal[idx];
                   zp[k_] = mz.u;
                   ip[k_] = (int16_t)id;
@@ -1151,6 +1268,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
             if (flat < 0 && o >= avail) continue;
             uint8_t idx = flat >= 0 ? (uint8_t)flat : page[o];
             if (keyed && idx == 0) continue;       /* routine 64: 0 = nothing */
+            if (fade && !glass) idx = fade[idx];
             uint32_t col = g_pal[idx];
             if (glass) {
                 /*
@@ -1419,10 +1537,23 @@ static void draw_poly(float w[][3], float uv[][2], int n,
 }
 
 /* the same from corners that are in view space already */
+/* Screamer 2: the face's row of the distance table, from the depths of its first three
+   corners as they are, behind the eye or not (0xbcf1a, 0xbd5e9; see g_s2_cond) */
+static inline void fade_for(const vtx *in, int n)
+{
+    g_fade_row = NULL;
+    if (!g_fade_on || n < 3) return;
+    const float range = g_fade_far - g_fade_near;
+    float d = fabsf(((in[0].z + in[1].z) * 0.5f + in[2].z) * 0.5f - g_fade_near);
+    if (d > range - 1.0f) d = range - 1.0f;
+    if (range > 0.0f) g_fade_row = g_dpt + (((int)(d * 16384.0f / range) & 0x3f80) >> 6) * 256;
+}
+
 static void draw_poly_view(const vtx *in, int n, const material *m, int id)
 {
     vtx out[10];
     int no = 0;
+    fade_for(in, n);
     for (int k = 0; k < n; k++) {
         const vtx *p = &in[k], *q = &in[k + 1 < n ? k + 1 : 0];
         int pin = p->z >= NEAR_Z, qin = q->z >= NEAR_Z;
@@ -1515,9 +1646,10 @@ static void emit_face(const vtx *in, float prj[][3], int nc, unsigned any, const
     if (!(x1 >= 0 && x0 <= FB_W && y1 >= 0 && y0 <= FB_H)) return;
     if (x1 - x0 < 1.0f && iceil(x0 - 0.5f) > ifloor(x1 - 0.5f)) return;       /* between two columns of centres */
     if (y1 - y0 < 1.0f && iceil(y0 - 0.5f) > ifloor(y1 - 0.5f)) return;       /* between two rows */
+    fade_for(in, nc);
     tri_job j;
     j.m = m; j.id = id;
-    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias;
+    j.flat = g_flat_colour; j.sprite = g_obj_sprite; j.zbias = g_obj_zbias; j.fade = g_fade_row;
     j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
     j.ax = prj[0][0]; j.ay = prj[0][1]; j.ia = prj[0][2]; j.au = in[0].u; j.av = in[0].v;
     for (int k = 1; k + 1 < nc; k++) {
@@ -2197,6 +2329,7 @@ static void path_drape(path *r)
     for (int i = 0; i < r->count; i++) {
         float z;
         if (surface_z(r->p[i][0], r->p[i][1], ref, &z)) { ref = z; hits++; }
+        else if (getenv("OS_PATHLOG")) printf("path: sample %d (%.0f, %.0f) is over no track surface\n", i, r->p[i][0], r->p[i][1]);
         r->p[i][2] = ref;
     }
     /* the tiles meet at an angle where a slope starts; round that off so the
@@ -2580,6 +2713,41 @@ static void cars_load(const char *gfxdir)
     char sfile[600];
     snprintf(sfile, sizeof sfile, "%s/SHADOW.3DX", gfxdir);
     g_shadow_ok = (mesh_load(&g_shadow_mesh, sfile) == 0);
+}
+
+/*
+ * SCREAMER 2's CARS, as far as it goes: one of each team standing on the road.
+ * The container is CARS<team 1-4><condition & 1><colours> (0x2f9dd), the car in it
+ * AUTO<1-5> with a material library of its own (AUTOn.MLB; AUTOn.WLB is the same for the
+ * program's 8 MB version, 0x11f14c).  Every palette of the game has the same first 120
+ * colours and the cars' pictures use only those, so the track's palette serves.
+ * The object is built like Screamer's: MV_mauto, fauto, rauto, four tyres, four hubs.
+ */
+#define S2_SHOWN 4
+static mesh     g_s2_car[S2_SHOWN];
+static car_pose g_s2_pose[S2_SHOWN];
+static void s2_cars_show(const path *r)
+{
+    const int model = getenv("OS_CAR") ? atoi(getenv("OS_CAR")) % 5 : 0;
+    for (int t = 0; t < S2_SHOWN && g_ncar < MAX_CARS; t++) {
+        char file[600];
+        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.MLB", t + 1, g_s2_cond & 1, model + 1);
+        const int base = mlb_add(file);
+        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.3DX", t + 1, g_s2_cond & 1, model + 1);
+        if (base < 0 || mesh_load(&g_s2_car[t], file) != 0) { fprintf(stderr, "note: no car at %s\n", file); continue; }
+        mesh_rebase(&g_s2_car[t], base);
+        camera at;
+        path_at(r, 30.0f + 6.0f * (float)t, 0.0f, &at);
+        scene_object *o = &g_car[g_ncar++];
+        memset(o, 0, sizeof *o);
+        o->m = &g_s2_car[t];
+        o->pose = &g_s2_pose[t];
+        o->phase = -1;
+        o->radius = 1200.0f;
+        const float side = (t & 1) ? 450.0f : -450.0f;
+        o->x = at.x + sinf(at.yaw) * side; o->y = at.y - cosf(at.yaw) * side; o->z = at.z;
+        o->yaw = at.yaw + (float)M_PI * 0.5f;           /* the nose is local -Z (see player_sync) */
+    }
 }
 
 /* the path sample nearest a point -- "where on the lap am I?" */
@@ -3879,6 +4047,25 @@ static void view_pose(camera *cam)
     cam->yaw = g_chase.yaw - (float)M_PI / 2.0f;
     cam->pitch = g_chase.pitch;
     cam->roll = g_chase.roll;
+}
+
+/* SCREAMER 2's TRACK_DATA (MAPnDAT.DTR): how far it is drawn (a negative depth), the
+   background as red, green, blue, and as a palette entry -- the first five numbers */
+static int s2_track_data(const char *file, int v[5])
+{
+    FILE *f = fopen(file, "r");
+    char line[256];
+    int in = 0, n = 0;
+    if (!f) return 0;
+    while (n < 5 && fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!in) { if (!strncmp(p, "TRACK_DATA", 10)) in = 1; continue; }
+        if (*p == '*') continue;
+        while (n < 5 && (p = strchr(p, 'd')) != NULL) { v[n++] = atoi(p + 1); p++; }
+    }
+    fclose(f);
+    return n == 5;
 }
 
 /* TRACK_DATA in MAPnA.DTR: colour, camera_hi, bonus_time, carnage */
@@ -8109,6 +8296,17 @@ static int session(int argc, char **argv)
      * -- a clean slate for the track's own palette, materials and scene --
      * and the race comes back here the same way when it is left with ESC.
      */
+    if (argc < 2 && os_game() == 2) {
+        /* SCREAMER 2 has no menu yet: a ride round a track (OS_TRACK=1..7, default 1) */
+        char dir[64], num[16];
+        int track = getenv("OS_TRACK") ? atoi(getenv("OS_TRACK")) : 1;
+        if (getenv("OS_FROM_RACE")) return 0;        /* left with ESC: leave the program */
+        if (track < 1 || track > 7) track = 1;
+        snprintf(dir, sizeof dir, "build/dec/MAP%d", track);
+        snprintf(num, sizeof num, "%d", track);
+        os_next(3, dir, num);
+        return 0;
+    }
     if (argc < 2) {
         int track = 1, car = 0;
         int what = 0;
@@ -8175,6 +8373,15 @@ static int session(int argc, char **argv)
     if (argc > 7) g_layer = atoi(argv[7]);
     char gfxdir[512];
     snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c", track, g_s == 2 && g_yd == 1 ? 'H' : 'L');     /* (a wide picture has the low set's tracks) */
+    if (os_game() == 2) {
+        /* SCREAMER 2: MAP<track><L|H><look><colours> (0x2e676).  The look is the track's
+           condition & 1 (see g_s2_cond; tracks 5 and 7 have look 0 only); colours 1 = 256.
+           OS_COND=0..2 until there is a menu to choose it. */
+        g_s2_cond = getenv("OS_COND") ? atoi(getenv("OS_COND")) : 0;
+        if (g_s2_cond < 0 || g_s2_cond > 2) g_s2_cond = 0;
+        if (g_s2_cond == 1 && (track == 5 || track == 7)) g_s2_cond = 0;      /* (they have no look 1) */
+        snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c%d1", track, g_s == 2 && g_yd == 1 ? 'H' : 'L', g_s2_cond & 1);
+    }
 
     /* the DETAIL option; OS_DETAIL=0..3 for one run, OS_DRAWDIST=<units> the
        old test switch (no far plane, pieces out to that distance) */
@@ -8197,7 +8404,9 @@ static int session(int argc, char **argv)
 
     sky sk = { 0, 0, NULL };
     snprintf(path_, sizeof path_, "build/dec/MAP%dL/MAP%d.BCK", track, track);
-    if (sky_load(&sk, path_) != 0)
+    if (os_game() == 2) snprintf(path_, sizeof path_, "%s/MAP%d.BCK", gfxdir, track);
+    if (os_game() == 2 && (g_s2_cond == 2 || track == 7)) { }           /* no backdrop there */
+    else if (sky_load(&sk, path_) != 0)
         fprintf(stderr, "note: no backdrop at %s\n", path_);
 
     snprintf(path_, sizeof path_, "%s/MAP%d.COL", gfxdir, track);
@@ -8207,9 +8416,35 @@ static int session(int argc, char **argv)
     snprintf(path_, sizeof path_, "%s/MAP%d.SMG", gfxdir, track);
     {
         FILE *f = fopen(path_, "rb");
-        g_have_smg = (f && fread(g_smg, 1, sizeof g_smg, f) == sizeof g_smg);
+        size_t got = f ? fread(g_smg, 1, sizeof g_smg, f) : 0;
+        /* Screamer 2's table has 48 rows where Screamer's has 64 (what uses it there is not read yet) */
+        g_have_smg = got == sizeof g_smg || (os_game() == 2 && got == 48 * 256);
         if (f) fclose(f);
         if (!g_have_smg) fprintf(stderr, "note: no blend table at %s\n", path_);
+    }
+
+    if (os_game() == 2) {
+        int td[5];
+        snprintf(path_, sizeof path_, "%s/MAP%dDAT.DTR", data, track);
+        if (s2_track_data(path_, td)) {
+            /* how far: TRACK_DATA's depth at the top detail, 0.8 of it below (0x2efca) */
+            if (g_detail != 3 && !getenv("OS_DRAWDIST")) {
+                g_far_z = (float)(int)((float)-td[0] * (g_detail == 2 ? 1.0f : 0.8f));
+                g_drawdist = g_far_z * 1.2f > DRAWDIST_ORIGINAL ? g_far_z * 1.2f : DRAWDIST_ORIGINAL;   /* (the port's: pieces looked at) */
+                printf("Screamer 2 track %d: drawn to a depth of %.0f\n", track, g_far_z);
+            }
+            g_ground_colour = g_s2_cond == 0 ? td[4] & 255 : g_s2_cond == 1 ? 0 : 0x13;
+        }
+        g_fade_on = 0;
+        if (track != 7 && (g_s2_cond == 2 || (g_s2_cond == 1 && track != 4))) {
+            snprintf(path_, sizeof path_, "%s/DEPTH%d.DPT", gfxdir, g_s2_cond == 2 ? 2 : 1);
+            FILE *f = fopen(path_, "rb");
+            g_fade_on = f && fread(g_dpt, 1, sizeof g_dpt, f) == sizeof g_dpt && !getenv("OS_NOFADE");
+            if (f) fclose(f);
+            if (!g_fade_on) fprintf(stderr, "note: no distance table at %s\n", path_);
+            g_fade_near = g_s2_cond == 2 ? 0.0f : 6000.0f;
+            g_fade_far  = g_s2_cond == 2 ? 25000.0f : 35000.0f;
+        }
     }
 
     static scene sc;
@@ -8223,8 +8458,10 @@ static int session(int argc, char **argv)
     g_reverse = strlen(data) > 0 && data[strlen(data) - 1] == 'I';
     if (g_reverse && g_scene)
         for (int i = 0; i < sc.ndir; i++) sc.dir[i].angle += (float)M_PI;
+    if (os_game() == 2 && g_scene) path_from_road(r, &sc);
     path_drape(r);
-    if (g_scene && !getenv("OS_NOCARS")) cars_load(gfxdir);
+    if (g_scene && !getenv("OS_NOCARS") && os_game() != 2) cars_load(gfxdir);
+    if (g_scene && !getenv("OS_NOCARS") && os_game() == 2) s2_cars_show(r);       /* Screamer 2: standing cars so far */
     if (g_scene && g_ncar >= 0 && car_mesh_ok[0]) {
         g_nspec = cars_dtr_load(g_spec, CAR_SPECS_MAX, "build/dec/GEN/CARS.DTR");
         if (g_nspec == 0) fprintf(stderr, "note: no build/dec/GEN/CARS.DTR -- no driving\n");

@@ -76,15 +76,20 @@ static void mesh_pose(mesh *m, int f)
         const float k = 1.0f / 16383.0f;
         for (int i = 0; i < p->vcount; i++) {
             vec3 v = p->rest_vert[i];
-            m->vert[p->vbase + i].x = (q[0] * v.x + q[1] * v.z + q[2] * v.y) * k + q[9];
-            m->vert[p->vbase + i].y = (q[3] * v.x + q[4] * v.z + q[5] * v.y) * k + q[11];
-            m->vert[p->vbase + i].z = (q[6] * v.x + q[7] * v.z + q[8] * v.y) * k + q[10];
+            m->vert[p->vbase + i].x = (q[0] * v.x + q[3] * v.y + q[6] * v.z) * k + q[9];
+            m->vert[p->vbase + i].y = (q[1] * v.x + q[4] * v.y + q[7] * v.z) * k + q[10];
+            m->vert[p->vbase + i].z = (q[2] * v.x + q[5] * v.y + q[8] * v.z) * k + q[11];
         }
+        /* The turn from the model's Z-up to Y-up mirrors the part, and the engine knows it:
+           drawing a block that has frames it first changes the sense of its back-face test
+           (0x8acf0 against 0x8ad02 patch a jge / jl into the face routines at three places;
+           Screamer 2 0x7ec0c / 0x7ec1e).  Here that is the normal turned round, so that for
+           the renderer it points away from the side that shows, as every other face's does. */
         for (int i = 0; i < p->fcount; i++) {
             vec3 v = p->rest_normal[i];
-            m->normal[p->fbase + i].x = (q[0] * v.x + q[1] * v.z + q[2] * v.y) * k;
-            m->normal[p->fbase + i].y = (q[3] * v.x + q[4] * v.z + q[5] * v.y) * k;
-            m->normal[p->fbase + i].z = (q[6] * v.x + q[7] * v.z + q[8] * v.y) * k;
+            m->normal[p->fbase + i].x = -(q[0] * v.x + q[3] * v.y + q[6] * v.z) * k;
+            m->normal[p->fbase + i].y = -(q[1] * v.x + q[4] * v.y + q[7] * v.z) * k;
+            m->normal[p->fbase + i].z = -(q[2] * v.x + q[5] * v.y + q[8] * v.z) * k;
         }
     }
 }
@@ -120,7 +125,53 @@ void mesh_animate_all(int clock16)
     }
 }
 
+/* mesh_load_at() fills these, then gives the mesh arrays of its own, no bigger than needed */
+static vec3    s_vert[MESH_MAX_VERT], s_normal[MESH_MAX_FACE], s_vnormal[MESH_MAX_VERT];
+static uint8_t s_ncorner[MESH_MAX_FACE], s_face_block[MESH_MAX_FACE];
+static int32_t s_idx[MESH_MAX_FACE][4], s_material[MESH_MAX_FACE];
+static int16_t s_colour[MESH_MAX_FACE], s_uv[MESH_MAX_VERT][2], s_coll[MESH_MAX_FACE];
+
+static void *keep(const void *from, size_t n)
+{
+    void *p = malloc(n ? n : 1);
+    if (p) memcpy(p, from, n);
+    return p;
+}
+
+static void mesh_drop(mesh *m)
+{
+    if (m->vert && m->vert != s_vert) {
+        free(m->vert); free(m->normal); free(m->vnormal); free(m->ncorner); free(m->face_block);
+        free(m->idx); free(m->material); free(m->colour); free(m->uv); free(m->coll);
+    }
+    m->vert = NULL; m->normal = NULL; m->vnormal = NULL; m->ncorner = NULL; m->face_block = NULL;
+    m->idx = NULL; m->material = NULL; m->colour = NULL; m->uv = NULL; m->coll = NULL;
+}
+
+static int mesh_fill(mesh *m, const uint8_t *buf, long len);
+
 int mesh_load_at(mesh *m, const uint8_t *buf, long len)
+{
+    mesh_drop(m);                       /* loaded before (the menu's models): give the old arrays back */
+    m->vert = s_vert; m->normal = s_normal; m->vnormal = s_vnormal; m->ncorner = s_ncorner;
+    m->face_block = s_face_block; m->idx = s_idx; m->material = s_material; m->colour = s_colour;
+    m->uv = s_uv; m->coll = s_coll;
+    int r = mesh_fill(m, buf, len);
+    if (r != 0 || m->nface < 1) {
+        m->vert = NULL; mesh_drop(m);
+        m->nvert = m->nface = m->ncoll = 0;
+        return -1;
+    }
+    size_t v = (size_t)m->nvert, f = (size_t)m->nface;
+    m->vert = keep(s_vert, v * sizeof *s_vert);         m->vnormal = keep(s_vnormal, v * sizeof *s_vnormal);
+    m->uv = keep(s_uv, v * sizeof *s_uv);               m->normal = keep(s_normal, f * sizeof *s_normal);
+    m->ncorner = keep(s_ncorner, f);                    m->face_block = keep(s_face_block, f);
+    m->idx = keep(s_idx, f * sizeof *s_idx);            m->material = keep(s_material, f * sizeof *s_material);
+    m->colour = keep(s_colour, f * sizeof *s_colour);   m->coll = keep(s_coll, (size_t)m->ncoll * sizeof *s_coll);
+    return 0;
+}
+
+static int mesh_fill(mesh *m, const uint8_t *buf, long len)
 {
     m->nvert = 0;
     m->nface = 0;

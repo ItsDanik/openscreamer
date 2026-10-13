@@ -1311,6 +1311,7 @@ elsewhere (up to 61 frames on track 5).
   puffs of smoke / fire, and a 254×254 texture with 2–3 "frames" on routine 160 that
   are sky / lights / red pictures — routine 160 looks like a reflection map.
 
+**CORRECTED 2026-10-13 — see `docs/NOTES2.md` S2-5b: a frame is the block's whole matrix applied to (x, y, z) as stored, rows (x, up, z); the reading below (rows against x, z, y; t1 / t2 swapped) laid the windmills on their sides.**
 **Moving parts** (`0x8abf8`, `0x8ad14`; `mesh.c`): an object whose header `+0x10` is not
 −1 has that many frames; `frame = frames × clock >> 16` (one run per 3.33 s). After each
 block's position record (block `+0x0C`), from its `+0x1C`, come `frames × 0x30` bytes:
