@@ -1,9 +1,11 @@
 /*
  * SCREAMER 2: the port's side of the game's own routines.
  *
- * s2_gen.c holds the game's race routines as tools/s2c.py carries them over; they work on
- * a block of bytes laid out as the program's data object (s2_mem.h).  This file is what
- * stands around them:
+ * The race routines are the game's, run out of the player's STARTL.EXE by the interpreter
+ * of s2_cpu.c; they work on the program's own memory layout (s2_mem.h).  (The developer's
+ * build, S2_CONVERTED, has them converted to C by tools/s2c.py instead: the measure the
+ * interpreter is checked against, not in the repository.)  This file is what stands around
+ * them:
  *   - the block, its allocator and the routines' stack;
  *   - the game's data tables read into the block where the game's loaders put them
  *     (CAR_PARAMS, SKILLS, DAMAGES, a track's TRACK_DATA and road kinds, the cars' line);
@@ -22,8 +24,10 @@
 #include "s2_port.h"
 #include "port.h"
 
+#ifdef S2_CONVERTED
 uint8_t  s2_mem[S2_SIZE];
 static struct { uint32_t page; uint8_t bytes[0x1000]; } s2_code[8];
+#endif
 uint32_t s2_sp;
 static uint32_t s2_heap;
 
@@ -41,6 +45,7 @@ void s2_bad_address(uint32_t a)
     if (said++ < 8) fprintf(stderr, "screamer 2: a routine reached outside its memory (0x%x)\n", a);
 }
 
+#ifdef S2_CONVERTED
 uint8_t *s2_code_var(uint32_t a)
 {
     if (a >= 0x10000u && a < 0xe5000u - 16)
@@ -51,6 +56,7 @@ uint8_t *s2_code_var(uint32_t a)
     s2_bad_address(a);
     return s2_mem;
 }
+#endif
 
 uint32_t s2_alloc(uint32_t size)
 {
@@ -67,13 +73,36 @@ void s2_str(uint32_t a, const char *text)
     memcpy(MP(a), text, strlen(text) + 1);
 }
 
-void s2_reset(void)
+#ifdef S2_CONVERTED
+void s2_gen_strings(void);
+#endif
+static void s2_hooks_set(void);
+
+/* the block as a race finds it; 0 if the game's program cannot be had */
+int s2_reset(void)
 {
+#ifdef S2_CONVERTED
     memset(s2_mem, 0, sizeof s2_mem);
     memset(s2_code, 0, sizeof s2_code);
+    s2_gen_strings();
+#else
+    /* the player's own program, read once: <the game's directory>/STARTL.EXE */
+    static int have;
+    if (!have) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/STARTL.EXE", os_data_dir());
+        if (!s2_exe_load(os_path(path))) {
+            snprintf(path, sizeof path, "%s/startl.exe", os_data_dir());
+            if (!s2_exe_load(os_path(path))) return 0;
+        }
+        have = 1;
+    }
+    s2_exe_fresh();
+    s2_hooks_set();
+#endif
     s2_heap = HEAP_AT;
     s2_sp = STACK_AT;
-    s2_gen_strings();
+    return 1;
 }
 
 /*
@@ -119,6 +148,7 @@ int s2_dtr(const char *file, const char *section, uint32_t dest, int stride, int
 
 /* ------------------------------------------------------------------ the hooks */
 
+#ifdef S2_CONVERTED
 /* nothing to do in the port (yet): the engine's lists of what is drawn, its material
    libraries and files, text made with sprintf, and sound */
 #define HOOK_204af
@@ -126,6 +156,7 @@ int s2_dtr(const char *file, const char *section, uint32_t dest, int stride, int
 #if 0
 #define HOOK_22d35
 #define FUN_00022d35(...) 0
+#endif
 #endif
 /* 0x37e06: a time as text, "%02d:%02d:%02d" of minutes, seconds, hundredths (each cut off),
    or "--:--:--" for 3599.999 (no time yet).  Its sprintf's arguments are on the stack. */
@@ -140,6 +171,7 @@ static int FUN_00037e06(uint32_t to, uint32_t r1, uint32_t r2, uint32_t r3, floa
     }
     return 0;
 }
+#ifdef S2_CONVERTED
 #define HOOK_132b4
 #define FUN_000132b4(...) 0          /* the view keys: the port's own (s2_view) */
 #define HOOK_4f6c4
@@ -212,14 +244,17 @@ static int FUN_000338ed(uint32_t out, uint32_t from, uint32_t at)
     return 0;
 }
 
+#endif
 /* bytes copied and filled, whole numbers made positive, names copied, chance */
 #define HOOK_ae6e3
 static uint32_t FUN_000ae6e3(uint32_t to, uint32_t from, uint32_t n) { memmove(MP(to), MP(from), n); return to; }
 #define HOOK_ae8b0
 static uint32_t FUN_000ae8b0(uint32_t to, uint32_t value, uint32_t n) { memset(MP(to), (int)value, n); return to; }
+#ifdef S2_CONVERTED
 #define HOOK_afeca
 static int s2_abs(int v) { return v < 0 ? -v : v; }
 #define FUN_000afeca(v, ...) s2_abs((int)(v))
+#endif
 #define HOOK_b3be4
 static uint32_t FUN_000b3be4(uint32_t to, uint32_t from) { strcpy((char *)MP(to), (const char *)MP(from)); return to; }
 static uint32_t s2_seed = 1;
@@ -234,17 +269,29 @@ static int s2_rand(void) { s2_seed = s2_seed * 1103515245u + 12345u; return (int
  * 0x11cdd4; what is found goes where the engine leaves it, in variables of its code
  * object: 0x4cb98 the height, 0x4cba0.. the surface's normal, 0x4cbec the road kind.
  */
+/* a test (tools/s2emu.py --hooks): every answer the port gives the routines about the track,
+   in order, so that the program's own code can be given the same */
+static FILE *s2_hooklog(void)
+{
+    static FILE *f; static int tried;
+    if (!tried) { tried = 1; if (getenv("OS_S2HOOKLOG")) f = fopen(getenv("OS_S2HOOKLOG"), "wb"); }
+    return f;
+}
+static void s2_hookput(const int32_t *w, int n) { FILE *f = s2_hooklog(); if (f) { fwrite(w, 4, (size_t)n, f); fflush(f); } }
+
 #define HOOK_28ce6
 static uint64_t FUN_00028ce6(int mode, uint32_t edx)
 {
-    int h, n[3], kind;
-    (void)mode;
+    int h = 0, n[3] = { 0, 0, 0 }, kind = 0;
     I32(0x4cb98) = 0;
-    if (!s2p_ground(I32(0x11cdcc), I32(0x11cdd4), &h, n, &kind)) return (uint64_t)edx << 32;
-    I32(0x4cb98) = h;
-    I32(0x4cba0) = n[0]; I32(0x4cba4) = n[1]; I32(0x4cba8) = n[2];
-    I32(0x4cbec) = kind;
-    return (uint64_t)edx << 32 | 1u;
+    const int found = s2p_ground(mode == 1, I32(0x11cdcc), I32(0x11cdd4), &h, n, &kind);
+    if (found) {
+        I32(0x4cbec) = kind;
+        if (mode != 1) { I32(0x4cb98) = h; I32(0x4cba0) = n[0]; I32(0x4cba4) = n[1]; I32(0x4cba8) = n[2]; }
+    }
+    { const int32_t rec[9] = { 1, I32(0x11cdcc), I32(0x11cdd4), found | (mode == 1 ? 2 : 0), h, n[0], n[1], n[2], kind }; s2_hookput(rec, 9); }
+    if (getenv("OS_S2ASKLOG")) printf("   ground(%d) at %d %d: %s, height %d, kind %d\n", mode, I32(0x11cdcc), I32(0x11cdd4), found ? "yes" : "NO", h, kind);
+    return (uint64_t)edx << 32 | (found ? 1u : 0u);
 }
 
 /*
@@ -262,20 +309,30 @@ static uint64_t s2_nearest(int walls)
 {
     const uint32_t edx = 0;
     float rec[7];
+    int32_t log[13] = { 2, walls, I32(0x11cdcc), I32(0x11cdd4), 0, 0, 0, 0, 0, 0, 0, 0 };
     if (!s2_found[0]) { s2_found[0] = s2_alloc(16); s2_found[1] = s2_alloc(32); }
-    if (getenv("OS_S2NONEAR")) return (uint64_t)edx << 32;      /* a test: no road, no walls (tools/s2emu.py) */
-    if (!s2p_nearest(walls, I32(0x11cdcc), I32(0x11cdd4), rec)) return (uint64_t)edx << 32;
+    /* (the game goes on to read the place and direction of the road point it last found even
+       when it finds none: 0x2a371's end) */
+    int found = !getenv("OS_S2NONEAR") && s2p_nearest(walls, I32(0x11cdcc), I32(0x11cdd4), rec);
     const uint32_t at = s2_found[walls ? 1 : 0];
-    F32(at) = rec[0];
-    for (int i = 1; i < (walls ? 7 : 3); i++) I32(at + 4u * (uint32_t)i) = (int32_t)rec[i];
-    if (walls) { U32(0x11cdd8) = at; return (uint64_t)edx << 32 | 1u; }
-    U32(0x11cde8) = at;
-    I32(0x11cde0) = I32(at + 4); I32(0x11cde4) = I32(at + 8);
-    float a = rec[0];
-    if (U32(0x130d30) & 8) a += 3.14159274f;
-    if (a > 6.28318548f) a += -6.28318548f;
-    F32(0x11cddc) = a;
-    return (uint64_t)edx << 32 | 1u;
+    if (found) {
+        F32(at) = rec[0];
+        for (int i = 1; i < (walls ? 7 : 3); i++) I32(at + 4u * (uint32_t)i) = (int32_t)rec[i];
+        if (walls) U32(0x11cdd8) = at; else U32(0x11cde8) = at;
+    }
+    if (!walls && U32(0x11cde8)) {
+        const uint32_t was = U32(0x11cde8);
+        I32(0x11cde0) = I32(was + 4); I32(0x11cde4) = I32(was + 8);
+        float a = F32(was);
+        if (U32(0x130d30) & 8) a += 3.14159274f;
+        if (a > 6.28318548f) a += -6.28318548f;
+        F32(0x11cddc) = a;
+    }
+    log[4] = found; log[5] = (int32_t)at;
+    if (getenv("OS_S2ASKLOG")) printf("   nearest(%d) at %d %d: %s %d %d\n", walls, I32(0x11cdcc), I32(0x11cdd4), found ? "yes" : "NO", found ? I32(at + 4) : 0, found ? I32(at + 8) : 0);
+    if (found) memcpy(log + 6, MP(at), walls ? 28 : 12);
+    s2_hookput(log, 13 - 0);
+    return (uint64_t)edx << 32 | (found ? 1u : 0u);
 }
 
 /*
@@ -355,7 +412,63 @@ static int FUN_0004bc03(uint32_t name, uint32_t to, uint32_t list)
     return 0;
 }
 
+#ifdef S2_CONVERTED
 #include "s2_gen.inc"
+static void s2_hooks_set(void) { }
+#else
+/*
+ * THE HOOKS AS THE INTERPRETER TAKES THEM (s2_cpu.h): the routine's arguments are in eax,
+ * edx, ebx, ecx and then on the stack; what it gives back goes in eax.  The second number
+ * of s2_hook() is what the routine itself takes off the stack as it returns (its `ret n`).
+ * What is NOT hooked now and runs as the game's own code: the angle of a vector (0x10d9e),
+ * the camera's look-at (0x338ed), the power (0xafed2), abs (0xafeca).
+ */
+static int h_nothing(s2_cpu *c) { c->r[S2_EAX] = 0; return 1; }
+static int h_37e06(s2_cpu *c) { const uint32_t w = s2_arg(c, 0); float t; memcpy(&t, &w, 4); FUN_00037e06(c->r[S2_EAX], 0, 0, 0, t); return 1; }
+static int h_ae6e3(s2_cpu *c) { c->r[S2_EAX] = FUN_000ae6e3(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+static int h_ae8b0(s2_cpu *c) { c->r[S2_EAX] = FUN_000ae8b0(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+static int h_b3be4(s2_cpu *c) { c->r[S2_EAX] = FUN_000b3be4(c->r[S2_EAX], c->r[S2_EDX]); return 1; }
+static int h_b3c2d(s2_cpu *c) { c->r[S2_EAX] = FUN_000b3c2d(c->r[S2_EAX]); return 1; }
+static int h_b3c09(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)s2_rand(); return 1; }
+static int h_28ce6(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_00028ce6((int)c->r[S2_EAX], c->r[S2_EDX]); return 1; }
+static int h_2a371(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)s2_nearest((int)c->r[S2_EAX]); return 1; }
+static int h_4b843(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004b843(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+static int h_4bc94(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004bc94(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+static int h_4bc03(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004bc03(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+/* the arc cosine (its number comes and goes on the 387's stack): out of range it is taken
+   as 0 -- what the program's own error routine (0xbb541) makes of it is not read; in range
+   the game's own routine runs */
+static int h_4ea98(s2_cpu *c) { const double x = s2_st0(); (void)c; if (x * x <= 1.0) return 0; s2_st0_set(0.0); return 1; }
+
+static void s2_hooks_set(void)
+{
+    static const struct { uint32_t at; int pop; } nothing[] = {
+        { 0x204af, 0 }, { 0x132b4, 0 }, { 0x4f6c4, 0 }, { 0xaf45c, 0 }, { 0x31b00, 0 }, { 0x31c8c, 0 }, { 0x4a455, 0 },
+        { 0x4b49f, 0 }, { 0x4b4d4, 0 }, { 0x4bfbe, 0 }, { 0x4c01c, 0 }, { 0x4c0cf, 4 }, { 0x4eaed, 0 }, { 0x4feb4, 0 },
+        { 0xaea54, 8 }, { 0xaebf0, 4 }, { 0xaee18, 0 }, { 0xaee98, 0 }, { 0xaf168, 0 }, { 0xb04a8, 0 },
+    };
+    s2_hooks_clear();
+    for (unsigned k = 0; k < sizeof nothing / sizeof nothing[0]; k++) s2_hook(nothing[k].at, nothing[k].pop, h_nothing);
+    s2_hook(0x37e06, 4, h_37e06);
+    s2_hook(0xae6e3, 0, h_ae6e3); s2_hook(0xae8b0, 0, h_ae8b0); s2_hook(0xb3be4, 0, h_b3be4);
+    s2_hook(0xb3c2d, 0, h_b3c2d); s2_hook(0xb3c09, 0, h_b3c09);
+    s2_hook(0x28ce6, 0, h_28ce6); s2_hook(0x2a371, 0, h_2a371);
+    s2_hook(0x4b843, 0, h_4b843); s2_hook(0x4bc94, 0, h_4bc94); s2_hook(0x4bc03, 0, h_4bc03);
+    s2_hook(0x4ea98, 0, h_4ea98);
+}
+#define FUN_000309b0(a)          ((void)s2_call(0x309b0, (uint32_t)(a), 0, 0, 0, 0, NULL))
+#define FUN_0004b016()           ((void)s2_call(0x4b016, 0, 0, 0, 0, 0, NULL))
+#define FUN_0002f519(a, b, c, d) ((int)s2_call(0x2f519, (uint32_t)(a), (uint32_t)(b), (uint32_t)(c), (uint32_t)(d), 0, NULL))
+#define FUN_00012d31(a, b)       ((void)s2_call(0x12d31, (uint32_t)(a), (uint32_t)(b), 0, 0, 0, NULL))
+#define FUN_0001d9fc(a)          ((void)s2_call(0x1d9fc, (uint32_t)(a), 0, 0, 0, 0, NULL))
+#define FUN_0002baa4()           ((void)s2_call(0x2baa4, 0, 0, 0, 0, 0, NULL))
+#define FUN_00012dff(a, b)       ((void)s2_call(0x12dff, (uint32_t)(a), (uint32_t)(b), 0, 0, 0, NULL))
+static void s2_gen_tables(void) { }
+#undef S2_FPU_IN
+#undef S2_FPU_OUT
+#define S2_FPU_IN  (void)0
+#define S2_FPU_OUT (void)0
+#endif
 
 /* ------------------------------------------------------------------ a race */
 
@@ -390,7 +503,7 @@ static void s2_line_load(const char *file)
 int s2_race_start(int track, int condition, int ncars, const int *team, const int *model)
 {
     char file[96];
-    s2_reset();
+    if (!s2_reset()) return 0;
     s2_gen_tables();
     s2_nobject = 0;
     s2_found[0] = s2_found[1] = 0;
@@ -403,6 +516,7 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
             F32(0x11f2a0 + (uint32_t)(rate * 400 + i * 4)) = (float)pow(0.5 + (double)((float)i * 0.005f), 50.0 / (double)(rate + 1));
     s2_dtr("build/dec/GAME/CARS.DTR", "CAR_PARAMS", 0x11c600, 0x58, 0x58);
     s2_dtr("build/dec/GAME/MISC.DTR", "SKILLS", 0x11f0f4, 0x1c, 0x1c);
+    s2_dtr("build/dec/GAME/CRUSC.DTR", "CRUSCOTTI", 0x1242b4, 0x58, 0x58);        /* the dashboards (0x2ddea) */
     s2_dtr("build/dec/GAME/MISC.DTR", "DAMAGES", 0x11cce0, 4, 4);
     /* the track's (0x2ef4e): TRACK_DATA, and its six road kinds filed under their numbers */
     snprintf(file, sizeof file, "build/dec/MAP%d/MAP%dDAT.DTR", track, track);
@@ -412,6 +526,23 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
             memcpy(MP(0x11cdec + (uint32_t)I32(0x124130 + k * 0x24) * 0x24), MP(0x124130 + k * 0x24), 0x24);
     snprintf(file, sizeof file, "build/dec/MAP%d/MAP%dOPP.SPL", track, track);
     s2_line_load(file);
+    /* the bends' arrows: MAPnDIR.SPL, one list (0x30b10 -> 0x12734c: the address of its
+       0x24-byte entry); the next one to come is 0x133080, from 0 (0x2e2c3) */
+    {
+        int32_t hdr[2];
+        FILE *f;
+        snprintf(file, sizeof file, "build/dec/MAP%d/MAP%dDIR.SPL", track, track);
+        f = os_fopen(file, "rb");
+        U32(0x12734c) = 0; I32(0x133080) = 0; F32(0x133090) = 0.0f;
+        if (f && fread(hdr, 4, 2, f) == 2 && hdr[0] > 0 && hdr[0] < 1024) {
+            const uint32_t entry = s2_alloc(0x24), nodes = s2_alloc((uint32_t)hdr[0] * 0x38);
+            if (entry && nodes && fread(MP(nodes), 0x38, (size_t)hdr[0], f) == (size_t)hdr[0]) {
+                U32(entry) = nodes; I32(entry + 0x1c) = hdr[0]; I32(entry + 0x20) = hdr[1];
+                U32(0x12734c) = entry;
+            }
+        }
+        if (f) fclose(f);
+    }
     /* the race record (0x130c48): cars, track, condition, detail; a car: team, model, ...,
        +0x14 its six settings as the attract race has them (0x3c9ac) */
     /* the level (0x130d4c): 0 pro, 1 normal, 2 rookie -- the row of SKILLS (MISC.DTR) from
@@ -426,17 +557,20 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
     FUN_00037e06(0x132fa5, 0, 0, 0, F32(0x130d18)); FUN_00037e06(0x132fb1, 0, 0, 0, F32(0x130d14));
     F32(0x133078) = F32(0x13307c) = 0.0f;
     I32(0x130c48) = ncars; I32(0x130c4c) = track - 1; I32(0x130c50) = condition; I32(0x130c54) = 2;
-    /* as the menu fills an ordinary race in (0x339e7, its case 0): the mode word 2; the
-       player's six settings from the options' first set-up, which starts as 2 2 0 2 2 2
-       (0x32d53: steering, gearing, TYRES 0 = slicks, front, rear, brakes); the other cars
-       keep what the attract race gave all four, 2 2 -1 2 2 2 (0x3c9ac: -1 = the track's own
-       tyres, 0x14e20); the gearbox by itself (+0xc, the options' 0x128a28 = 0) */
-    U32(0x130d10) = 2;
+    /* AN ARCADE RACE, AS THE ORIGINAL HAS IT IN ITS MEMORY (read out of the game running in
+       DOSBox from its default menu choices, NOTES2 S2-5w -- not from the menu's code, whose
+       branch for another kind of game had been taken for this one): the mode word 0x130d10 =
+       1; every car's six settings 2 2 -1 2 2 2 (-1 = the track's own tyres, 0x14e20; with
+       the mode's bit 1 that routine leaves the computer's cars' settings alone too); the
+       gearbox by itself for the player (+0xc = 1) and 0 in the others' entries; damage on
+       (0x130d54), 0x130d64 = 1, 0x130d6c = 4 */
+    U32(0x130d10) = 1;
+    I32(0x130d54) = 1; I32(0x130d64) = 1; I32(0x130d6c) = 4;
     for (int i = 0; i < ncars; i++) {
-        static const int mine[6] = { 2, 2, 0, 2, 2, 2 }, theirs[6] = { 2, 2, -1, 2, 2, 2 };
+        static const int settings[6] = { 2, 2, -1, 2, 2, 2 };
         I32(ENTRY(i)) = team[i]; I32(ENTRY(i) + 4) = model[i];
-        I32(ENTRY(i) + 0x0c) = 1;
-        for (uint32_t k = 0; k < 6; k++) I32(ENTRY(i) + 0x14 + 4 * k) = (i == 0 ? mine : theirs)[k];
+        I32(ENTRY(i) + 0x0c) = i == 0;
+        for (uint32_t k = 0; k < 6; k++) I32(ENTRY(i) + 0x14 + 4 * k) = settings[k];
     }
     /* where each view's camera is (0x1192f4[view]: +0x48, +0x50 its place, +0x58 its
        heading): the engine sound is placed by it (0x1f756) */
@@ -456,9 +590,14 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
         for (uint32_t j = 0; j < 7; j++) I32(KEYS(0) + k * 0x1c + j * 4) = entry[j];
     }
     F32(0x133350) = F32(0x133354) = 0.02f;
-    FUN_0004b016();
-    for (int i = 0; i < ncars; i++)
-        if (FUN_0002f519((int)CAR(i), S2_TMP, 1, i) != 0) return 0;
+    {
+        S2_FPU_IN;
+        int bad = 0;
+        FUN_0004b016();
+        for (int i = 0; i < ncars && !bad; i++) bad = FUN_0002f519((int)CAR(i), S2_TMP, 1, i) != 0;
+        S2_FPU_OUT;
+        if (bad) return 0;
+    }
     /* the trackside cameras (0x14d00): CAMERASn.MCM is their number, then 0x20 bytes each --
        place, three angles, the kind 0..4 (+0x18) and a figure for it (+0x1c) -- to the
        camera record's +0xa60 and +0x60 (80 at most) */
@@ -496,10 +635,11 @@ void s2_camera(s2_camera_state *c)
     for (uint32_t k = 0; k < 3; k++) c->angle[k] = F32(CAMERA + 0x54 + 4 * k);
     c->view = I32(CAMERA + 0xae4);
     c->shot = I32(CAMERA + 0x24);
+    c->rows = I32(CAMERA + 0x1c);
     c->fade_near = -I32(0x11373c); c->fade_far = -I32(0x113738);
 }
 
-int s2_level = 2;
+int s2_level = 1;                           /* (an arcade race of the original's with its options as they start: 1) */
 int s2_laps = 3;
 
 void s2_hud(s2_hud_state *h)
@@ -518,6 +658,16 @@ void s2_hud(s2_hud_state *h)
     h->best_lap = (const char *)MP(0x132fa4); h->best_total = (const char *)MP(0x132fb0);
     h->message = (const char *)MP(0x132f98); h->message_left = (float *)MP(0x133078);
     h->best_lap_left = (float *)MP(0x13307c);
+    h->view = I32(U32(0x1192f4) + 0xae4);
+    h->leader = -1;
+    if (!(U32(0x130d10) & 0x30) && (U32(0x130d10) & 1))
+        for (int i = 0; i < I32(0x130c48); i++)
+            if (i != I32(0x11f0c8) && I32(CAR(i) + 0xc30) == 1) h->leader = i;
+    h->bend = F32(0x133090) > 0.0f && !(U8(me + 0x4c) & 1) && h->view != 1 ? I32(0x133088) + 0x1b : -1;
+    /* the dashboard is the car's model's; a model 4's is its team's of the second four (0x2e5d0) */
+    h->dash = I32(ENTRY(I32(0x11f0c8)) + 4);
+    if (h->dash == 4) h->dash = I32(ENTRY(I32(0x11f0c8))) + 4;
+    h->dash_rec = MP(0x1242b4 + (uint32_t)(h->dash & 7) * 0x58);
     h->speed = F32(me + 0x500);
     h->revs = F32(me + 0x60) != 0.0f ? F32(me + 0xc78) / F32(me + 0x60) : 0.0f;
     for (int i = 0; i < h->ncars && i < 4; i++) {
@@ -542,7 +692,7 @@ void s2_put(int i, int x, int y, float heading)
 {
     I32(CAR(i) + 0x4d8) = x; I32(CAR(i) + 0x4e0) = y; I32(CAR(i) + 0x4dc) = 0;
     F32(CAR(i) + 0x4e8) = heading;
-    FUN_0001d9fc((int)CAR(i));
+    { S2_FPU_IN; FUN_0001d9fc((int)CAR(i)); S2_FPU_OUT; }
     memcpy(MP(CAR(i) + 0x734), MP(CAR(i) + 0x4d8), 0x25c);   /* (the frame before: 0x2f519) */
 }
 
@@ -566,6 +716,23 @@ void s2_state(void)
     printf("\n");
 }
 
+/* a test: car i lifted `height` above where it stands and given `speed` units a second along
+   its heading (its last frame's corners and place moved back by a step's worth), for cars
+   that meet in the air */
+void s2_throw(int i, int height, float speed, float step)
+{
+    const float h = F32(CAR(i) + 0x4e8), dx = sinf(h) * speed * step, dz = -cosf(h) * speed * step;
+    I32(CAR(i) + 0x4dc) += height;
+    for (uint32_t w = 0; w < 4; w++) {
+        F32(CAR(i) + 0x518 + w * 0xc) += (float)height;
+        I32(CAR(i) + 0x5a4 + w * 0x70) += height;            /* the wheel's own height (wheel +0x30) */
+    }
+    memcpy(MP(CAR(i) + 0x734), MP(CAR(i) + 0x4d8), 0x25c);
+    I32(CAR(i) + 0x734) -= (int)dx; I32(CAR(i) + 0x73c) -= (int)dz;
+    for (uint32_t w = 0; w < 4; w++) { F32(CAR(i) + 0x770 + w * 0xc) -= dx; F32(CAR(i) + 0x778 + w * 0xc) -= dz; }
+    for (uint32_t w = 0; w < 4; w++) { F32(CAR(i) + 0x544 + w * 0xc) = dx / step; F32(CAR(i) + 0x54c + w * 0xc) = dz / step; }
+}
+
 /* a test's look at a car's record: the words from `from`, as floats and whole numbers */
 void s2_peek(int i, uint32_t from, int n)
 {
@@ -575,15 +742,48 @@ void s2_peek(int i, uint32_t from, int n)
 
 void s2_go(void) { U32(0x11f0a8) |= 0x20; }               /* the lights are out */
 
+/* (the game has two: the step its routines work with, 0x133350, eased from the time the last
+   pictures took, and that time itself, 0x133354, by which the race's clock goes on) */
+static float s2_raw_step = -1.0f;
+void s2_frame_times(float raw) { s2_raw_step = raw; }
+void s2_clock_set(float clock) { F32(0x13335c) = clock; }
+
+/*
+ * THE BENDS' ARROWS (0x454fc, from the race screen 0x45882 while the player's car has not
+ * finished and the view is not the trackside one; one player).  The list's nodes: +4 x,
+ * +8 y, +0xc which arrow.  When the car is within 80 of the next node -- distances in
+ * hundredths, so 8000 units -- its arrow is shown for a second (0x133090, counted down by
+ * the frame's raw time) and the node after it becomes the next, round the list.  The arrow
+ * is sprite 0x1b + its number, centred, at row 0x32.
+ */
+static void s2_bend(void)
+{
+    const uint32_t me = CAR(I32(0x11f0d0)), list = U32(0x12734c);
+    if (!list || (U32(0x130d10) & 0x1c0) || (U8(me + 0x4c) & 1) || I32(CAMERA + 0xae4) == 1) return;
+    const uint32_t node = U32(list) + (uint32_t)I32(0x133080) * 0x38;
+    const double dy = (double)(I32(me + 0x4e0) - I32(node + 8)) * 0.01, dx = (double)(I32(me + 0x4d8) - I32(node + 4)) * 0.01;
+    if (sqrt(dy * dy + dx * dx) < 80.0) {
+        F32(0x133090) = 1.0f;
+        I32(0x133088) = I32(node + 0xc);
+        if (getenv("OS_S2BENDLOG")) printf("bend: node %d of %d, arrow %d, clock %.1f\n", I32(0x133080), I32(list + 0x1c), I32(node + 0xc), (double)F32(0x13335c));   /* a test */
+        if (++I32(0x133080) >= I32(list + 0x1c)) I32(0x133080) = 0;
+    }
+    F32(0x133090) = F32(0x133090) - F32(0x133354);
+    if (F32(0x133090) <= 0.0f) F32(0x133090) = 0.0f;
+}
+
 void s2_frame(float step)
 {
-    F32(0x133350) = F32(0x133354) = step;
+    S2_FPU_IN;
+    F32(0x133350) = step; F32(0x133354) = s2_raw_step >= 0.0f ? s2_raw_step : step;
     FUN_0002baa4();
     FUN_00012dff((int)CAMERA, 1);                         /* (0x2b873: before each picture) */
+    S2_FPU_OUT;
+    s2_bend();
     if (getenv("OS_S2TRACEFILE")) {                       /* a test (tools/s2emu.py): the player's car's record after every frame */
         static FILE *f;
         if (!f) f = fopen(getenv("OS_S2TRACEFILE"), "wb");
-        if (f) { fwrite(MP(CAR(0)), 1, 0xcc0, f); fflush(f); }
+        if (f) { fwrite(MP(CAR(0)), 1, 0xcc0u * (uint32_t)I32(0x130c48), f); fflush(f); }      /* (every car's) */
     }
 }
 
@@ -593,9 +793,9 @@ void s2_dump(const char *path)
 {
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    const uint32_t more[2] = { s2_seed, CAMERA };
+    const uint32_t more[3] = { s2_seed, CAMERA, s2_hooklog() ? (uint32_t)ftell(s2_hooklog()) : 0u };   /* (and how far the log of answers had got) */
     fwrite(s2_mem, 1, S2_SIZE, f);
-    fwrite(more, 4, 2, f);
+    fwrite(more, 4, 3, f);
     fclose(f);
 }
 

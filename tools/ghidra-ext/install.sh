@@ -44,6 +44,28 @@ for f in "$L"/*; do
     ln -sfn "$f" "$EXT/data/languages/$b"
 done
 
+# the language itself: the stock one with the stores of floats kept visible
+# (see x86watcom.ldefs).  ia.sinc is copied with four constructors changed and compiled.
+rm -f "$EXT/data/languages/iaf.sinc" "$EXT/data/languages/x86f.slaspec"
+python3 - "$L" "$EXT/data/languages" <<'PY'
+import re, sys
+L, E = sys.argv[1], sys.argv[2]
+s = open(L + "/ia.sinc").read()
+k = "define pcodeop segment;"
+assert k in s
+s = s.replace(k, "define pcodeop f32;        # a value rounded by a store to a float (kept visible)\ndefine pcodeop f64;\n" + k, 1)
+n = 0
+for w, op, size in (("m32fp", "f32", 4), ("m64fp", "f64", 8)):
+    for ins in ("FST", "FSTP"):
+        pat = re.compile(r"(:%s %s\s+is [^\n]*\n\{\s*\n\s*FPUInstructionPointer = inst_start;\n\s*)%s = float2float\(ST0\);" % (ins, w, w))
+        s, c = pat.subn(lambda m: m.group(1) + "local rnd:%d = float2float(ST0); %s = %s(rnd);" % (size, w, op), s)
+        n += c
+assert n == 4, "ia.sinc is not as expected (%d of 4 stores found)" % n
+open(E + "/iaf.sinc", "w").write(s)
+open(E + "/x86f.slaspec", "w").write(open(L + "/x86.slaspec").read().replace('"ia.sinc"', '"iaf.sinc"'))
+PY
+( cd "$EXT/data/languages" && "$GHIDRA_INSTALL/support/sleigh" x86f.slaspec x86f.sla > x86f.log 2>&1 ) || { echo "error: sleigh failed, see $EXT/data/languages/x86f.log" >&2; exit 1; }
+
 echo "installed Watcom compiler spec -> $EXT"
 echo
 echo "verify with:"

@@ -19,3 +19,6 @@ __pycache__/
 /openscreamer.rep/
 # release packages (tools/release_linux.sh)
 /dist/
+# Screamer 2: the routines converted to C for the developer build (made from the game's program: never published)
+/port/src/s2_gen.inc
+/port/build_interp/

@@ -29,6 +29,8 @@ set(OS_SOURCES
   src/port.c
   src/controls.c
   src/s2_hooks.c
+  src/s2_cpu.c
+  src/s2_exe.c
 )
 
 # MISTER (branch mister): the hybrid core.  SDL is the framework's, linked
@@ -79,4 +81,23 @@ if(WIN32)
   # DLL: linked in, its statics would be among those port.c puts back
   target_link_options(openscreamer PRIVATE -mwindows -static-libgcc)
   target_compile_options(openscreamer PRIVATE ${SDL2_CFLAGS_OTHER})
+endif()
+
+# Screamer 2's race routines are the game's own, run from the player's STARTL.EXE by the
+# interpreter of src/s2_cpu.c.  Its floating point is the 387's at the precision the game
+# sets, a double's: the sums must not be contracted (a * b + c in one step) on any processor.
+set_source_files_properties(src/s2_cpu.c PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math")
+# Where src/s2_gen.inc is present -- the routines converted to C by tools/s2c.py, which is
+# made from the game's program and is NOT in the repository -- the build uses it: several
+# times faster, and what the race is developed and judged with.  Without the file, or with
+# -DS2_INTERPRETER=ON, the interpreter runs them.  The converted sums are done on the x87.
+option(S2_INTERPRETER "Screamer 2: run the game's routines in the interpreter even if src/s2_gen.inc is there" OFF)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/s2_gen.inc" AND NOT S2_INTERPRETER)
+  message(STATUS "Screamer 2: the routines converted to C (src/s2_gen.inc)")
+  target_compile_definitions(openscreamer PRIVATE S2_CONVERTED)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86")
+    set_source_files_properties(src/s2_hooks.c PROPERTIES COMPILE_OPTIONS "-mfpmath=387;-fexcess-precision=standard")
+  endif()
+else()
+  message(STATUS "Screamer 2: the routines run from the player's STARTL.EXE (interpreter)")
 endif()

@@ -87,6 +87,7 @@ static int read_mmp(scene *sc, const char *path)
                 so->y     = (float)I32(o + MMP_Y);
                 so->t     = I32(o + MMP_T);
                 so->layer = (k < n0) ? 0 : 1;
+                so->cell  = y * 256 + x;
                 so->phase = I32(o + 0x20);
                 so->kind  = I32(o + 0x3c);
                 so->pose  = NULL;

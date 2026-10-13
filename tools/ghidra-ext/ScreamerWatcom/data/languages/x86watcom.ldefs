@@ -2,7 +2,11 @@
 <!--
   A distinct x86 variant so the Watcom compiler spec can be selected without
   modifying the read-only Ghidra installation.  Reuses the stock x86 sleigh
-  language and processor spec; only the calling convention differs.
+  language and processor spec; the calling convention differs, and the sleigh
+  language is a copy (x86f.sla, made by install.sh) in which every store of a
+  float (FST / FSTP to a 32- or 64-bit place) is shown as f32() / f64():
+  the stock decompiler prints a sum that is stored and read back as one
+  expression, and the rounding of the store is lost.
 -->
 <language_definitions>
   <language processor="x86"
@@ -10,7 +14,7 @@
             size="32"
             variant="watcom"
             version="4.7"
-            slafile="x86.sla"
+            slafile="x86f.sla"
             processorspec="x86.pspec"
             id="x86:LE:32:watcom">
     <description>Intel/AMD 32-bit x86 (Watcom C/C++ register convention)</description>

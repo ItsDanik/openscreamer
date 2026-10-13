@@ -17,7 +17,7 @@ Needs `unicorn` and `capstone` (pip).  What is not the game's here: the same thi
 answers itself -- the ground (level), the nearest road point (none), sound, smoke, the
 replay's recorder, the network, the engine's lists -- each returns at once.
 """
-import sys, struct, argparse
+import sys, struct, argparse, os
 from unicorn import *
 from unicorn.x86_const import *
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32
@@ -29,18 +29,22 @@ ap.add_argument("--step", type=float, default=0.04)
 ap.add_argument("--keys", default="A"); ap.add_argument("--keys2", default=None); ap.add_argument("--at", type=float, default=0.0)
 ap.add_argument("--plan", default=None)          # "A:4,AL:0.6,B:2": keys for so many seconds, as OS_S2PLAN
 ap.add_argument("--kind", type=int, default=36)
+ap.add_argument("--cars", type=int, default=0)       # compare so many cars (without --hooks: 1)
+ap.add_argument("--hooks", default=None)         # OS_S2HOOKLOG's file: the port's answers about the track, replayed
 ap.add_argument("--frames", type=int, default=0)
-ap.add_argument("--fpcw", type=lambda v: int(v, 0), default=0x37f)
+ap.add_argument("--fpcw", type=lambda v: int(v, 0), default=0x127f)   # what the game's runtime loads (0xbb603)
 ap.add_argument("--show", default="")           # offsets to print every frame, e.g. 4e8,500,4d4
 ap.add_argument("--tol", type=float, default=2e-3)
 ap.add_argument("--inttol", type=int, default=0)  # whole numbers may differ by this much (x87 against C arithmetic)
 ap.add_argument("--every", type=int, default=0)   # print heading, speed, slip of both every so many frames
+ap.add_argument("--loose", action="store_true")  # only where each car is, how it points and how fast, with room for rounding
 ap.add_argument("--stop", type=int, default=1)  # stop after this many frames that differ
 A = ap.parse_args()
 
 IMG = open(A.image, "rb").read()
 BLK = open(A.block, "rb").read()
-seed, camera = struct.unpack_from("<2I", BLK, 0x100000)
+seed, camera, hookat = struct.unpack_from("<3I", BLK, 0x100000)
+HK = open(A.hooks, "rb").read() if A.hooks else None
 TR = open(A.trace, "rb").read()
 CAR, KEYS, RET = 0x119300, 0x127708, 0x3ff000
 
@@ -78,6 +82,39 @@ def w32(uc, a, v): uc.mem_write(a, struct.pack("<i", v))
 
 def hook(uc, addr, size, user):
     state["calls"][addr] = state["calls"].get(addr, 0) + 1
+    if HK is not None and addr in (0x28ce6, 0x2a371):
+        at = state.setdefault("hk", hookat)
+        x, z = struct.unpack("<i", uc.mem_read(0x11cdcc, 4))[0], struct.unpack("<i", uc.mem_read(0x11cdd4, 4))[0]
+        if addr == 0x28ce6:
+            r = struct.unpack_from("<9i", HK, at); state["hk"] = at + 36
+            if r[0] != 1 or r[1] != x or r[2] != z:
+                if r[0] != 1 or abs(r[1] - x) + abs(r[2] - z) > 40: state.setdefault("desync", "ground asked at %d %d, the port was asked %s" % (x, z, r[:3]))
+                state["near"] = state.get("near", 0) + 1
+            w32(uc, 0x4cb98, 0)
+            if r[3] & 1:
+                w32(uc, 0x4cbec, r[8])
+                if not r[3] & 2: w32(uc, 0x4cb98, r[4]); w32(uc, 0x4cba0, r[5]); w32(uc, 0x4cba4, r[6]); w32(uc, 0x4cba8, r[7])
+            leave(uc, POP[addr], r[3] & 1)
+        else:
+            r = struct.unpack_from("<13i", HK, at); state["hk"] = at + 52
+            walls = uc.reg_read(UC_X86_REG_EAX)
+            if r[0] != 2 or r[1] != walls or r[2] != x or r[3] != z:
+                if r[0] != 2 or r[1] != walls or abs(r[2] - x) + abs(r[3] - z) > 40: state.setdefault("desync", "nearest(%d) asked at %d %d, the port was asked %s" % (walls, x, z, r[:4]))
+                state["near"] = state.get("near", 0) + 1
+            found, rec = r[4], r[5] & 0xffffffff
+            if found:
+                uc.mem_write(rec, HK[at + 24:at + 24 + (28 if walls else 12)])
+                uc.mem_write(0x11cdd8 if walls else 0x11cde8, struct.pack("<I", rec))
+            was = struct.unpack("<I", uc.mem_read(0x11cde8, 4))[0]
+            if not walls and was:
+                uc.mem_write(0x11cde0, bytes(uc.mem_read(was + 4, 8)))
+                a = struct.unpack("<f", uc.mem_read(was, 4))[0]
+                f32r = lambda v: struct.unpack("<f", struct.pack("<f", v))[0]
+                if struct.unpack("<I", uc.mem_read(0x130d30, 4))[0] & 8: a = f32r(a + f32r(3.14159274))
+                if a > f32r(6.28318548): a = f32r(a + f32r(-6.28318548))
+                uc.mem_write(0x11cddc, struct.pack("<f", a))
+            leave(uc, POP[addr], found)
+        return
     if addr == 0x28ce6:                         # the ground: level, at 0, of the one kind
         w32(uc, 0x4cb98, 0); w32(uc, 0x4cba0, 0); w32(uc, 0x4cba4, 16384); w32(uc, 0x4cba8, 0); w32(uc, 0x4cbec, A.kind)
         leave(uc, POP[addr], 1)
@@ -98,6 +135,16 @@ def hook(uc, addr, size, user):
         b = bytes(uc.mem_read(frm, 256)); uc.mem_write(to, b[:b.index(0) + 1])
     else: leave(uc, POP[addr], 0)
 
+def fnmark(uc, addr, size, user):
+    c = bytes(uc.mem_read(CAR + 0xcc0 + 0x4e4, 12))
+    print("  in %x: car1 pitch %.4f head %.4f lean %.4f step %.4f" % ((addr,) + struct.unpack("<3f", c) + struct.unpack("<f", uc.mem_read(0x133350, 4))))
+    c_ = CAR + 0xcc0
+    g = lambda o: struct.unpack("<f", uc.mem_read(c_ + o, 4))[0]; gi = lambda o: struct.unpack("<i", uc.mem_read(c_ + o, 4))[0]
+    print("      corner heights %.1f %.1f %.1f %.1f  last frame's %.1f %.1f %.1f %.1f  wheels %d %d %d %d  speeds up %.1f %.1f %.1f %.1f" % (
+          g(0x518), g(0x524), g(0x530), g(0x53c), g(0x774), g(0x780), g(0x78c), g(0x798), gi(0x5a4), gi(0x614), gi(0x684), gi(0x6f4), g(0x548), g(0x554), g(0x560), g(0x56c)))
+if os.environ.get("EMUFN"):
+    for a in (0x1b36f, 0x16824, 0x1b92b, 0x245a3, 0x22d35, 0x1684e, 0x16878, 0x167e2, 0x1c7f8, 0x1d9fc, 0x1bef1, 0x1e529, 0x1c4fb, 0x19810, 0x29571, 0x28f96):
+        mu.hook_add(UC_HOOK_CODE, fnmark, begin=a, end=a)
 for a in POP:
     mu.mem_write(a, b"\xc2" + struct.pack("<H", POP[a]) if POP[a] else b"\xc3")
     mu.hook_add(UC_HOOK_CODE, hook, begin=a, end=a)
@@ -127,6 +174,17 @@ def intr(uc, no, user):
     print("  interrupt %d at eip %x esp %x; last %s" % (no, uc.reg_read(UC_X86_REG_EIP), uc.reg_read(UC_X86_REG_ESP), " ".join("%x" % a for a in last[-6:])))
     uc.emu_stop()
 mu.hook_add(UC_HOOK_INTR, intr)
+# EMUINS=1: count what is executed (how much work a frame is for an interpreter): all
+# instructions, and those of the floating-point unit (first byte 0xd8..0xdf)
+INS = [0, 0, set()]
+def count_ins(uc, addr, size, user):
+    INS[0] += 1
+    INS[2].add(addr)
+    if 0xd8 <= uc.mem_read(addr, 1)[0] <= 0xdf: INS[1] += 1
+if os.environ.get("EMUINS"): mu.hook_add(UC_HOOK_CODE, count_ins)
+import atexit
+if os.environ.get("EMUINS") and os.environ["EMUINS"] != "1": atexit.register(lambda: open(os.environ["EMUINS"], "a").write("".join("%x\n" % a for a in sorted(INS[2]))))
+if os.environ.get("EMUINS"): atexit.register(lambda: print("instructions executed: %d (%d floating-point), at %d different addresses" % (INS[0], INS[1], len(INS[2]))))
 
 def call(entry, eax=0, edx=0, ebx=0, ecx=0):
     esp = 0x3f0000
@@ -142,7 +200,9 @@ def call(entry, eax=0, edx=0, ebx=0, ecx=0):
 def f32(b, o): return struct.unpack_from("<f", b, o)[0]
 def i32(b, o): return struct.unpack_from("<i", b, o)[0]
 
-frames = A.frames or len(TR) // 0xcc0
+NCARS = A.cars or (struct.unpack_from("<i", BLK, 0x130c48 - 0x110000)[0] if A.hooks else 1)
+REC = 0xcc0 * NCARS
+frames = A.frames or len(TR) // REC
 show = [int(x, 16) for x in A.show.split(",") if x]
 bad = 0
 for f in range(frames):
@@ -165,16 +225,29 @@ for f in range(frames):
         print("frame %d: the emulator stopped: %s at 0x%x" % (f, e, mu.reg_read(UC_X86_REG_EIP)))
         print("   the last routines entered:", " ".join("%x(%x,%x,%x)" % e for e in entered[-14:]))
         print("   the last instructions:", " ".join("%x" % a for a in last[-40:])); break
-    game = bytes(mu.mem_read(CAR, 0xcc0))
-    port = TR[f * 0xcc0:(f + 1) * 0xcc0]
+    game = bytes(mu.mem_read(CAR, REC))
+    port = TR[f * REC:(f + 1) * REC]
+    if "desync" in state: print("frame %d: %s" % (f, state["desync"])); break
     if show:
         print("f %4d " % f + "  ".join("+%03x game %11.4f port %11.4f" % (o, f32(game, o), f32(port, o)) for o in show))
     if A.every and f % A.every == 0:
-        print("f %4d %5.2f s | game: heading %7.3f speed %6.1f slip %6.3f at %7d %7d | port: heading %7.3f speed %6.1f slip %6.3f at %7d %7d" % (
-              f, f * A.step, f32(game, 0x4e8), f32(game, 0x500), f32(game, 0x4d4), i32(game, 0x4d8), i32(game, 0x4e0),
-              f32(port, 0x4e8), f32(port, 0x500), f32(port, 0x4d4), i32(port, 0x4d8), i32(port, 0x4e0)))
+        for c in range(NCARS):
+            g, q = game[c * 0xcc0:(c + 1) * 0xcc0], port[c * 0xcc0:(c + 1) * 0xcc0]
+            print("f %4d %5.2f s car %d | game: heading %7.3f speed %6.1f at %7d %7d %6d | port: heading %7.3f speed %6.1f at %7d %7d %6d" % (
+                  f, f * A.step, c, f32(g, 0x4e8), f32(g, 0x500), i32(g, 0x4d8), i32(g, 0x4e0), i32(g, 0x4dc),
+                  f32(q, 0x4e8), f32(q, 0x500), i32(q, 0x4d8), i32(q, 0x4e0), i32(q, 0x4dc)))
     diff = []
-    for o in range(0, 0xcc0, 4):
+    if A.loose:
+        import math
+        for c in range(NCARS):
+            b = c * 0xcc0
+            for o in (0x4d8, 0x4dc, 0x4e0):
+                if abs(i32(game, b + o) - i32(port, b + o)) > 25: diff.append((b + o, "%d" % i32(game, b + o), "%d" % i32(port, b + o)))
+            for o in (0x4e4, 0x4e8, 0x4ec):
+                d = (f32(game, b + o) - f32(port, b + o) + math.pi) % (2 * math.pi) - math.pi
+                if not abs(d) <= 0.02: diff.append((b + o, "%.4f" % f32(game, b + o), "%.4f" % f32(port, b + o)))
+            if not abs(f32(game, b + 0x500) - f32(port, b + 0x500)) <= 1.0: diff.append((b + 0x500, "%.2f" % f32(game, b + 0x500), "%.2f" % f32(port, b + 0x500)))
+    for o in ([] if A.loose else range(0, REC, 4)):
         if game[o:o + 4] == port[o:o + 4]: continue
         a, b = f32(game, o), f32(port, o)
         ia, ib = i32(game, o), i32(port, o)
@@ -185,8 +258,9 @@ for f in range(frames):
     if diff:
         bad += 1
         print("frame %d (%.2f s): %d words differ; the first: " % (f, f * A.step, len(diff)) +
-              "; ".join("+0x%03x game %s port %s" % d for d in diff[:14]))
+              "; ".join("car %d +0x%03x game %s port %s" % (d[0] // 0xcc0, d[0] % 0xcc0, d[1], d[2]) for d in diff[:14]))
         if bad >= A.stop: break
 else:
     print("%d frames: the same" % frames)
+print("questions about the track not asked at quite the same place:", state.get("near", 0))
 print("hooks called:", " ".join("%x:%d" % (a, n) for a, n in sorted(state["calls"].items())))

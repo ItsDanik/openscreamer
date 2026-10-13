@@ -49,12 +49,39 @@ public class DecompTo extends GhidraScript {
                         /* the same for LOCALS the decompiler makes pointers (a saved copy of
                            the record's address): as ints their fields are spelled out too */
                         boolean again = false;
-                        for (int pass = 0; pass < 3 && r.decompileCompleted(); pass++) {
+                        for (int pass = 0; pass < 6 && r.decompileCompleted(); pass++) {
                             boolean any = false;
                             java.util.Iterator<ghidra.program.model.pcode.HighSymbol> ls = r.getHighFunction().getLocalSymbolMap().getSymbols();
                             while (ls.hasNext()) {
                                 ghidra.program.model.pcode.HighSymbol hs = ls.next();
-                                if (hs.isParameter() || hs.getDataType().getLength() != 4) continue;
+                                if (hs.isParameter()) continue;
+                                /* (with the language variant that shows every store of a float as
+                                   f32() / f64() -- tools/ghidra-ext -- a local or an array that
+                                   such a store fills is a float, a double: the userop's result
+                                   carries no type of its own) */
+                                if (hs.getHighVariable() != null) {
+                                    String tn = hs.getDataType().getName();
+                                    boolean arr4 = hs.getDataType() instanceof ghidra.program.model.data.Array
+                                        && ((ghidra.program.model.data.Array) hs.getDataType()).getDataType().getName().equals("undefined4");
+                                    if (arr4 || tn.equals("undefined8")) {
+                                        boolean st = arr4;
+                                        for (ghidra.program.model.pcode.Varnode vn : hs.getHighVariable().getInstances()) {
+                                            ghidra.program.model.pcode.PcodeOp d = vn.getDef();
+                                            if (d != null && (d.getMnemonic().equals("CALLOTHER") || d.getMnemonic().startsWith("FLOAT"))) st = true;
+                                        }
+                                        if (st) {
+                                            try {
+                                                ghidra.program.model.data.DataType nt = arr4
+                                                    ? new ghidra.program.model.data.ArrayDataType(ghidra.program.model.data.FloatDataType.dataType, ((ghidra.program.model.data.Array) hs.getDataType()).getNumElements(), 4)
+                                                    : ghidra.program.model.data.DoubleDataType.dataType;
+                                                HighFunctionDBUtil.updateDBVariable(hs, null, nt, SourceType.USER_DEFINED);
+                                                any = true;
+                                            } catch (Exception e) { }
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if (hs.getDataType().getLength() != 4) continue;
                                 if (hs.getDataType() instanceof Pointer) {
                                     try {
                                         HighFunctionDBUtil.updateDBVariable(hs, null, IntegerDataType.dataType, SourceType.USER_DEFINED);
@@ -70,7 +97,7 @@ public class DecompTo extends GhidraScript {
                                 boolean fl = false;
                                 for (ghidra.program.model.pcode.Varnode vn : hs.getHighVariable().getInstances()) {
                                     ghidra.program.model.pcode.PcodeOp d = vn.getDef();
-                                    if (d != null && d.getMnemonic().startsWith("FLOAT_") || d != null && d.getMnemonic().equals("INT2FLOAT")) fl = true;
+                                    if (d != null && d.getMnemonic().startsWith("FLOAT_") || d != null && d.getMnemonic().equals("INT2FLOAT") || d != null && d.getMnemonic().equals("CALLOTHER")) fl = true;
                                     java.util.Iterator<ghidra.program.model.pcode.PcodeOp> us = vn.getDescendants();
                                     while (us != null && us.hasNext()) {
                                         String mn = us.next().getMnemonic();

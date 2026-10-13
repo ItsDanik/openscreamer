@@ -51,10 +51,12 @@ from it** (`build/dec`, `build/png`, `build/screamer_flat*.bin`, `build/decomp`)
 `build/screamer2_flat.bin`, `build/ghidra2`, `build/decomp2`) is the work in hand: its record is
 **`docs/NOTES2.md`** (sections S2-n: decisions, files, what stayed the same, tools, DOSBox,
 plan). Containers, `.3DX` and the track files are Screamer 1's formats; the game logic is new.
-`openscreamer -game 2` (or `-data screamer2`) is a race on its tracks (`OS_TRACK=1..7`; the game's
-own routines, converted by `tools/s2c.py` into `s2_gen.inc` and run on a copy of its memory:
-NOTES2 S2-5g..j; never edit `s2_gen.inc`, change the tool, `tools/s2c_fix.txt` or `s2_hooks.c`; the decompiler drops ST0 results and prints some statements out of order -- `tools/s2_sigs.txt`, `tools/s2order.py`, S2-5m;
-`OS_COND=1|2` = night / fog, NOTES2 S2-5d; `OS_DIFF=0|1|2` = pro / normal / rookie, rookie if not given, S2-5n; the game's four views on F1-F4 / C, S2-5k; the race frame runs 25 times a second, not 50 -- the game cuts positions to whole numbers and a short step turns that into a sideways pull, S2-5l). The race screen, the trackside cameras and the end's RACE AGAIN / EXIT are in (S2-5q, S2-5r; `OS_LAPS`); no sound, replay, records or menu yet. What is still the port's own or unread there: NOTES2 S2-5t. `tools/s2emu.py` runs the program's own machine code against the converted routines (S2-5u): use it before believing or doubting the driving. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
+`openscreamer -game 2` (or `-data screamer2`) is a race on its tracks (`OS_TRACK=1..7`). The race routines
+are the game's own, converted to C by `tools/s2c.py` into `port/src/s2_gen.inc` (NOTES2 S2-5g..j).
+**`s2_gen.inc` is made from the game's program: git-ignored, never published** (it is still in three
+local commits: to be taken out before any push, with Danik's go-ahead); never edit it, change
+the tool, `tools/s2c_fix.txt` or `s2_hooks.c`; without that file (or with `-DS2_INTERPRETER=ON`) the build runs the same routines out of the player's `STARTL.EXE` in an interpreter (`s2_exe.c`, `s2_cpu.c`, S2-7) -- correct but several times slower, and Danik has ruled it out as the way to ship (60 frames a second on the MiSTer); what to publish instead is undecided; the decompiler drops ST0 results and prints some statements out of order -- `tools/s2_sigs.txt`, `tools/s2order.py`, S2-5m; `(float)*(undefined4 *)` is a copy of the bits, not a conversion, S2-5z; every store of a float is a rounding, shown as `f32()` / `f64()` by the language variant `tools/ghidra-ext/install.sh` builds (run it again after a Ghidra update), S2-5za;
+`OS_COND=1|2` = night / fog, NOTES2 S2-5d; `OS_DIFF=0|1|2` = pro / normal / rookie, rookie if not given, S2-5n; the game's four views on F1-F4 / C, S2-5k; the race frame runs 25 times a second, not 50 -- the game cuts positions to whole numbers and a short step turns that into a sideways pull, S2-5l). The race screen, the trackside cameras, the end's RACE AGAIN / EXIT, view 6's dashboard, the bends' arrows and "1ST" over the leader are in (S2-5q, S2-5r, S2-5zb, S2-5zc; `OS_LAPS`; a race's picture: `OS_S2RUN=<frames> ... -game 2 build/dec/MAP1 1 --shot f.ppm 1`); no sound, replay, records or menu yet. What is still the port's own or unread there: NOTES2 S2-5t. `tools/s2emu.py` runs the program's own machine code against the converted routines (S2-5u), and `tools/s2dos.py` + `s2replay.py` read a race out of the ORIGINAL running in DOSBox and put it through the port (S2-5w): measure against those before believing or doubting the driving -- the port's player car is the original's to the unit on England. The track's set is H (the detail's), the sums are x87 at 53 bits, an arcade race's record is as S2-5w lists it. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
 Its image is made with `tools/unle.py --fixups` (real relocation records, no
 `RelocateRefs.java`). `screamer-dos [1|2]` runs the originals in DOSBox (`~/dosgames`).
 **The MiSTer port is not to be touched until Danik says so.**
@@ -198,7 +200,7 @@ P CD player, BACKSPACE back on the road, ESC = PLAY AGAIN?. `-d` developer mode:
 `OS_MENU_KEYS="UDLREXS"`, `OS_MENU_STEPS`, `OS_POS=x,y,z` + `OS_HEADING`, `OS_YAW`,
 `OS_PITCH`, `OS_OVERHEAD`, `OS_INSPECT`, `OS_ANIMCLOCK`, `OS_SNDWAV=<file>`, `OS_SNDLOG`,
 `OS_MUSIC=n`, `OS_MUSICVOL`, `OS_SFXVOL`, `OS_SFXLP`, `OS_MUSICLOG`, `OS_PADTEST`,
-`OS_REPLAYCHECK`, `OS_CYCLETEST`, `OS_LOAD_SHOT`; off-switches `OS_NOCARS NOOPP NOHUD
+`OS_REPLAYCHECK`, `OS_CYCLETEST`, `OS_LOAD_SHOT`, `OS_FRAMELOG=1` (frames a second and the port's work on one); off-switches `OS_NOCARS NOOPP NOHUD
 NOTIMER NOPROPS NOANIMS NOSOUND NOMUSIC NOSPEECH NOREPLAY NOCRASH NOLEAN NOSNAP NOTIE
 NORUMBLE`; dumps `OS_WALLCHECK HOLES TRACKMASK WHATAT HITDUMP GROUNDDUMP OPPDUMP PROPDUMP
 MODELOG TILTCHECK STACKED DOPPLERLOG INTRO_LOG`.

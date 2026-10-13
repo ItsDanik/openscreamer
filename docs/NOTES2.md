@@ -910,6 +910,336 @@ shell stood on end and turned with the wheels.
   has it. All five models checked pulling away with lock on: `build/png/s2_models.png`.
 - My miss: the default car was changed without looking at it moving.
 
+## S2-5w. THE ORIGINAL ITSELF AS THE MEASURE — 2026-10-13
+
+Danik, after S2-5u / v: "cornering is still not as forgiving as the original, and steering
+does not feel as responsive; OS_S2HZ makes no difference."  The converted routines were
+right against the program's code (S2-5u), so the question was what the original is GIVEN.
+
+**The rig.** `tools/s2dos.py <prefix> <plan>` runs the original in DOSBox on a hidden display
+(`Xvfb :77`), as its own child so that it may read `/proc/<pid>/mem`; goes through the menus
+with ENTER (nine of them: team, name, options room, ARCADE, England, the car "HORIZON 4wd",
+AUTOMATIC → the race); finds the game's data object in DOSBox's memory by a string of it
+(`misc\0ashadow`); waits for the player's race (the clock starting again after the attract
+race's); then holds the plan's keys (`"Up:3.9,Up+Left:1,Up:1.6"`, seconds of the RACE'S
+clock, XTEST) and reads, every game frame, the clock `0x13335c`, the step `0x133350`, the raw
+time `0x133354`, the six controls `0x127708 + 0xa8`, and every car's place, angles, speed.
+A pointer of the game's is turned into the image's addresses by `[car +0xb4] − 0x127708`.
+Read 15 ms after the clock moves: the clock goes on at the frame's START and a read during
+the frame's sums is half old, half new. Needs `python-xlib` (keys), and the DOSBox flatpak
+given `--socket=x11 --env=DISPLAY=:77`. `tools/s2replay.py <prefix>` then gives the port the
+same steps and controls frame by frame (`OS_S2SCRIPT`, `OS_S2CLOCK`) and prints both.
+
+**What it showed, in the order found:**
+1. The original runs at **17.7 pictures a second** in this DOSBox (60000 cycles: a Pentium of
+   its day): 0.0565 s a picture, **step 0.062** = that × 1.1 (`0x4ae9a` eases 1.1 × the time
+   measured) — its race runs a tenth faster than the wall's clock. The race's clock goes on
+   by the raw time `0x133354`, the routines use the eased step. (`s2_hz`: a frame of 1.1 /
+   17.7 every 1 / 17.7 s; `OS_S2HZ`.)
+2. **The race record in its memory** (an arcade race from the menu's defaults) was not what
+   the port set: mode `0x130d10` = **1**; every car's settings **2 2 −1 2 2 2** (the port had
+   given the player slicks, 0, last round from the menu's code for ANOTHER kind of game:
+   grip 1.1 against the track's own tyre's 1.4 on England's asphalt, and the drive is limited
+   by grip — the original's car pulled away 1.4 times as hard); with the mode's bit 1
+   `0x14e20` leaves the computer's cars' settings alone as well (the port had them boosted
+   to 4: max steer 1.3 against 0.91); `+0xc` of the others' entries 0; `0x130d54` = 1,
+   `0x130d64` = 1, `0x130d6c` = 4; level `0x130d4c` = **1**; view 3 and one lap in Danik's
+   saved options. `CHOICE.DAT` is the options block `0x1289ec` (0x81dc bytes), each word
+   `(w ^ i) − 0x1050c × i` (`0x32d53`).
+3. **The track's set is H**, not L: the cell at the first wall held four `V309`, which is
+   `MAP1H01`'s (`MAP1L01` has `V261` there). Known since S2-5d ("L when detail is 0, H
+   otherwise") and never done — the port took H only for the 640-wide picture. The two sets
+   are different objects on the road itself. `OS_S2SET=L` for the other.
+4. **The wall test's "is there ground under this corner"** is `0x28ce6(1)` → `0x4c474`: any
+   face holding the point, a face on edge too, no plane (`s2p_ground(only_whether…)`); the
+   pieces are walked by the cell they are LISTED in (`scene_object.cell`).
+5. **Which corner's push the wall gives the car** (`0x297a6`): the one with the greatest
+   |push x| + |push z|, the sums handed on in EDX / EBX through the library's `abs`
+   (`0xafeca`). The decompiler's reading compared two leftovers: always true, so the LAST
+   corner off the ground won — with two corners through a wall the car was pushed back by
+   the lesser, went on into it and bounced where the original slides along. Rewritten from
+   the instructions (`s2c_fix.txt @29571`).
+6. **The game's sums are x87 at 53 bits** (its runtime loads the control word 0x127f,
+   `0xbb603`): every step of an expression in double precision, cut to a float only when
+   stored. The converted routines were computing float expressions in floats, which decides
+   differently which whole number a place is cut to. `s2_hooks.c` is now compiled
+   `-mfpmath=387 -fexcess-precision=standard` and `S2_FPU_IN` sets the same control word
+   (x86 only — other processors: not done). `tools/s2emu.py` took the wrong word (0x37f) at
+   first; with the right one and `--hooks` (the port's answers about the track replayed to
+   the program's code) a four-car race on the real track stays within a few units for ten
+   seconds, and the player alone through repeated wall hits is the same to the unit.
+
+**After all six: the player's car in the port is the original's TO THE UNIT** through the
+recorded run — the grid, the start, 1 s of left lock, into the barrier at 55 km/h, the slide
+along it, away again (114 frames; `build/` holds nothing of it, the recordings are scratch).
+The other cars are the same until about the 96th frame and then up to 570 apart: not looked
+into (the random numbers' seed is the port's own).
+
+**Also:** the level is 1 by default now, as the original's arcade race (`OS_DIFF=2` =
+rookie). Track 7's shadow shows as a yellowish patch with the H set — to look at.
+
+## S2-5x. The shadow again; a picture of the original — 2026-10-13
+
+- `build/png/s2_original_road.png`: the original 5 s into the arcade race on England, view 3
+  (taken by `tools/s2dos.py`, its `_end.png`); beside the port's at about the same moment:
+  `s2_original_vs_port.png`. In it: the smoke off the tyres at the start, see-through by
+  degrees; a soft dark shadow under each car; "1ST" drawn over the leading car; the race
+  screen as the port has it.
+- Track 7 has no `MAP7.SMG` and the program has no name for an `.smg` file at all, so it must
+  make its blend table itself (`TRACK_DATA`'s "asmoke (rgb)" / "a2smoke" are likely what
+  from). Not read. The port goes on using the files where they are and makes the shadow's
+  rows (32–47: 1 − 0.045 a row) itself for track 7, which showed the shadow as a yellow patch.
+- TRIED AND TAKEN BACK: "routines 208 / 224 darken everything under the face through the 0.6
+  table" (the column loop at `0xc9030` uses that table, `0xc907c`). It gave a hard-edged dark
+  rectangle the size of the car; the original's shadow is soft. Which faces that loop draws
+  is not read.
+
+## S2-5y. The lens, measured against the original's picture — 2026-10-13
+
+- `tools/s2dos.py` reads the player's camera record too (`[0x1192f4]`: place `+0x48`, angles
+  `+0x54`, rows `+0x1c`): in view 3 the port's is the original's to the unit and the fourth
+  decimal for the whole run (1660 551 23186, 6.0092 0.0379 0 on the grid).
+- So the port can draw the original's very moment: `OS_S2RUN=1 OS_S2SCRIPT=<prefix>.script
+  OS_S2CLOCK=<clock> OS_VIEW=3 … --shot` plays the recorded race, then takes the picture.
+  Against the original's own screenshot of that moment the port's was the same scene but
+  LARGER: original = 0.871 × port + 43 rows of 400 (the START gantry, the car's roof and its
+  rear bumper). → Screamer 2's lens is **112** where Screamer's is 128 (0.875; 112 = 0.7 × 160,
+  as 128 = 0.8 × 160) — taken as measured, the engine's projection is not read. The eye line
+  measured 0.65–0.675 of the rows; a search over both (difference of the blurred scenery) is
+  flat between 109–112 and 0.65–0.67, so the eye line stays the code's 0.65 (`OS_EYE`,
+  `OS_FOCAL` to try others).
+- The engine's camera: `0x7e8b4(camera + 0xa64)` → `0x7f270` makes the matrix from the three
+  angles through the sine / cosine table at `0xb7480` (8 bytes an angle of 2048: sine, cosine,
+  16 bits) and `0x759b8`. Not carried over; the port's own turn-by-heading-then-tilt agrees
+  with the original's picture.
+- The speed shown is in MILES when `GAME.TXT`'s word for the unit begins with an M (`0x2ef4e`
+  sets `0x124654`; the dial then shows the eased `+0x500` × 1.513 ÷ 1.6): the original read 054
+  where the port read 086.
+- `build/png/s2_original_vs_port.png`: the original (left) and the port (right) at the same
+  frame of the same race. What the port still lacks there: the smoke, "1ST" over the leader.
+
+## S2-5z. Two cars touching in the air: a value copied, not converted — 2026-10-13
+
+Danik: a hit on an opponent while both were in the air gave a wild spin. Rebuilt with
+`OS_S2AIR=height,speed,gap,turn` (car 0 lifted, car 1 lifted behind it and thrown at it;
+with `OS_S2FLAT=36 OS_S2NONEAR=1 OS_S2CARS=2`) and run against the program's own code
+(`tools/s2emu.py ... --cars 2`): the game left car 1's tilt and lean near 0, the port had
+1.1 and 5.3 and the heading turned over.
+
+The cause, at the end of `0x245a3` (the cars' collision): for each of the eight corners
+the game reads the corner's UPWARD speed (`+0x70` from the corner's place, car `+0x548`
+`+0x554` `+0x560` `+0x56c`), adds the hit to all three speeds, and then puts the upward
+one back: a hit between cars never changes how fast a corner rises or falls. The
+decompiler writes that read as `local_2c = (float)*(undefined4 *)(...)`: four bytes of no
+known type "as a float", which in the machine code is a plain copy. Taken as C it is a
+conversion of a whole number, so the bits of the speed became a speed of about 3.3e9. On
+the ground the upward speed is 0, whose bits are 0: that is why it only showed in the air.
+
+Fix in `tools/s2c.py`: `(float)*(undefined4 *)` is a read of a float. One place in the
+converted set; `(float)*(int *)` is a real conversion and stays. Three more of the kind,
+`(float)DAT_0004cbxx` in `0x28f96` / `0x2c475` / `0x30b29`, read stored zeros: harmless.
+
+After it the nine frames of the test agree with the machine code (loose comparison: one
+word, car 1's lean 0.015 against -0.006 in one frame). The recorded run of the original
+(`s2replay.py r5`) and Screamer 1's pictures are as before.
+
+## S2-5za. Where the game rounds: every store of a float, shown by the decompiler — 2026-10-13
+
+Followed from the opponents leaving the original's recorded paths (S2-5w's open point). Not a
+random seed: the same cars went the same way for a hundred frames and then parted by one unit.
+The close comparison with the machine code (`s2emu.py --tol 1e-6 --cars 4`) showed real
+differences in the fifth figure, of three kinds, all the converter's.
+
+1. **The game's square root (`0x11253`) lost its fraction.** Its result sits in eight bytes on
+   the stack that the decompiler leaves untyped (`undefined8`); the converter made them a whole
+   number. Every distance in the opponents' path code (`0x108f5`, `0x153c6`, `0x2d59c`, ...) was
+   cut. Rule now: eight untyped bytes in a routine's stack frame are a double.
+2. **The roundings the decompiler hides.** The code keeps a sum on the processor's stack at
+   full width (53 bits here) and rounds when it stores it into a float, often into a temporary
+   that the next instruction reads back (`fstp dword [t]` / `fld dword [t]`). The stock
+   decompiler prints the pair as one expression: the rounding is gone and the text cannot say
+   where it was. `0x4a831` (a point and a direction on a path) takes the direction as the
+   difference of two nearly equal sums, each rounded first: without the rounding it was off by
+   5e-5. **Fix at the source:** `tools/ghidra-ext/install.sh` now builds a copy of the x86
+   language (`x86f.sla`, from `ia.sinc` with four constructors changed) in which `FST` / `FSTP`
+   to a 32- or 64-bit place write `f32(value)` / `f64(value)`, operations the decompiler cannot
+   fold away. The existing project takes it as it is (no re-import). `tools/s2c.py` turns each
+   into a cast, which under x87 arithmetic with `-fexcess-precision=standard` rounds there and
+   nowhere else. What had to follow:
+   - `DecompTo.java`: a local, an array or a double that such a store fills is typed float /
+     float[] / double (the operation's result carries no type);
+   - a temporary left untyped that only such stores fill becomes a float, and where it is
+     copied on its bytes go (`S2_SETF`), whatever the decompiler calls the destination;
+   - under a mark, untyped things are floats: `*(undefined4 *)`, an untyped local or
+     temporary (`S2_ASF`, or through `MP()` for a stack local), one of the program's own
+     variables, `(&local)[i]`;
+   - `f32(E);` alone is a store whose reader the decompiler lost (the float arguments of
+     `pow`, which `tools/s2c_fix.txt` supplies): dropped;
+   - `tools/s2c_fix.txt`: the patterns no longer name the decompiler's temporaries.
+   The text of `s2_gen.inc` does not settle from one decompile to the next (temporaries are
+   typed a few more each time and renumbered); what it does is the same.
+3. **`(float)` before one of the program's variables that the listing gives no type** is a
+   read of a float, not a conversion (the same family as S2-5z): the checkpoint times at
+   `0x130d1c` (compared with a car's own in `0x1ffcc`) and a field of the smoke records at
+   `0x125dd8`. Both were read as whole numbers.
+
+Also seen on the way: `local_114[0] = (float)(local_28 * 4)` in the old text of `0x153c6` was a
+whole number stored in the first place of a table; the new text has it as an int of its own.
+
+**Against the references.** The machine code (Unicorn): a four-car start on track 4 now differs
+in 4 words of 4 cars' records in the first frame, all in one float's last place (a heading; the
+emulator's own sine and arctangent are not the processor's, so that is the floor of this
+reference). The original in DOSBox: recordings `r6` and `r7` (England, 89 and 88 frames) are
+now the same for ALL FOUR cars in every frame; in `r5` opponent 1's creep on the grid is gone
+and the first difference is one unit at frame 71 (opponent 2); track 4 (`t4b`, 840 frames):
+first differences at frames 131, 145, 153, one unit each (before: 96). The player's car as
+before. What remains is one unit once in a hundred frames a car; not found whether it is the
+port's or DOSBox's arithmetic (its sine against this machine's).
+Seven tracks, four cars, 900 frames each: no stall. Screamer 1's pictures as before.
+
+## S2-5zb. The dashboard of view 6 — 2026-10-13
+
+Only view 6 (F2, the second from the car) has a dashboard; view 2 is the plain one with the
+dial. From `0x46b76` (the race screen), `0x46589` (the drawing), `0x2e1f3` (the loading),
+`0x13cbd` (the view), `0x2ddea` (the table):
+
+- **Which:** `0x124574[player]` = the car's model (race entry `+4`); a model 4's is its team
+  `+ 4`. Picture `COCK<n + 1>_L.PKC` (`_H` in 640) of `GAME1.DAT`, Screamer's `.PKC` format,
+  kept at `0x1242a0`. `MIRROR_L.PKC` (`0x1242b0`) is laid over every view but 1 when the
+  mirror is on (`0x11f0c4`): not done.
+- **The table:** `CRUSC.DTR`, section `CRUSCOTTI`, 0x58 bytes a dashboard at `0x1242b4` (four
+  "Car", then "Bon"), places in the 640-wide picture's units and halved by the low-res
+  program: `+0` the rows of the scene; `+4` the speed's needle: x, y, length, angle at
+  nought, angle at the most, the most; `+0x1c` the revs' needle: x, y, length, two angles;
+  `+0x30` five (x, y), the gear lamp's place by gear.
+- **The scene's rows:** view 6 sets camera `+0x1c` to the table's first number / 2 (127 to
+  137) and `0x12dff` gives `0x4f6c4` those rows with the eye line at 0.65 of them: the scene
+  is drawn only above the dashboard and the horizon sits lower than in the other views.
+  (View 5, the mirror's, has 35 rows.) The port: `s2_camera_state.rows` → `g_vh`, `g_cy`.
+- **Drawn** (`0x46589(speed, revs, gear)`, the speed `0x133098` = the dial's eased figure,
+  the revs `0x1330a0` = the eased part of the most): the picture; sprite `0x46 + 5 × n +
+  gear` at the gear's place; each needle at `nought − part × (nought − most)` radians
+  (under 0.001: 0), anticlockwise from the right, its tip `length / 2` away, as three lines
+  of colour 12 to the tip from the centre and from one pixel either side. No dial, speed
+  figure or gear figure in this view; the rest of the race screen as in the others.
+- The port's own: black where the picture is open below the scene's last row (a few pixels
+  along its upper edge). Picture: `build/png/s2_dashboard.png`.
+
+## S2-5zc. The bends' arrows; "1ST" over the leader — 2026-10-13 / 14
+
+- **The arrows** (`0x454fc`, called from the race screen `0x45882` while the player's car
+  has not finished and the view is not the trackside one). The list is `MAPnDIR.SPL`
+  (`"%sdir"`, loaded at `0x30b10`, its entry's address in `0x12734c`): nodes of 56 bytes, `+4`
+  x, `+8` y, `+0xc` which arrow (England: 11 nodes). `0x133080` = the next node, from 0.
+  When the car is within 80 of it (distances × 0.01: 8000 units) the arrow shows for one
+  second (`0x133090`, counted down by the frame's raw time), `0x133088` = its number, and the
+  node after becomes the next, round the list. Drawn as sprite `0x1b +` number, centred, row
+  0x32. In the port: `s2_bend()` in `s2_hooks.c` once a game frame, `s2_hud_state.bend`.
+  Picture: `build/png/s2_bend_arrow.png`.
+- **"1ST" over the leading car** -- FOUND 2026-10-14, after a long search in the wrong
+  places (it is sprite 0x26, not 0x72, and it is drawn by neither the race screen nor the
+  engine): **`0x4962c`**, called from the picture routine `0x2b873` right after the scene
+  (`0x2b6b4`) and before the mirror and the race screen, in every view. For each car other
+  than the player's: in the ordinary modes (mode `& 0x30` clear) when mode bit 1 is set and
+  the car's place (`+0xc30`) is 1, the point 500 above the car's place (`[car +0x990]`) goes
+  through `0x492d1` -- minus the camera's place, through its matrix (`camera +0xaac`, nine
+  whole numbers / 16384), shown only when the depth is between -128 and 20000, divided by
+  depth + 128 and multiplied by 128 -- and sprite 0x26 is drawn at (x + 150, y + 0.65 × rows
+  - 12), clipped to the scene's rows (view 6's are fewer). In the other modes (`& 0x30`: two
+  players?) every other car gets sprite `0x21 +` its team and a name instead. The port:
+  `s2_hud_state.leader`, drawn at the start of `s2_hud_draw` through the port's own lens so
+  that it sits over the car as drawn. Danik: in the original it is over whoever is first at
+  any moment. Picture: `build/png/s2_first_marker.png`.
+- **`AZTRI.3DX` / `AZ1TRI.3DX`** are not markers (two triangles 28 wide and 24 tall, back to back, of `MISC.MLB`'s plain materials 1 and 0; that file's materials 2, 3 are the birds, 4-6 the cones): `0x30db4` makes 30 objects of each, the 60
+  records of 0x3c bytes from `0x125dd8` that `0x2aeb9` sets off at the place of a collision
+  (`0x245a3` calls it with the point, the direction and the speed): the sparks. Not drawn
+  in the port yet.
+
+## S2-7. THE GAME'S ROUTINES RUN FROM THE PLAYER'S OWN PROGRAM — 2026-10-14
+
+**Why.** The race routines converted to C (`port/src/s2_gen.inc`, S2-5g..) are the game's
+program in another notation: not ours to publish, in source or in a binary. Danik's decision:
+the port carries nothing of the program and runs the routines out of the player's
+`STARTL.EXE` (the port needs the player's game files anyway).
+
+**What there is now.**
+- `port/src/s2_exe.c`: `<game's directory>/STARTL.EXE` → the flat layout its addresses mean
+  (`s2_flat`, 0x210000 bytes): the LE objects at their bases, the relocation records of kind 7
+  applied. `tools/unle.py --fixups` in C; `OS_S2EXEDUMP=<file>` writes it, and it is
+  `build/screamer2_flat.bin` byte for byte. One version only: image 0x139c90 bytes, FNV-1a
+  sum 0x0ee6b6c1 (the file is 1,055,478 bytes); another is refused with its numbers printed.
+- `port/src/s2_cpu.c`: an interpreter, 386 flat 32-bit + 387. What the routines execute was
+  counted first (the rig, `EMUINS=<file>`: 18,445 instruction addresses in three varied
+  four-car races): moves, the eight arithmetic ones, lea, imul / idiv, shifts, push / pop /
+  call / ret, the conditional jumps, and of the 387 loads, stores, the four operations and
+  their reversed and popping forms, compare + `fnstsw ax` + `sahf`, fild / fistp, fchs fabs
+  fsqrt fsin fcos fpatan fprem frndint, fldcw / fnstcw. The interpreter has those and the
+  usual rest (set-on-condition, movzx / movsx, string moves, mul / div, ten-byte loads);
+  anything else stops the routine and says where.
+- **The 387 is a double.** The game sets the control word 0x127f: every result rounded to 53
+  bits. So a register is a C double and the host's arithmetic gives the same bits on any
+  processor (`-ffp-contract=off -fno-fast-math` for that file). The control word's rounding
+  is honoured for conversions to whole numbers (the game switches to cutting off). Sine,
+  cosine, arc tangent are the C library's: the last bit may differ from a real 387's.
+- **Hooks** (`s2_hooks_set()` in `s2_hooks.c`): a call to a hooked address runs the port's
+  function instead, with eax / edx / ebx / ecx and the stack as the routine would find them,
+  then the routine's own `ret n`. The same list the converter had, less what now simply runs
+  as the game's code: the angle of a vector `0x10d9e`, the look-at `0x338ed`, the power
+  `0xafed2`, abs `0xafeca`. The arc cosine `0x4ea98` runs too, unless its number is out of
+  range (then 0, as before).
+- The block: the flat memory itself; the data object starts as the program has it (the
+  converted build started from zeros plus three small tables). The port's heap from
+  0x140000, the routines' stack down from 0x20f000.
+- `s2_call(entry, eax, edx, ebx, ecx, n, stack)`: what `s2_hooks.c` calls `0x2baa4`,
+  `0x12dff`, `0x2f519`, `0x309b0`, `0x12d31`, `0x1d9fc`, `0x4b016` through.
+- **The converted routines are still the measure, for the developer only:** the build with `s2_gen.inc` (see "later" below) (ignored by git now, and to be
+  taken out of the three local commits that hold it before anything is pushed).
+
+**Checked.**
+- Against the converted build, frame by frame, four cars (the scratch script `ab.sh`): the
+  same until cars touch or a long way in (England: frame 67, a touch, 102.1 against 102.0
+  km/h; track 4: frame 106, 0.1 km/h) -- the two do sine, cosine, power and arc cosine with
+  different last bits.
+- Against the ORIGINAL's recordings (S2-5w): as good as the converted build or better -- `r6`
+  and `r7` the same for all four cars in every frame; `r5` first difference frame 71; track 4
+  frames 131, 153, 169 (converted: 131, 145, 153).
+- Seven tracks, four cars, 1200 frames each: no instruction unknown, no stall. The five
+  views, a robot's lap, the mid-air crash: run.
+- **Speed.** A four-car frame is about 234,000 instructions (66,000 of the 387). On this PC
+  6000 frames take 4.6 s in the interpreter against 0.6 s converted: 0.77 ms a game frame,
+  17.7 of them a second. Nothing done for speed yet (flags worked out at every instruction,
+  everything decoded every time). For the MiSTer's ARM my estimate is 10 ms a frame, a fifth
+  of one core, before decoding once and keeping the result: NOT MEASURED there.
+
+**2026-10-14, later: NOT THE DEFAULT.** Danik tried it: the frame rate on his Ryzen 5 dips
+from 180 to 90, and he wants 60 a second on the MiSTer -- "a no-go". So the build uses the
+converted routines again wherever `port/src/s2_gen.inc` is present (CMake says which at
+configure time); the interpreter is what a copy of the source WITHOUT that file builds, or
+`-DS2_INTERPRETER=ON` (`port/build_interp` here, for comparisons). The file stays out of git.
+The question of what may be published is open again: with the file left out, the public
+source builds the slow way. Not explained: a game frame measured 0.77 ms in the interpreter
+headless, which is not a halving of 180 frames a second -- where the rest goes was not looked
+for. What would be fast AND publishable: the routines rewritten by hand (as Screamer 1's),
+checked one by one against these two builds; or the interpreter's step on a thread of its
+own; or translating the program to native code when it is loaded.
+
+**The swings in the frame rate were the main loop's, not the routines'** (found the same
+day, when they stayed after going back). The loop ended with "if this frame took under 4 ms
+there is no vsync: wait 8" -- written with 60 Hz screens in mind and timed in whole
+milliseconds. On Danik's 180 Hz screen a frame is 5.6 ms, and any that came back a little
+early was made to miss the next one or two: 180 one moment, 90 the next, with nothing going
+on, in both games. Now: the frame's time from the fine clock (also `dt`), and the wait only
+under 2 ms. `OS_FRAMELOG=1` prints once a second the frames and the port's own work on one
+(without the wait for the screen). On this PC, headless: a Screamer 2 race 0.7 ms a frame
+(1.6 ms in high resolution), Screamer 1 the same; with the interpreter 1.2 ms mean, 2.7 ms
+the longest. So the interpreter was judged on a fault that was not its own -- its cost here
+is half a millisecond a frame. For the MiSTer the estimate stands (not measured).
+
+**Not done.** The start-up check does not ask for STARTL.EXE yet (a race says so when it is
+missing); Windows build not tried with these files; the MiSTer's build compiles everything
+with `-ffast-math`, which this file overrides for itself -- to be looked at when the MiSTer
+is.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

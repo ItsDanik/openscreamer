@@ -26,6 +26,9 @@ public class FixSigs extends GhidraScript {
             String[] w = line.split("\\s+");
             Function f = currentProgram.getFunctionManager().getFunctionAt(toAddr(Long.decode(w[0])));
             if (f == null) { println("SIGS: no function at " + w[0]); continue; }
+            /* `inline`: a few instructions that hand registers on (the library's abs): let the
+               decompiler look through the call */
+            if (w[1].equals("inline")) { f.setInline(true); n++; continue; }
             List<Variable> ps = new ArrayList<>();
             int nreg = Integer.parseInt(w[1]);
             for (int i = 0; i < nreg; i++)
@@ -33,10 +36,17 @@ public class FixSigs extends GhidraScript {
                         new VariableStorage(currentProgram, currentProgram.getRegister(regs[i])), currentProgram));
             int off = 4;
             Parameter ret = null;
+            boolean intResult = false;
             for (int i = 2; i < w.length; i++) {
                 if (w[i].equals("->float")) {         /* it leaves its result in ST0 */
                     ret = new ReturnParameterImpl(Float10DataType.dataType,
                             new VariableStorage(currentProgram, currentProgram.getRegister("ST0")), currentProgram);
+                    continue;
+                }
+                if (w[i].equals("->int")) {           /* a whole number in EAX, and nothing else touched */
+                    ret = new ReturnParameterImpl(IntegerDataType.dataType,
+                            new VariableStorage(currentProgram, currentProgram.getRegister("EAX")), currentProgram);
+                    intResult = true;
                     continue;
                 }
                 DataType dt = w[i].equals("float") ? FloatDataType.dataType : w[i].equals("double") ? DoubleDataType.dataType : IntegerDataType.dataType;
@@ -54,7 +64,7 @@ public class FixSigs extends GhidraScript {
                 n++;
                 continue;
             }
-            if (ret != null) {
+            if (ret != null && !intResult) {
                 /* registers AND the stack AND a float result: the default convention with
                    all four register parameters written out (those not used stay names),
                    so that what follows them falls on the stack and the result in ST0 */
