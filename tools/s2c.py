@@ -45,8 +45,8 @@ if fixfile and os.path.exists(fixfile):
         if line.startswith("@"): cur = int(line[1:].split()[0], 16); fixes.setdefault(cur, [])
         elif line.startswith("s") and cur is not None and len(line) > 2:
             d = line[1]
-            parts = line[2:].split(d)
-            fixes[cur].append((parts[0], parts[1]))
+            parts = re.split(r"(?<!\\)" + re.escape(d), line[2:])
+            fixes[cur].append((parts[0].replace("\\" + d, d), parts[1].replace("\\" + d, d)))
 
 consts = {}
 for l in open(f"{DEC}/CONSTS.txt"):
@@ -114,11 +114,20 @@ def convert(entry, t):
         return f"(*(%s *)MP(0x{a:x}u))" % CT.get(ty, "uint32_t")
     body = re.sub(r"\b(_?)DAT_([0-9a-f]{8})(?:/\*[^*]*\*/)?(\._\d+_\d+_)?", g_val, body)
     body = re.sub(r"\bPTR_\w*?_([0-9a-f]{8})\b", lambda m: f"(*(uint32_t *)MP(0x{int(m.group(1),16):x}u))", body)
+    # variables the engine keeps in its CODE object (the ground query's results)
+    body = re.sub(r"\b_FUN_(0004[0-9a-f]{4})\b(?!\()", lambda m: f"(*(int32_t *)MP(0x{int(m.group(1),16):x}u))", body)
+    # a float compared with a hexadecimal number is compared as its BITS (cmp dword, imm)
+    body = re.sub(r"\(int\)([A-Za-z_]\w*) (<=|>=|==|!=|<|>) (0x[0-9a-f]{8})\b", r"BITS(\1) \2 \3", body)
+    body = re.sub(r"\b(0x[0-9a-f]{8}) (<=|>=|==|!=|<|>) \(int\)([A-Za-z_]\w*)", r"\1 \2 BITS(\3)", body)
     # a cast to a pointer followed by a bracket is an address being read
     body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)\(",
                   r"(\1 *)MP(", body)
     body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)(?!MP\()([A-Za-z_]\w*)",
                   r"(\1 *)MP(\2)", body)
+    # a local that is a C pointer, handed on as an address: back to the number
+    for name in set(re.findall(r"^\s+\w+ \*(\w+);", body, re.M)):
+        body = re.sub(r"\(int\)\((%s\b[^()]*)\)" % name, r"PM(\1)", body)
+        body = re.sub(r"\(int\)%s\b(?!\[)" % name, "PM(%s)" % name, body)
     body = re.sub(r"^(\w[\w ]*?\**)\s*\n?(FUN_[0-9a-f]{8}\()", r"static \1 \2", body.lstrip("\n"), count=1, flags=re.M)
     for pat, rep in fixes.get(entry, []):
         body, n = re.subn(pat, rep, body)

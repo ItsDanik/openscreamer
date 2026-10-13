@@ -1,0 +1,13 @@
+# Screamer 2: functions with arguments on the stack (see FixSigs.java)
+0x10003 1 float float
+0x1016b 1 float int
+0x111d6 1 float int
+0x11212 1 float int
+0x126ad 1 float
+0x16878 1 float
+0x19810 1 float
+# results left in ST0 (the decompiler takes them for integers)
+0x14dc0 0 float float ->float
+0x11253 0 double ->float
+0x19c61 0 float float float float ->float
+0x10d9e 0 float float ->float

@@ -386,6 +386,35 @@ name things — not a rewrite from understanding, which is how feel gets lost.
 - The wheels are 0x70-byte records at car `+0x574`; `+0x08` on the ground, `+0x44` height,
   `+0x5C` road kind, `+0x64..+0x6C` normal.
 
+## S2-5h. The converted physics compiles — 2026-10-13
+
+`python3 tools/s2c.py port/src/s2_gen.c 0x1b36f 0x16824 0x1b92b --hook 0x28ce6 0x29571
+0x204af 0x2a371 --fix tools/s2c_fix.txt` → 15 routines, 2,459 lines, no warning at `-Wall
+-Wextra -O2`. What it took, beyond S2-5g:
+- **`tools/FixSigs.java tools/s2_sigs.txt`** gives the functions with STACK arguments their
+  real signatures in the Ghidra project, so the callers show the arguments (they were
+  dropped): `0x10003 0x1016b 0x111d6 0x11212 0x126ad 0x16878 0x19810` (EAX, then a float —
+  and an int — on the stack), and the all-stack ones that leave a float in ST0, declared
+  `__cdecl` returning `double`: `0x14dc0(a, b)` = a − b brought into −π…π, `0x11253(double)`
+  = square root or 0 below 0, `0x19c61(a, b, c, d)` = 1 − d·a·b·step, not below 0,
+  `0x10d9e(x, y)` = an angle from a vector (through `0x4ea98`, arc cosine).
+  (A float10 return with custom storage in ST0 is not taken up by the callers; a 10-byte
+  `__cdecl` return grows a hidden pointer argument. `double` works.)
+- the converter: a float compared with a hexadecimal constant is compared as its BITS
+  (`cmp dword, imm`: `BITS(x)`); the engine's variables in the code object (`_FUN_0004cb98`…)
+  are memory at `0x4c000` (a page of its own); a C-pointer local handed on as an address goes
+  back to a number (`PM()`).
+- `tools/s2c_fix.txt`: `0x19cac` hands a local float to `0x111d6` by address (through a spare
+  word of the block); **`0x1bef1`** (the wheels' springs) reaches the wheel record through a
+  float pointer, which hides its whole-number fields — they are, from the instructions, wheel
+  `+0x04 +0x28 +0x2C +0x30 +0x34 +0x44 +0x48 +0x5C +0x60` (floats: `+0x00 +0x14 +0x18
+  +0x20`).
+- hooked for now: the ground query `0x28ce6` (the port's own), the walls `0x29571`, the
+  wheels' smoke `0x204af`, `0x2a371`; and the sound calls `0xaebf0 0xaee18 0xaee98`,
+  `0xae6e3` (a copy of bytes: to, from, count), `0xaea54`, `0xafe84`.
+Next: the port's side (s2_hooks.c) — the car record's first values (`0x2f519`, `0x14e20`,
+`CARS.DTR`, the road kinds), the keys, the frame, drawing the car from its record.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).
