@@ -323,6 +323,40 @@ Pictures: `build/png/s2_conditions.png`.
   reflections (`ENVP*` / `ENVM*`), shadows and wheels are not looked at yet.
   Pictures: `build/png/s2_cars.png`.
 
+## S2-5f. The decompiled text, and where the car's physics is — 2026-10-13
+
+**Tools.** `tools/patch_fpu2.py` inlines Watcom's FPU helpers (here they work on ST0 itself:
+`0x4e99a` cos, `0x4e9a4` sin, `0x4e9f1` tan, `0x4ea60` sqrt, `0x4ea12` = to a whole number
+with the control word set to TRUNCATE — Ghidra's `ROUND()` is a cast, as in Screamer 1);
+the patched image is its own project, `build/ghidra2f` (seeded BEFORE the first analysis:
+1,540 functions). `tools/DecompRange.java <dir> <lo> <hi>` writes every function of a range
+and `INDEX.txt` (entry, size, callers, callees): `build/decomp2/` holds all 499 of
+`0x10000`–`0x52000` (200 KB of its 270 KB; the gaps are mostly `0x39000`–`0x44000`, menus).
+`tools/s2consts.py` writes each FPU constant's value after its name in that text (float or
+double by the instruction that reads it; 699 constants). `tools/s2dec.sh <addr>…` does one
+function and the constants. `FUN_0004eaed` is sprintf (its arguments are on the stack:
+Ghidra drops them — read the pushes with objdump).
+
+**The cars** are 0xCC0-byte records at `0x119300` (count `0x130c48`); word 0 = its number,
+`+0x5C` (word 0x17) the 0x58-byte figures from `CARS.DTR`.
+
+**A race frame, `0x2baa4`** (`0x2bd7f` and `0x2c132` are its twins for other modes; step
+`0x133350`):
+1. every car: `0x1b36f` — grip from the four wheels' road kinds (table `0x11cdf0`, 0x24 a
+   kind: the `ROAD KINDS` of `MAPnDAT.DTR`), engine / skid sounds, then `0x1c7f8` (4.6 KB) and
+   four calls of `0x19cac` (5.8 KB, one a wheel), `0x1d9fc`;
+2. every car: `0x16824` → `0x28f96`, `0x29571` (3.6 KB);
+3. every car: `0x1b92b` → `0x19810`, `0x1bef1`, `0x1c4fb`, `0x1d9fc`, `0x1e529` (3.3 KB);
+4. `0x245a3` (18 KB; with `0x2348b`): returns how much of the step could be done before
+   something touched — below 2 the step is shortened and the cars flagged `+0x4C & 8` are
+   done again (a real collision solver, not Screamer 1's two circles);
+5. `0x22d35` → `0x20a18` (9 KB); then every car `0x1684e`, `0x16878` (3.2 KB), and
+   `0x167e2` → `0x1f3ce`, `0x1f756`, `0x174ca`, `0x1756f`, `0x19409` → `0x153c6` (5 KB),
+   `0x17726` (7.4 KB: uses the opponents' spline cursor `0x2d59c` — the drivers).
+About 5,000 lines of decompiled text for the car alone. The plan for it: translate routine
+by routine into the port keeping the record's layout (word numbers as in the game), then
+name things — not a rewrite from understanding, which is how feel gets lost.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).
