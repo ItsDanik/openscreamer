@@ -13,3 +13,5 @@
 0x10d9e 0 float float ->float
 # (found with the project rebuilt, analysis before seeds)
 0x108f5 1 float ->float
+# the solver of touching cars: how much of the step was done before two touched, in ST0
+0x245a3 0 ->float

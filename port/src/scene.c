@@ -61,6 +61,7 @@ static int read_mmp(scene *sc, const char *path)
                     memcpy(&d->angle, b + o, 4);
                     d->x = (float)I32(o + 4);
                     d->y = (float)I32(o + 8);
+                    d->cell = y * 256 + x;
                 }
                 for (int k = 0; k < c3 && c3 < 256 && sc->nwall < SCENE_MAX_WALL; k++) {
                     int32_t o = b3 + 28 * k;
@@ -70,6 +71,7 @@ static int read_mmp(scene *sc, const char *path)
                     w->x  = (float)I32(o + 4);   w->y  = (float)I32(o + 8);
                     w->x1 = (float)I32(o + 12);  w->y1 = (float)I32(o + 16);
                     w->x2 = (float)I32(o + 20);  w->y2 = (float)I32(o + 24);
+                    w->cell = y * 256 + x;
                 }
             }
 

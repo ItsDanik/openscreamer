@@ -61,6 +61,11 @@ typedef uint8_t  bool;
 #define fsin(x)  sin((double)(x))
 #define fsqrt(x) sqrt((double)(x))
 #define SQRT(x)  sqrt((double)(x))
+/* the program's arc cosine (0x4ea98) is pi/2 - atan(x / sqrt(1 - x x)); when 1 - x x is
+   negative its square root reports a domain error and the arc tangent is skipped: taken as 0
+   here.  (With plain acos a cosine of 1.0000001 gave a NaN heading, and the loop that brings
+   an angle under two pi, 0x2d59c, never ended: track 4, frame 548.) */
+static inline double s2_acos(double x) { return x * x <= 1.0 ? acos(x) : 0.0; }
 #define fpatan(y, x) atan2((double)(y), (double)(x))
 /* the game's float-to-whole-number helper (0x4ea12) cuts the fraction off */
 #define ROUND(x) trunc((double)(x))

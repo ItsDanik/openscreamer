@@ -6,4 +6,11 @@ s|  fcos\(\(float10\)\*\(float \*\)MP\(param_1 \+ 0x4d4\)\);\n  fVar2 = \(float1
 @1f756   0x1fa7b-0x1fb60: r = car[0xc78] / car[0x60]; G = table 0x112e24[gear]; (1 - (G*0.22 + r*c - 1)^2) * G^2 * 0.8, c = 1.6, or 1.5 in gear 0
 s|  if \(\*\(int \*\)MP\(param_1 \+ 0xc7c\) == 0\) \{\s+FUN_000afed2\(\);[\s\S]*?\n  \}\n  else \{[\s\S]*?\n  \}|  { double r_ = (double)(*(float *)MP(param_1 + 0xc78) / *(float *)MP(param_1 + 0x60)), G_ = (double)*(float *)MP(0x112e24u + *(int *)MP(param_1 + 0xc7c) * 4), c_ = *(int *)MP(param_1 + 0xc7c) == 0 ? 1.5 : 1.6; fVar3 = (1.0 - pow(G_ * 0.22 + r_ * c_ + -1.0, 2.0)) * pow(G_, 2.0) * 0.8; }|
 @2d59c   0x2d720: fld [cursor+0x1c]; call arc cosine
-s|fVar1 = \(float10\)FUN_0004ea98\(\);|fVar1 = acos((double)*(float *)MP(param_2 + 0x1c));|
+s|fVar1 = \(float10\)FUN_0004ea98\(\);|fVar1 = s2_acos((double)*(float *)MP(param_2 + 0x1c));|
+@2da06   a double kept in two halves (0x3f847ae1 47ae147b = 0.01): how far along SKILLS's row, 0.01 .. 5.99
+s|local_44 = 0x47ae147b;\s+uStack_40 = 0x3f847ae1;|local_3c = 0.01;|
+s|local_44 = \(undefined4\)local_3c;\s+uStack_40 = local_3c\._4_4_;||
+s|\(double\)CONCAT44\(uStack_40,local_44\)|local_3c|
+s|#define local_3c \(\*\(undefined8 \*\)|#define local_3c (*(double *)|
+@14acf   "the distance is not nought": a double's two halves tested (fabs, compare with 0)
+s~\(\(\(\(ulonglong\)dVar3 & 0x7fffffff00000000\) != 0\) [|][|]\s+\(local_4c = SUB84\(dVar3,0\), local_4c != 0\)\)~(dVar3 != 0.0)~

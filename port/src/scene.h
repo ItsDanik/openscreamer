@@ -95,6 +95,14 @@ typedef struct {
     float body_pitch, body_roll, body_drop;   /* the body on its suspension */
     float env_scroll;       /* how far the reflections have slid, in texels */
     int   env;              /* which reflection picture: 0, 0x8000 or 0xff00 */
+    /* SCREAMER 2: each wheel by itself -- how far it has turned and how far its
+       suspension is pushed in (wheel 0 front +X, 1 rear +X, 2 front -X, 3 rear -X) */
+    int   per_wheel;
+    float wheel_spin[4], wheel_in[4];
+    /* ... and what each block of the model is, by its number (the game knows them by name,
+       not by where they are): 0 nothing, 1 the body, 0x10 + wheel = the part of a wheel that
+       turns with it, 0x20 + wheel = the part that only steers */
+    unsigned char role[16];
 } car_pose;
 
 typedef struct {
@@ -134,8 +142,10 @@ typedef struct {
  *       closed loops, one each side of the road.  FUN_000120c0(1) returns the
  *       nearest one to a corner of the car that has left the track.
  */
-typedef struct { float angle, x, y, x1, y1, x2, y2; } scene_wall;
-typedef struct { float angle, x, y; } scene_dir;
+/* (`cell` = row * 256 + column of the grid cell whose list it is in: Screamer 2 looks
+   for the nearest only in the nine cells round a point, 0x2a371) */
+typedef struct { float angle, x, y, x1, y1, x2, y2; int cell; } scene_wall;
+typedef struct { float angle, x, y; int cell; } scene_dir;
 #define SCENE_MAX_WALL 8192
 
 typedef struct {

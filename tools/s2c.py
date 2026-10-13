@@ -63,9 +63,16 @@ CT = {"int": "int32_t", "uint": "uint32_t", "undefined4": "uint32_t", "float": "
       "short": "int16_t", "ushort": "uint16_t", "double": "double", "undefined8": "uint64_t",
       "bool": "uint8_t", "pointer": "uint32_t", "string": "char"}
 
+# what the decompiler prints out of order is put back (tools/s2order.py)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import s2order
+reordered = {}
 def read(entry):
     p = f"{DEC}/f_{entry:05x}.c"
-    return open(p).read() if os.path.exists(p) else None
+    if not os.path.exists(p): return None
+    t, moved, stuck = s2order.reorder(open(p).read())
+    if moved or stuck: reordered[entry] = (len(moved), stuck)
+    return t
 
 # ---- which routines
 todo, funcs, externs = list(roots), {}, set()
@@ -135,6 +142,11 @@ def convert(entry, t):
     # a float compared with a hexadecimal number is compared as its BITS (cmp dword, imm)
     body = re.sub(r"\(int\)([A-Za-z_]\w*) (<=|>=|==|!=|<|>) (0x[0-9a-f]{8})\b", r"BITS(\1) \2 \3", body)
     body = re.sub(r"\b(0x[0-9a-f]{8}) (<=|>=|==|!=|<|>) \(int\)([A-Za-z_]\w*)", r"\1 \2 BITS(\3)", body)
+    # ... an element of an array of them too (0x1c4fb: `(int)local_4c[i] < 0x3f800000`, a wheel's
+    # share of the weight under 1.0 -- taken as a whole number it was always true, and the load
+    # went the wrong way on the wheels that carry more)
+    body = re.sub(r"\(int\)([A-Za-z_]\w*\[[^\]\n]+\]) (<=|>=|==|!=|<|>) (0x[0-9a-f]{8})\b", r"BITS(\1) \2 \3", body)
+    body = re.sub(r"\b(0x[0-9a-f]{8}) (<=|>=|==|!=|<|>) \(int\)([A-Za-z_]\w*\[[^\]\n]+\])", r"\1 \2 BITS(\3)", body)
     # *(T **)(E): the address kept at E, itself to be read
     def close(text, i):                      # index of the bracket matching the one at i
         d = 0
@@ -204,6 +216,10 @@ def convert(entry, t):
     for pat, rep in fixes.get(entry, []):
         body, n = re.subn(pat, rep, body)
         if not n: print(f"fix did not apply @{entry:05x}: {pat}", file=sys.stderr)
+    # ... and the same of one of the program's own floats (the race's clock `< 0x40c00000` is `< 6.0`;
+    # read as a number cut to an int it was always true: the opponents' handicap stayed 0)
+    body = re.sub(r"\(int\)\(\*\(float \*\)(MP\(0x[0-9a-f]+u\))\) (<=|>=|==|!=|<|>) (0x[0-9a-f]{8})\b", r"(*(int32_t *)\1) \2 \3", body)
+    body = re.sub(r"\b(0x[0-9a-f]{8}) (<=|>=|==|!=|<|>) \(int\)\(\*\(float \*\)(MP\(0x[0-9a-f]+u\))\)", r"\1 \2 (*(int32_t *)\3)", body)
     return body
 
 # how a global is accessed, for the `_DAT_` ones the decompiler leaves untyped
@@ -305,3 +321,6 @@ print(f"{len(texts)} routines, {sum(t.count(chr(10)) for t in texts.values())} l
 print("hooks wanted:", " ".join(f"{e:05x}" for e in sorted(externs)))
 print("to look at (stack / register artefacts):", " ".join(f"{e:05x}" for e in sorted(review)))
 print("globals:", len(gl_all))
+print("statements put back in order:", " ".join(f"{e:05x}:{n}" for e, (n, st) in sorted(reordered.items())))
+for e, (n, st) in sorted(reordered.items()):
+    for x in st: print(f"   NOT put back in {e:05x}: {x}")

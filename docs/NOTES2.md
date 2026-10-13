@@ -493,11 +493,422 @@ chase camera.
 - The car's place is whole numbers, set by cutting the fraction off (`0x1f09a`: the helper,
   then `fistp`) — the game's own; with no drive it alone moved the car a unit a frame.
 
-**Known / next:** an opponent stops after half a lap in the four-car run (unlooked at);
-car pitch / roll signs unchecked; wheels, shadows, suspension not drawn from the records;
-the game's cameras, HUD, lap counting (`0x22d35` runs), sound, start lights; `0x204af`
+**Known / next:** (the opponent that stopped after half a lap was the 50-a-second step,
+S2-5l: at 25 all three keep going for two minutes on every track, means 96-130 km/h);
+smoke not drawn (wheels and springs: S2-5o; the shadow: S2-5p; the race screen: S2-5q); the
+trackside cameras, the race's end, sound; `0x204af`
 (smoke) hooked away; the ground hook uses the port's stored-normal plane where the engine
 builds the plane from the triangle under the point (`0x4c24c`).
+
+## S2-5k. The car's tilt, the game's views — 2026-10-13
+
+Danik: "cars might be a bit small (camera?)", and "on slopes they do wheelies".
+
+- **Tilt.** The car's angles are `+0x4e4` nose up / down, `+0x4e8` heading, `+0x4ec` lean;
+  `0x16878` writes them as they are (× 1024 / π, & 0x7ff) into the object record `+0x14 +0x18
+  +0x1c`. Measured on track 1's climb (`OS_S2PHYS=900 OS_S2WHEELS=1`): `+0x4e4` is **+ with
+  the nose up** (0.086 where the front wheels' ground is 72 above the rear's over 864), and
+  `+0x4ec` is + with the +X side up (wheel 0 = front, +211, −432). The port's `tilt()` is +
+  with the TAIL up, so `o->pitch = −angle[0]`; the lean goes over as it is. It had been drawn
+  the wrong way: nose into the road uphill, front wheels in the air downhill. Checked side-on
+  (`OS_S2ORBIT=<degrees>,<distance>,<height>` with `OS_S2RUN`) and from both ends on a bank.
+- **Size.** The model is the physics' size: the wheel blocks are at ±211, −432 / +400, the
+  car record's wheels at ±211, ∓432. The port's stand-in camera was 2300 behind; the game's
+  is 1300.
+- **The views** (`0x12dff(camera record, 1)` before each picture, `0x2b873`; the record is
+  0xaec bytes at `[0x1192f4]`: `+0x48` place, `+0x54 +0x58 +0x5c` down / heading / lean,
+  `+0xadc` the car followed, `+0xae0` flags, `+0xae4` the view, `+0x2c` the view last shown
+  — a change snaps, otherwise the angles ease by the tables at `0x1240c0`; `+0x60` up to 80
+  trackside cameras of 0x20 bytes from `CAMERASn.MCM`, count `+0xa60`):
+  - **2** `0x13bab` from the car: its place, + body height (`car +0x218`) + 400; the car's
+    angles (lean + half of `+0xc20`). **6** `0x13cbd` the same, 300 above.
+  - **4** `0x14200` at the car's `POSIZIONE TELECAMERA` (`CARS.DTR`, car `+0xac +0xb0`: −10,
+    550 for most), turning with the car, nose-up and lean at half, looking 0.3 down.
+  - **3** `0x13f38` the far one: 1300 behind (eased from the last), looking 0.274 down, level;
+    its heading eases towards the car's, pulled 0.3 × speed / top speed towards the way the
+    car is really going (`+0x508`); the easing gets quicker with speed (95 − 10 × speed / top).
+  - **5** `0x13e1a` backwards (the mirror, 35 rows). **1** `0x13223` trackside: the nearest
+    camera of the `.MCM` list (`0x14acf`), five kinds (`0x13514`…`0x13a8e`). Not carried over.
+  - Keys (`0x132b4`, the order of the bits): 2, 6, 4, 3 → the port's F1–F4 and C.
+  - For views 2, 6, 5 the car (`+0xbf0`) and `+0xbf8` are taken off the draw list for the
+    picture (`0x2b6b4`) → the port's `g_hide`.
+  - `0x12d31` (set the view) also sets the fade distances of S2-5d.
+- In the port: `0x12dff` and `0x12d31` are in `tools/s2_set.txt` (`0x132b4`, `0x13223`
+  hooked); `s2_view()`, `s2_camera()` (`s2_hooks.c`), `s2_camera_show()` (`main.c`: the
+  camera's lean is the other way round from the port's, checked on a bank). A race starts in
+  view 3 (the game takes it from its settings, `0x130d68`). `OS_VIEW=0..3` for shots.
+- Not read: the lens. `0x4f6c4(320, rows, rows × 0.65)` is the picture's size and eye line,
+  as Screamer's; the port keeps Screamer's 128.
+
+## S2-5l. The step, and what the game cuts off — 2026-10-13
+
+Danik: "in map 3, when the race starts the car slightly drifts to the right (I only press
+accelerate)". Not the road: the game's own arithmetic, made worse by the port's 50 frames a
+second.
+
+- **The step** `0x133350` is the time the last pictures took, eased (`0x4ae9a`: (9 × old +
+  1.1 × measured) / 10, at most doubled), kept between **0.02 and 0.2 s**; the clock counts
+  1/100 s. `0x2baa4` is the race; `0x2bd7f` plays a replay back (recorded steps, and it draws
+  between two frames: `0x16878`'s second argument), `0x2c132` is the mode of `0x130d10 & 4`.
+- **A frame, for one car:** the wheels (`0x19cac`) move the four corners (`+0x514`, floats)
+  from last frame's (`+0x770`) by their speeds; `0x1c7f8` sets the place to the corners'
+  mean with the fraction **cut off** (`0x4ea12` sets the FPU to chop: its control word's high
+  byte is 0x1f; then `fistp`); `0x1d9fc` rebuilds the corners from that whole-number place;
+  `0x1e529` measures the corners' speeds as (corner − last frame's) / step, and the car's
+  speed and direction of travel (`+0x500`, `+0x508`) from place − last place.
+- **A wheel keeps** `1 − grip × step` of its sideways speed (`0x19c61`; grip = the road kind's
+  × the car's `+0x74` × the wheel's, less under power at the driven end) — about 6 % lost a
+  frame at 0.02 with the accelerator down. Slides are meant to last.
+- **Together:** what is cut off is up to one unit a frame per axis, always towards the map's
+  origin (0, 0) — a step of +0.3 towards it becomes a whole unit, a step of −0.9 away from it
+  nothing — and it comes back as speed. Sideways it settles at about (cut off) / (grip ×
+  step²): measured on level ground of kind 36 (`OS_S2FLAT=36 OS_S2AT=x,y,heading`,
+  `OS_S2STEP`), units a second after 3 s:
+
+  | step | at (50000, 50000) facing 0.785 | facing 0.3 | at (50000, −50000) facing 0.785 |
+  |---|---|---|---|
+  | 0.02 | 528 sideways | 436 | does not leave the grid (0 km/h) |
+  | 0.033 | 182 | 87 | drives |
+  | 0.04 | 124 | 233 | drives |
+  | 0.05 | 99 | 144 | drives |
+
+  At (−50000, 50000) facing 0.785 (both axes towards the origin) there is no slip at any
+  step and the car gets away fastest. Rounding to the nearest instead (an experiment only)
+  turned track 3's slip round. Track 6's grid at 0.02: the car crept sideways at 5 km/h.
+- **In the port** (`main.c` `s2_step()`): the race frame is run **25 times a second** and the
+  cars and the camera are drawn between the last two frames (`s2_race_step`, `s2_race_show(t)`,
+  `s2_camera_show(cam, t)`). `OS_S2HZ=5..50` to try another; `OS_S2RUN` / `OS_S2PHYS` count
+  these frames now. The port's own choice — the game has no one step — and **Danik to judge**
+  against the original: on track 3's start the port still slips about 270 units a second
+  (4 degrees at 45 km/h) at 25; if the original does not, it runs slower than that or
+  something is still not carried over right.
+
+## S2-5m. Cars that touch: the solver's answer, and statements out of order — 2026-10-13
+
+Danik: after the start, as the opponents line up, the second and third stop dead for a while
+and then go on; rear-ending one sometimes locks both cars in place. Two faults of the
+conversion, neither the game's:
+
+1. **`0x245a3` leaves its answer in ST0** (`fld [ebp-0xc]` before the epilogue): how much of
+   the step was done before two cars touched, 2 = none did. The decompiler had it returning
+   its (unused) register arguments, so the frame (`0x2baa4`) never saw a touch: the solver
+   had already flagged the two cars (`car +0x4c | 8`), pulled their places back to the moment
+   of contact and set their speeds, and the frame's second pass — the flagged cars done again
+   over the REST of the step — never ran. `tools/s2_sigs.txt`: `0x245a3 0 ->float`. A scan of
+   all 65 converted routines for an `fld` before the epilogue with no float result declared
+   finds no other.
+2. **The decompiler prints some statements out of order** (`tools/s2order.py`, its header has
+   the instructions). The compiler inlines vector arithmetic as copies between stack
+   temporaries, the last of them read through a pointer kept in another slot; Ghidra shows
+   that read as the variable but prints the store it depends on LATER in the block (once in
+   the header of a following `for`). In `0x245a3` the cars' outlines — the wheel rectangle
+   (832 × 422) scaled 1.4 about its centre — were scaled about a centre whose height and y
+   were stale: cars "touched" 1900 units apart, which is the line-up after the start. The
+   rule: a local assigned ONCE in the routine and read earlier in the same block gets its
+   assignment moved up to before the first reader, when all it uses is set by then; what
+   cannot be moved is reported. It moves 16 statements in three routines — `0x245a3` (10),
+   `0x20a18` (4), `0x22d35` (2), all of them the two last coordinates of a `× 0.25` centre —
+   and none in the car's own physics. `s2c.py` applies it to every routine it reads and
+   prints the count.
+3. On the way: **the arc cosine `0x4ea98`** is π/2 − atan(x / √(1 − x²)), and with 1 − x²
+   negative its square root reports a domain error and the arc tangent is skipped. Plain
+   `acos` gave a NaN heading for a cosine of 1.0000001, and `0x2d59c`'s "bring the angle
+   under 2π" loop never ended (track 4, frame 548 with the grid hold). `s2_acos` in
+   `s2_mem.h`: 0 out of range.
+
+After: a parked car is hit at 1190 units nose to tail (1.4 × 832 = 1165), pushed, and let
+go; 80 set-ups of a parked car in the opponents' way and 120 of the player driving into them
+(`OS_S2AT`, `OS_S2LOG=1`: every frame, every car's place and speed, `touch` = `0x11cdb4`)
+leave no car standing and no two locked; two minutes on each track with the grid hold
+(`OS_S2HOLD=1`) end with every opponent running, 0–41 frames with a touch.
+Opponents do touch each other and the rails now and then — whether as often as in the
+original is Danik's to say.
+
+## S2-5n. The level: the opponents' handicap — 2026-10-13
+
+Danik could not keep up with the opponents. They had been running with no handicap at all:
+`0x2da06` was hooked away, and once carried over a comparison in it was converted wrong.
+
+- **`0x130d4c`** = the level: **0 pro, 1 normal, 2 rookie** — the row of `SKILLS` and of
+  `DAMAGES` (`MISC.DTR`, loaded to `0x11f0f4`, 7 floats a row, and `0x11cce0`).
+- **`0x2da06`** (every frame, from `0x2baa4`): (a) each car's place in the race, `+0xc30`, by
+  its distance covered `+0x4b8` (ties broken by car number; cars flagged `+0x4c & 2` are
+  out of it); (b) while the whole seconds of the clock `0x13335c` divide by 8 (and the mode
+  `0x130d10 & 0x70` is 0): the mean of the HUMAN cars' `+0x4bc` (a car is human when `+0xb4`,
+  its controls record, is set); each other car gets its handicap **`+0x48`** = 0 before the
+  sixth second, then the level's row read at `3 + 3 × (its +0x4bc − that mean) / 200000`,
+  kept within 0.01 … 5.99 and taken between two entries — the row's seven columns are "+3 …
+  0 … −3", behind → level → ahead (rookie 1.8 2.0 2.2 2.4 3.1 3.6 4.5, pro 0.4 … 2.7). With
+  no human car: the row's fourth entry. The driver `0x17726` slows by it (`+0x48 × 0.3 ×
+  …`, and brakes when `speed × +0x48 × 1.5 / …` is over its mark).
+- The conversion: its `0.01 … 5.99` is a double the decompiler keeps in two halves
+  (`tools/s2c_fix.txt` `@2da06`). And **`(int)DAT_0013335c < 0x40c00000`** — a float's BITS
+  compared, "clock < 6.0" — was written as the float cut to a whole number, always true, so
+  the handicap stayed 0: `s2c.py` had the rule for locals only, now for the program's own
+  floats too (four places: this, two in the driver `0x17726`, one in `0x4b016`).
+- In the port: `s2_level` (`s2_hooks.c`), **rookie unless `OS_DIFF=0|1|2`** — the port's
+  choice until there is a menu. Opponents' mean over two minutes with the player parked,
+  track 1: 115 km/h with no handicap, 88 in rookie, 97 normal, about 102 pro; 82–93 on the
+  seven tracks in rookie.
+
+## S2-5o. The wheels and the body on its springs — 2026-10-13
+
+What `0x16878` hands the engine for a car's blocks each frame (block records of 0x20 bytes:
+`+0x08 +0x0c +0x10` three angles in 2048ths, `+0x14 +0x18 +0x1c` its place), and what the
+port draws from it (`s2_car_state`, `car_pose.per_wheel`, `s2_race_show`):
+
+- **The four body blocks** (`car +0x1f8 +0x200 +0x208 +0xbf4`): angle `+0x08` = `car +0xc18`,
+  `+0x10` = `car +0xc20` — the body's own nose-up and lean on its springs — and height =
+  the block's own (`car +0x214…+0x220`) + `car +0x4f4` (the lift; 16 at rest). → the port's
+  `body_pitch`, `body_roll`, `body_drop = −lift`, same senses as the car's angles.
+  They are SMALL: `0x1c4fb` makes them 2 × atan(difference of the wheels' spring heights /
+  wheelbase or track), eased by table entry `car +0x30 × 68 + 30`; a spring's travel is 30.
+- **A wheel** (record `car +0x574 + 0x70 n`; two blocks, `+0x78` and `+0x80` — the port goes
+  by the block flags as in Screamer: 0x800 = the hub that turns): place = `+0x38`, `+0x3c −
+  +0x48`, `+0x40` (so `+0x48` = how far the spring is pushed in; −16 at rest); the turning
+  `+0x10` (less `speed / +0x5c × π` a frame; the driven pair by the engine's speed when
+  slipping) on the first block; the steering `car +0x13c` (eased towards π / (4 × `+0x6c`) ×
+  the input: 0.785 at full lock) on wheels 0 and 2. Wheel 0 = front +X, 1 = rear +X, 2 =
+  front −X, 3 = rear −X.
+- Signs: the game's steering is + towards +X, like its heading (the left key raises both);
+  the port's wheel turns its front edge towards −X, so `steer = −`. Checked from the front
+  quarter with each key (`build/png/s2_wheels.png`).
+- Not done: the shadow (`car +0xbf8`, an object of its own, `0x4b843`), smoke, the brake
+  lights and other flag bits of the object record `+0x20` (0x400 / 0x8000 wheels turning
+  fast, 0x200 braking).
+
+## S2-5p. The shadow; material routine 208 — 2026-10-13
+
+- **The shadow** is `ASHADOW.3DX` of the track's picture container (one quad 792 × 1534, the
+  car's size, seen from above), its material in the library **`MISC.MLB`** of the same
+  container (`0x2f519`: `0x4feb4("misc")` then `0x4b843("ashadow")` → `car +0xbf8`, an object
+  of its own). Each picture `0x1f4a8` puts it at the car's place moved 30 units away from the
+  camera, at the ground's height under the car (`car +0x4f8`) − 2, with the car's heading
+  (`0x16878`) and the ground's slope along and across the car (`car +0xc0c`, `+0xc14`). The
+  port: on the ground + 4 (its depth test's way, as in Screamer), no 30-unit move.
+- **Routine 208** (new in Screamer 2: the shadow and the two smokes of `MISC.MLB`). The
+  table of routines is at `0x75ef0` (`call [type + 0x75ef0]` at `0x7770a`, `[type + 0x75ef4]`
+  at `0x7784a`): 208 is set up as a textured face (`0xc90a8`, like 16 and 64) and its row
+  ends in the pair 224's does (`0xc73fc`, `0xc7310`) — texels are STRENGTHS looked up
+  through the SMG table, which is what the port's 224 does; the port reads 208 as 224.
+  (Not read to the end: where the second pair of a row is called from.)
+- **`MAPn.SMG` is 48 rows** here, two ramps: rows 0–31 and rows 32–47, each from "as it is"
+  to darkest. The shadow's texels are 32 (edge) … 41 (middle); the smokes' (materials 112,
+  144, six frames each) 0…31 and 48….
+- The shadow is faint and lies almost wholly under the car (869 pixels of a 640 × 400 side
+  view differ, `OS_NOSHADOWS`): `build/png/s2_shadow.png`. Whether the original's is stronger
+  is Danik's to say.
+
+## S2-5q. The race screen — 2026-10-13
+
+`0x45882` (after the pictures, `0x2b873`) draws it; the port's is written by hand from it
+(`main.c` `s2_hud_draw`), reading what it shows out of the game's memory (`s2_hud`).
+
+- **Files:** `GAME1/GAMEL.FNT` / `GAMEH.FNT`, `GAMEL.SPR` / `GAMEH.SPR` — Screamer's formats
+  but for the font file's head: the first byte is the number of fonts itself (9; Screamer's
+  is one less), and each font has 32 bytes — rows, first letter, letters, a fourth number
+  (19 for 18 rows; unread) and the picture's name (`font2l.pcx fnum2l fgearl font4l fnum3l
+  fcdl fnum1l font3l font3_2l`). 115 sprites (`OS_S2SPRITES=n` with `OS_S2RUN` draws them
+  from n on, numbered): 0–3 the start lamps' panel, 4–9 the cars' marks, 10–25 the CD
+  player, 26 the dial, 27–32 the bend arrows, 37 the bar, 60–65 small cars, 66–69 "3 2 1
+  GO", 70–109 gear lamps, 114 "1st".
+- **Text** `0x50f45(0x12420c, x, y, text, font, colour, SPACE)`: the seventh argument is what
+  is left between two letters (−1 for the small font 3, 1 or 2 for figures); `0x51020` the
+  same text's width; `0x3327c(text, y, font, colour, space)` centred; `0x50c0a(…, x, y, n,
+  0)` a sprite, `0x333c1(n, y)` one in the middle. `hud_text` got the space (`g_hud_space`).
+- **What is where** (320 × 200), one player:
+  - `LAP` (8, 2) font 3 colour 3; `"%d%c"` = min(`car +0x4ac` + 1, laps `0x130d48`) and
+    ':' (the figures' font draws it as a stroke) at (8, 11) font 1; the laps at (its width +
+    5, 20) font 4.
+  - with more than one car: `POSITION` right-aligned to 312 at y 2, `car +0xc30` at (286,
+    11) font 1, sprite 0x72 at (270, 4) for the leader; the bar `0x456fb`: sprite 0x25 at
+    (108, 2), every other car's mark (sprite 4 + its team) at 160 − 50 × d − 4, d = (the
+    player's `+0x4bc` − its) / 200000 within ±1, the player's (sprite 9) at 156.
+  - `THIS LAP` (8, 56) and `car +0xc3c` (8, 64); `TOTAL` (8, 72), `car +0xc38` (8, 80);
+    `BEST LAP` (270, 56), the text at `0x132fa4` (270, 64); `BEST TOTAL` (270, 72),
+    `0x132fb0` (270, 80) — the bests are `0x130d18`, `0x130d14`, 3599.999 = none, written by
+    `0x201ee` through the time routine `0x37e06` ("%02d:%02d:%02d", each cut off; hooked: its
+    sprintf's arguments are on the stack). Times begin with the letter 1 = "fixed width".
+  - the checkpoint's message `0x132f98` centred at y 35 while `0x133078` > 0 (font 8 colour 3
+    if its second letter is '+', else font 7 colour 1); `BEST LAP!` at y 15 blinking while
+    `0x13307c` > 0; `WRONG WAY` at y 15 blinking while `car +0x1f0` is −1.
+  - the start: sprite 0x42 + whole seconds of the clock, in the middle at y 60, for the
+    first four seconds (3, 2, 1, GO; the cars are let go at 3).
+  - the instrument `0x46b76`: sprite 0x1a at (238, 132); the speed "%03d" at (267, 177) font
+    2 colour 5 space 1 = `car +0x500` × 1.513 eased by entry 0x32 (÷ 1.6 when `0x124654`);
+    the gear `car +0xc7c` at (299, 177) font 2 colour 4; the rev needle from (271, 168), 30
+    long, colour 0x5b, at revs / most revs × π − 2 radians (`0x49071`, Screamer's needle).
+- Laps: `OS_LAPS` (3) → `0x130d48`. An opponent's first lap of track 1 in rookie: 112 s.
+- Not done: the bend arrows `0x454fc` (the list at `0x12734c`, `MAPnDIR.SPL` by the look of
+  it), the dashboards of views 2 / 6 (`0x46589`, `COCKn`), the mirror, the end of the race
+  and the other modes' screens (`0x47040`), the box under the bar (`0x51698`).
+
+## S2-5r. The trackside cameras; the end of a race — 2026-10-13
+
+- **View 1** (`0x13223`, now converted): `0x14acf` picks the camera of `CAMERASn.MCM`
+  (`DATA/MAPn`: a count, then 0x20 bytes each — place, three angles, kind `+0x18`, a figure
+  `+0x1c`; loaded to the camera record's `+0xa60` / `+0x60`, `0x14d00`) nearest the car, taking
+  only the list's next or last one unless none is chosen yet; by its kind: 0 `0x13514` as it
+  stands; 1 `0x135b6` at its place, moving along its own heading at figure × the car's speed ×
+  111, looking at the car; 2 `0x13768` between its place and the car (0.8 − 0.75 × figure of
+  the way), looking at the car; 3, 4 `0x138e8`, `0x13a8e` unread. "Looking at" = `0x338ed`
+  (written by hand: its arc cosine's argument is on the FPU stack — length on the ground /
+  length). `OS_VIEW=4` for shots; `build/png/s2_trackside.png`.
+- **A car that has done its laps** (`0x201ee`): `car +0x4c |= 3`; the best total `0x130d14`;
+  the player's camera is given the car again (`0x12d00`), view 1 (`0x12d31`) and flags 0xb,
+  the view it had kept in `0x130d68`.
+- **The end's screen** (`0x47040` → by the mode `0x130d10 & 7`: 1 `0x4746a`, 2 `0x47e75`, 4
+  `0x48980`; a plain race's read): for four seconds (`0x133050`) `CONGRATULATIONS !` at y 70 if
+  first, "%s %s" at y 100 (taken as the place's word and `POSITION`), the total time at y 130,
+  all font 0 colour 1 space 2. Then the track's name (sprite 0x27 + track) in the middle at y
+  4, a band `0x51698(0, 180, 320, 20)`, and the choices at y 184 through `0x332dd(text, y,
+  width, x0, font, colour)` (centred in `width` from `x0`): REPLAY / RACE AGAIN / EXIT in
+  thirds, or RACE AGAIN / EXIT in halves when there is no replay; the chosen one (`0x13306c`)
+  blinks font 8 colour 3, the others font 7 colour 1; left / right (`0x131f20` 4 / 8), ENTER
+  (0x10). And the track's table of fifteen best times (`0x12b18c…`, names, cars), scrolling.
+- In the port (`s2_hud_draw`): the four seconds, the name, RACE AGAIN / EXIT (the band
+  darkened by half — what `0x51698` does is unread), left / right / ENTER; RACE AGAIN starts
+  the same race again (`os_go`), EXIT leaves. Not there: the replay, the table of best
+  times. `OS_S2ENDTEST=<seconds>` shows it in a shot; `build/png/s2_end.png`. Not driven to a
+  finish by me: what the car does after the line, and RACE AGAIN itself, are untested.
+
+## S2-5s. What happens at the finish, read and checked — 2026-10-13
+
+Danik: "check what the camera does when the race finishes and be sure to match it."
+
+- **In the game** (`0x201ee`, the player's car on its last line): the car is flagged `+0x4c |=
+  3` and given `+4 = (cars − place) × 0.2` seconds; the view it had is kept in `0x130d68`; the
+  camera gets the car again (`0x12d00`: no trackside camera chosen yet, so the NEAREST of all
+  is taken, afterwards only the list's next or last), view 1 and flags 0xb.
+  - Flag 2 of those stops the view keys (`0x12dff` calls `0x132b4` only while it is clear).
+  - The car is the game's driver's from then (`0x19409`: no controls record OR `+0x4c & 1`),
+    and once `+4` has run out (`0x1f3ce`) its throttle `+0x1ec` is 0 and its brake `+0x1e8`
+    1: it stops. The winner drives 0.6 s longer than the last of four.
+  - Kinds of trackside camera now read: 3 `0x138e8` circles the car at 1100, its height 440 ±
+    220, both turning by the camera's figure; 4 `0x13a8e` rides beside the car at a fixed
+    offset (1320 + 500 × figure back, 550 + 200 × figure up) turned by the camera's heading.
+  - The race screen is not drawn in view 1 (`0x45882`, `0x46b76`); the end's screen is.
+  - At night the fade is 0 … 27000 in view 1 (`0x12d31` → `0x11373c`, `0x113738`).
+- **In the port** all of that is the game's own converted code; three things were the port's
+  and are put right: `s2_view` refuses while the game has the view locked; the picture is not
+  blended across a CUT from one trackside camera to the next (`s2_camera_state.shot`, as for
+  a change of view); the fade's distances are read from the game's two words each picture
+  instead of being fixed per condition.
+- **Checked** with `OS_S2ROBOT=<frames>` (the game's driver has the player's car for so many
+  frames, then the keys) and `OS_LAPS=1 OS_S2LOG=1`: track 1, the line at frame 2420 — view
+  1 on that frame with camera 22 riding beside the car; the car slows 128 → 0 km/h in 80
+  frames (3.2 s) and stands; a cut to camera 0 at frame 2445, which follows it to where it
+  stops. `build/png/s2_finish.png`.
+
+## S2-5t. Stand-ins and guesses gone through against the code — 2026-10-13
+
+Danik: "replace anything temporary or previously guessed with the code-correct one, if it
+has been found."
+
+**Replaced:**
+- **The ground under a point** was Screamer's routine (any winding, the face's stored
+  normal). Now the game's own, `s2p_ground` in `main.c` from `0x28ce6` / `0x28db7` /
+  `0x4c24c` / `0x4c504` / `0x4c7de` (its comment has the whole of it): whole numbers; nine
+  cells in the order of `0x112e84`; a piece when the point is in its first block's circle;
+  the point turned into the piece's frame and tried up to five times, 4 further along both
+  axes each time; a face holds it by ONE of its triangles (0 1 2, else 0 2 3), one winding
+  only; the plane is that triangle's own, from its corners; the normal goes back to the
+  world unturned. All seven tracks run as before (opponents' means within 2 km/h).
+- **The darkened band and the bar's box** (`0x51698`): not "half black" but a table of the
+  palette built by `0x5105e` — each colour's nearest to 0.67 of it, or to 0.7 of that again
+  where the nearest is the colour itself. `s2_dark_box`. The bar now has its box (108, 4,
+  104 × 7).
+- **The view a race starts in** is the options' (`0x128a68`), and the options start (`0x32d53`)
+  with **2**, the first view from the car — not 3. (`0x2e1f3` takes 2, 3, 4, 6; else 2.)
+
+**Read and found right as they were:**
+- the lens: `shl 7` before the divide (`0xc9266`), 128 as Screamer's; the picture's middle
+  and eye line from `0x4f6c4` (half the width; 0.65 of the rows);
+- "%s %s" at the end = the place's word (`[0x124584 + 4 × place]`) and `[0x124598]`
+  POSITION; the lap's "%d%c" letter is 0x3a ':';
+- the easing tables `0x315a4`: (0.5 + 0.005 i) ^ (50 / (row + 1)) — and the game reads row
+  `whole(1 / step)`, one past the rate it was made for; the port fills and reads the same;
+- `0x11253` = square root, 0 for a negative; `0x50d04` = the sprite routine `0x50c0a` with
+  its last argument 0;
+- three laps (the options' `0x128a30` = 1 of the table 1, 3, 5, 10 at `0x1131fc`), rookie
+  (option 0 of `0x1130c0` = level 2), four cars, the six settings 2 2 −1 2 2 2 (`0x339e7`).
+
+**Still the port's own, with no answer in the code:** the 25 steps a second (S2-5l); the
+shadow laid 4 above the ground instead of the engine's order of drawing; that EXIT leaves
+the program (no menu yet). **Still not read:** what the arc cosine gives out of range
+(the library's error routine `0xbb541`; taken as 0); where routine 208's second pair of the
+table is called from (S2-5p); the font file's fourth number; the speed in miles
+(`0x124654`); the camera's lean and the wheels' turning senses are settled by pictures, not
+from the engine's matrix code.
+
+## S2-5u. The driving checked against the program's own machine code — 2026-10-13
+
+Danik: the original is easier to handle — more responsive to the steering, harder to spin
+half round in a bend, faster without losing the car. "Make sure all driving code is read
+and implemented properly."
+
+- **`tools/s2emu.py`** runs the race frame of the PROGRAM ITSELF (`0x2baa4`, then `0x12dff`) in
+  a CPU emulator (Unicorn, x87 and all) from the memory the port had at the start of a test
+  race, with the same keys, and compares the player's car's record (0xCC0 bytes) after every
+  frame with the port's. The test world is the port's `OS_S2FLAT=<road kind>` and
+  `OS_S2NONEAR=1` (level ground, no road points) so that only the car's own routines are
+  compared; `OS_S2DUMP` writes the block, `OS_S2TRACEFILE` the record each frame,
+  `OS_S2PLAN="A:3,AL:0.6,A:0.6,B:1"` the keys by seconds. What the emulator answers itself is
+  what the port answers itself. (Needs `pip install unicorn capstone` in a venv. The block
+  starts empty in the port, so the program's data object is kept under it. The library's
+  copy and fill load ES, which Unicorn does not survive: done in the script.)
+- **Result:** after one fault was put right (below) the two are THE SAME TO THE UNIT — place,
+  heading, speed, slip — through 4 s of acceleration and a full-lock spin (201 frames, the
+  rear-drive car), and through accelerate / turn / straighten / brake with the four-wheel-
+  drive car (132 frames). Only whole numbers one apart now and then (x87 against C floats).
+  So the car's routines are converted right, and **the game's own code spins the car** when
+  full lock is held a second at 115 km/h under power.
+- **The fault it found:** `0x1c4fb`'s `(int)local_4c[i] < 0x3f800000` — an array element's bits
+  compared ("this wheel's share of the weight is under 1") — was taken as a whole number:
+  always true, so the springs of the wheels carrying MORE went up instead of down and the
+  body's pitch and lean (`+0xc18`, `+0xc20`) stayed nought. `s2c.py` has the rule for array
+  elements now. It changed nothing in how the car goes (the spring heights are only shown).
+- **What was different from the original was what the port fed in** (`0x339e7`, the menu
+  filling an ordinary race in, and `0x32d53`, the options as they start):
+  - the player's car: every team's choice starts as **car 1**, not 0; the others get the next
+    cars and teams round. `CARS.DTR`'s `TRAZIONE`: car 0 drives the REAR wheels (0 1), cars 1
+    and 2 ALL FOUR (0.5 0.5), car 3 the front (1 0). A wheel's grip is less by throttle ×
+    its share × 0.3 (`0x19cac`), so the rear-drive car lets go at the back under power. Left
+    held 1 s at 115 km/h under power, then let go: worst slip 77° (car 0), 49° (car 1).
+  - the player's six settings come from the options' first set-up, 2 2 **0** 2 2 2: tyres 0 =
+    slicks (the port had −1 = the track's own for everybody; the other cars keep that);
+  - the mode word `0x130d10` = 2; the controls record as `CONTROLS.CFG` has it.
+  `OS_CAR=0..4` still chooses the car.
+- **Also made the game's own:** the nearest road point / wall (`0x2a371`, `s2p_nearest`): only
+  the nine grid cells round the point, rows then columns then stored order, squares of whole
+  numbers, the first of equals, none = none (it was the nearest of the whole track).
+- **RACE AGAIN** gave the part the program's arguments instead of its own two (the track's
+  directory and number): `s2_race_again`; `OS_S2AGAINTEST=<pictures>` takes it by itself.
+- **Not the same as the original and the port's own:** the keys are read once a picture, the
+  race frame runs 25 times a second and the picture is drawn between the last two frames —
+  up to a tenth of a second from key to picture. `OS_S2HZ` changes the rate.
+- **Still to do with the rig:** slopes and walls (the ground and wall hooks against the
+  program's own, which need the track loaded the engine's way), the opponents' driver, cars
+  touching. And the end's screen for mode 2 is `0x47e75`, not the `0x4746a` the port's was
+  written from: unread.
+
+## S2-5v. Which block of a car is what: by the game's numbers, not by where it is — 2026-10-13
+
+Danik, with the default car now car 1: "the car body rotates when I accelerate" — the body
+shell stood on end and turned with the wheels.
+
+- The port took a car's block for a wheel when its place was off the middle, and for the
+  part that spins when its flags had 0x800 — Screamer's rule, and true of Screamer 2's car 0
+  by luck. In the other models a body block is off the middle too.
+- The game finds the blocks BY NAME when it sets a car up (`0x2f519` → `0x4bc03(name, to)`,
+  the block's number to `to + 4`): `fauto` → `car +0x1f8`, `rauto` → `+0x200`, the name at
+  `0x110d98` → `+0x208`, `MV_mauto` → `+0xbf4` (the body's four, which get the body's lean
+  and lift); and per wheel the two names of the table at `0x112f00` → `wheel +0x50` (turns
+  with the wheel and steers) and `wheel +0x58` (steers only).
+- The port now carries those numbers (`s2_car_state.body_block`, `.wheel_block`) into
+  `car_pose.role[block]` and the drawing goes by them; wheels 0 and 2 steer, as `0x16878`
+  has it. All five models checked pulling away with lock on: `build/png/s2_models.png`.
+- My miss: the default car was changed without looking at it moving.
 
 ## S2-6. Plan
 

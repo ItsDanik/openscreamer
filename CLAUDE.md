@@ -53,8 +53,8 @@ from it** (`build/dec`, `build/png`, `build/screamer_flat*.bin`, `build/decomp`)
 plan). Containers, `.3DX` and the track files are Screamer 1's formats; the game logic is new.
 `openscreamer -game 2` (or `-data screamer2`) is a race on its tracks (`OS_TRACK=1..7`; the game's
 own routines, converted by `tools/s2c.py` into `s2_gen.inc` and run on a copy of its memory:
-NOTES2 S2-5g..j; never edit `s2_gen.inc`, change the tool, `tools/s2c_fix.txt` or `s2_hooks.c`;
-`OS_COND=1|2` = night / fog, NOTES2 S2-5d). No HUD, sound, laps or menu yet. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
+NOTES2 S2-5g..j; never edit `s2_gen.inc`, change the tool, `tools/s2c_fix.txt` or `s2_hooks.c`; the decompiler drops ST0 results and prints some statements out of order -- `tools/s2_sigs.txt`, `tools/s2order.py`, S2-5m;
+`OS_COND=1|2` = night / fog, NOTES2 S2-5d; `OS_DIFF=0|1|2` = pro / normal / rookie, rookie if not given, S2-5n; the game's four views on F1-F4 / C, S2-5k; the race frame runs 25 times a second, not 50 -- the game cuts positions to whole numbers and a short step turns that into a sideways pull, S2-5l). The race screen, the trackside cameras and the end's RACE AGAIN / EXIT are in (S2-5q, S2-5r; `OS_LAPS`); no sound, replay, records or menu yet. What is still the port's own or unread there: NOTES2 S2-5t. `tools/s2emu.py` runs the program's own machine code against the converted routines (S2-5u): use it before believing or doubting the driving. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
 Its image is made with `tools/unle.py --fixups` (real relocation records, no
 `RelocateRefs.java`). `screamer-dos [1|2]` runs the originals in DOSBox (`~/dosgames`).
 **The MiSTer port is not to be touched until Danik says so.**
