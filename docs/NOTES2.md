@@ -432,6 +432,73 @@ Next: the port's side (s2_hooks.c) — the car record's first values (`0x2f519`,
   routines, 9,839 lines, 94 messages to go (mostly the set-up's file names and the engine's
   object lists), 47 hooks.
 
+## S2-5j. The game's race routines RUN in the port — 2026-10-13
+
+**State:** `openscreamer -game 2` is a race on any of the seven tracks: four cars on the grid
+under the gantry, held three seconds (the game's own: `0x2baa4` sets `0x11f0a8 & 0x20` when
+the race clock `0x13335c` passes 3.0), the player's car on the port's six controls, three
+opponents driving themselves (`0x17726`), walls, the game's collision solver. Headless on
+track 1 with the accelerator held: 17.6 km/h after half a second, gears 1-2-3-4 by two
+seconds, 106 km/h. No HUD, no sound, no laps, no start lights; the view is the port's own
+chase camera.
+
+**How it is put together**
+- `tools/s2_set.txt` is the conversion: roots `0x2baa4` (the race frame), `0x2f519` (a
+  car's set-up), `0x309b0`; engine routines taken as well: `0x4a831` (the spline's curve),
+  `0x4af7d`, `0x4b016`; 58 routines, 13,669 lines into `port/src/s2_gen.inc`, which
+  `s2_hooks.c` includes after its hooks. `python3 tools/s2c.py port/src/s2_gen.inc $(cat
+  tools/s2_set.txt)`.
+- **The block** (`s2_mem.h`): `0x110000`–`0x210000`; the data object, then what the port
+  allocates (`0x140000` up: the cars' line, the objects' records), then the routines' stack
+  (`0x1e0000` up). Variables the engine keeps in its code object get pages on demand.
+- **A routine's stack frame is in the block**, each local at the offset in its name
+  (`local_9c` = 0x9c below the return address): the compiler lays structures out on the
+  stack and the decompiler shows them as separate locals — `0x309b0` clears a 0x78-byte
+  cursor through the address of its first word. `&local` is an address; `(int)(array + n)`
+  counts in elements (`PM()`).
+- **`s2_hooks.c`:** the data tables as the loaders read them (`s2_dtr` = `0x31235`:
+  `GAME/CARS.DTR` `CAR_PARAMS` → `0x11c600` 0x58 a car, `MISC.DTR` `SKILLS` → `0x11f0f4`,
+  `DAMAGES` → `0x11cce0`, `MAPnDAT.DTR` `TRACK_DATA` → `0x1240f8` and its road kinds copied
+  to `0x11cdec + id·0x24`); the easing tables `0x11f2a0[rate][i]` = (0.5 + i·0.005)^(50/rate)
+  (`0x315a4`; `0x4b016` picks the row for the frame rate, `0x1016b` / `0x111d6` ease with
+  it); `MAPnOPP.SPL` in the game's layout (table at `[0x127350]`, 0x24 an entry); the race
+  record; the player's controls record `0x127708` (`+0xA8` accelerate, `+0xAC` brake, `+0xB0`
+  / `+0xB4` left / right, `+0xB8` / `+0xBC` gears, each 0…1023 with its sign in `+0x14 +0x30
+  +0x84 +0xA0`; `+0x40` = 1 for keys); a camera record per view at `[0x1192f4 + 4·view]`
+  (`+0x48 +0x50` place, `+0x58` heading: the engine sound is placed by it).
+- **Hooks:** the ground under a point (`0x28ce6` → the port's `s2p_ground`, the normal turned
+  to point up); the nearest road-centre point / wall segment (`0x2a371` → `s2p_nearest`, a
+  copy of the record kept in the block); the engine's object list as far as the car reads
+  and writes it (`0x4bc94` a car's model, `0x4bc03` a block by name, object record 0x40 bytes
+  + 0x20 a block at `[0x11da20 + n·0x1c]` / `[0x11da24 + …]`: `0x16878` writes the car's
+  place and angles there each frame — what a renderer would read); copies, fills, `rand`;
+  nothing for sound, smoke, the replay recorder, the network.
+- `0x10d9e` (angle of a vector) is written by hand; the power routine `0x0afed2` (ST0 to the
+  power ST1) and arc cosine `0x4ea98` take their arguments on the FPU stack — their four
+  call sites are rewritten in `tools/s2c_fix.txt` from the instructions (`0x19409`: |cos|^4;
+  `0x1f756`: the torque curve `(1 − (G·0.22 + r·c − 1)²)·G²·0.8`, G the gear's factor from
+  `0x112e24` = 2.5 2.5 1.6 1.2 1.0, r = revs / most revs, c = 1.6, or 1.5 in gear 0;
+  `0x2d59c`).
+
+**What went wrong on the way (each a class, fixed in the tools)**
+- *Seeding functions before the first analysis* breaks Ghidra's switch recovery (the tables
+  are in the code): 37 routines came out in pieces. `tools/s2project.sh` analyses first.
+- *A float kept in a local the decompiler leaves `undefined4`*: `local = 1.0 − x` then reads
+  in C as a conversion to a whole number — the grip's blend (`0x19c61`) came out 0 and the
+  car had no drive. The scripts now make such locals `float` when floating-point operations
+  write or read them.
+- *A float result in ST0 from a routine with register and stack arguments* (`0x108f5`):
+  declared through `__watcall` with all four register parameters written out.
+- *Stack structures*, above. *`x = f()` of a void routine*. *Arrays of byte pointers.*
+- The car's place is whole numbers, set by cutting the fraction off (`0x1f09a`: the helper,
+  then `fistp`) — the game's own; with no drive it alone moved the car a unit a frame.
+
+**Known / next:** an opponent stops after half a lap in the four-car run (unlooked at);
+car pitch / roll signs unchecked; wheels, shadows, suspension not drawn from the records;
+the game's cameras, HUD, lap counting (`0x22d35` runs), sound, start lights; `0x204af`
+(smoke) hooked away; the ground hook uses the port's stored-normal plane where the engine
+builds the plane from the triangle under the point (`0x4c24c`).
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

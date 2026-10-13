@@ -51,8 +51,10 @@ from it** (`build/dec`, `build/png`, `build/screamer_flat*.bin`, `build/decomp`)
 `build/screamer2_flat.bin`, `build/ghidra2`, `build/decomp2`) is the work in hand: its record is
 **`docs/NOTES2.md`** (sections S2-n: decisions, files, what stayed the same, tools, DOSBox,
 plan). Containers, `.3DX` and the track files are Screamer 1's formats; the game logic is new.
-`openscreamer -game 2` (or `-data screamer2`) rides round its tracks (`OS_TRACK=1..7`,
-`OS_COND=1|2` = night / fog, NOTES2 S2-5d): tracks only so far. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
+`openscreamer -game 2` (or `-data screamer2`) is a race on its tracks (`OS_TRACK=1..7`; the game's
+own routines, converted by `tools/s2c.py` into `s2_gen.inc` and run on a copy of its memory:
+NOTES2 S2-5g..j; never edit `s2_gen.inc`, change the tool, `tools/s2c_fix.txt` or `s2_hooks.c`;
+`OS_COND=1|2` = night / fog, NOTES2 S2-5d). No HUD, sound, laps or menu yet. `tools/s2dec.sh <addr>...` decompiles into `build/decomp2`.
 Its image is made with `tools/unle.py --fixups` (real relocation records, no
 `RelocateRefs.java`). `screamer-dos [1|2]` runs the originals in DOSBox (`~/dosgames`).
 **The MiSTer port is not to be touched until Danik says so.**

@@ -2760,30 +2760,51 @@ static void cars_load(const char *gfxdir)
  * colours and the cars' pictures use only those, so the track's palette serves.
  * The object is built like Screamer's: MV_mauto, fauto, rauto, four tyres, four hubs.
  */
-#define S2_SHOWN 4
-static mesh     g_s2_car[S2_SHOWN];
-static car_pose g_s2_pose[S2_SHOWN];
-static void s2_cars_show(const path *r)
+#define S2_CARS 4
+static mesh     g_s2_car[S2_CARS];
+static car_pose g_s2_pose[S2_CARS];
+static scene_object *g_s2_obj[S2_CARS];
+static int      g_s2_on;                 /* the game's own race routines are running (s2_hooks.c) */
+
+/* the race: four cars, one of each team, the player's (car 0; OS_CAR=0..4 its model) last
+   on the grid as the game puts it; the others drive themselves */
+static void s2_race_begin(int track)
 {
-    const int model = getenv("OS_CAR") ? atoi(getenv("OS_CAR")) % 5 : 0;
-    for (int t = 0; t < S2_SHOWN && g_ncar < MAX_CARS; t++) {
+    static const int team[S2_CARS] = { 0, 1, 2, 3 };
+    int model[S2_CARS] = { 0, 0, 0, 0 };
+    if (getenv("OS_CAR")) model[0] = (atoi(getenv("OS_CAR")) % 5 + 5) % 5;
+    int n = getenv("OS_S2CARS") ? atoi(getenv("OS_S2CARS")) : S2_CARS;
+    if (n < 1 || n > S2_CARS) n = S2_CARS;
+    for (int t = 0; t < n && g_ncar < MAX_CARS; t++) {
         char file[600];
-        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.MLB", t + 1, g_s2_cond & 1, model + 1);
+        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.MLB", team[t] + 1, g_s2_cond & 1, model[t] + 1);
         const int base = mlb_add(file);
-        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.3DX", t + 1, g_s2_cond & 1, model + 1);
-        if (base < 0 || mesh_load(&g_s2_car[t], file) != 0) { fprintf(stderr, "note: no car at %s\n", file); continue; }
+        snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.3DX", team[t] + 1, g_s2_cond & 1, model[t] + 1);
+        if (base < 0 || mesh_load(&g_s2_car[t], file) != 0) { fprintf(stderr, "note: no car at %s\n", file); return; }
         mesh_rebase(&g_s2_car[t], base);
-        camera at;
-        path_at(r, 30.0f + 6.0f * (float)t, 0.0f, &at);
         scene_object *o = &g_car[g_ncar++];
         memset(o, 0, sizeof *o);
         o->m = &g_s2_car[t];
         o->pose = &g_s2_pose[t];
         o->phase = -1;
         o->radius = 1200.0f;
-        const float side = (t & 1) ? 450.0f : -450.0f;
-        o->x = at.x + sinf(at.yaw) * side; o->y = at.y - cosf(at.yaw) * side; o->z = at.z;
-        o->yaw = at.yaw + (float)M_PI * 0.5f;           /* the nose is local -Z (see player_sync) */
+        g_s2_obj[t] = o;
+    }
+    if (!s2_race_start(track, g_s2_cond, n, team, model)) { fprintf(stderr, "screamer 2: the race did not start\n"); return; }
+    g_s2_on = n;
+}
+
+/* the cars where the game's routines have them: a car's place is car +0x4d8 (x, height, y),
+   its heading +0x4e8 with forward = (sin, -cos), which is the port's yaw as it is */
+static void s2_race_show(void)
+{
+    for (int i = 0; i < g_s2_on; i++) {
+        s2_car_state c;
+        scene_object *o = g_s2_obj[i];
+        s2_car(i, &c);
+        o->x = (float)c.x; o->y = (float)c.y; o->z = (float)c.height;
+        o->yaw = c.angle[1];
+        o->pitch = c.angle[0]; o->roll = c.angle[2];
     }
 }
 
@@ -8498,14 +8519,15 @@ static int session(int argc, char **argv)
     if (os_game() == 2 && g_scene) path_from_road(r, &sc);
     path_drape(r);
     if (g_scene && !getenv("OS_NOCARS") && os_game() != 2) cars_load(gfxdir);
-    if (g_scene && !getenv("OS_NOCARS") && os_game() == 2) s2_cars_show(r);       /* Screamer 2: standing cars so far */
+    if (g_scene && !getenv("OS_NOCARS") && os_game() == 2 && !getenv("OS_S2PHYS")) { s2_race_begin(track); s2_race_show(); }
     if (g_scene && os_game() == 2 && getenv("OS_S2PHYS")) {
         /* a test of the game's own car routines: a car on the grid, the accelerator down
            (OS_S2KEYS: letters A B L R), OS_S2PHYS frames at 50 a second; a line every 25 */
         static const int team[4] = { 0, 1, 2, 3 }, model[4] = { 0, 0, 0, 0 };
         const char *keys = getenv("OS_S2KEYS") ? getenv("OS_S2KEYS") : "A";
         const int frames = atoi(getenv("OS_S2PHYS"));
-        if (!s2_race_start(track, g_s2_cond, 1, team, model)) { fprintf(stderr, "screamer 2: the race did not start\n"); return 1; }
+        const int ncars = getenv("OS_S2CARS") ? atoi(getenv("OS_S2CARS")) : 1;
+        if (!s2_race_start(track, g_s2_cond, ncars, team, model)) { fprintf(stderr, "screamer 2: the race did not start\n"); return 1; }
         s2_go();
         if (getenv("OS_S2PEEK")) { unsigned from = 0; int n = 8; sscanf(getenv("OS_S2PEEK"), "%x,%d", &from, &n); s2_peek(0, from, n); }
         for (int f = 0; f <= frames; f++) {
@@ -8514,6 +8536,11 @@ static int session(int argc, char **argv)
                 s2_car(0, &c);
                 printf("s2 %4d  at %7d %7d  height %6d  heading %6.3f  tilt %6.3f %6.3f  speed %8.2f  gear %d  rpm %6.0f  steer %5.2f\n",
                        f, c.x, c.y, c.height, c.angle[1], c.angle[0], c.angle[2], c.speed, c.gear, c.rpm, c.steer);
+                for (int k = 1; k < ncars; k++) {
+                    s2_car(k, &c);
+                    printf("   car %d  at %7d %7d  height %6d  heading %6.3f  speed %8.2f  gear %d\n", k, c.x, c.y, c.height, c.angle[1], c.speed, c.gear);
+                }
+                s2_car(0, &c);
                 if (getenv("OS_S2WHEELS"))
                     printf("        wheels on the ground %d %d %d %d  ground at %d %d %d %d  kinds %d %d %d %d\n", c.wheel_down[0], c.wheel_down[1],
                            c.wheel_down[2], c.wheel_down[3], c.wheel_ground[0], c.wheel_ground[1], c.wheel_ground[2], c.wheel_ground[3],
@@ -8717,6 +8744,23 @@ static int session(int argc, char **argv)
            `I` key prints), instead of on the lap */
         if (getenv("OS_POS"))
             sscanf(getenv("OS_POS"), "%f,%f,%f", &cam.x, &cam.y, &cam.z);
+        if (g_s2_on && getenv("OS_S2RUN")) {
+            /* SCREAMER 2: OS_S2RUN=<frames> of the race first (OS_S2KEYS: letters A B L R held),
+               then the picture from behind the player's car (OS_S2LOOK=<car> another's) */
+            const char *keys = getenv("OS_S2KEYS") ? getenv("OS_S2KEYS") : "A";
+            s2_car_state c;
+            for (int f = atoi(getenv("OS_S2RUN")); f > 0; f--) {
+                s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
+                s2_frame(0.02f);
+            }
+            s2_race_show();
+            s2_car(getenv("OS_S2LOOK") ? atoi(getenv("OS_S2LOOK")) % g_s2_on : 0, &c);
+            cam.yaw = atan2f(-cosf(c.angle[1]), sinf(c.angle[1]));
+            cam.x = (float)c.x - cosf(cam.yaw) * 2300.0f; cam.y = (float)c.y - sinf(cam.yaw) * 2300.0f;
+            cam.z = (float)c.height + 750.0f;
+            cam.pitch = -0.16f;
+            printf("s2: car at %d %d height %d, speed %.1f, gear %d\n", c.x, c.y, c.height, c.speed, c.gear);
+        }
         if (getenv("OS_HEADING"))
             cam.yaw = (float)atof(getenv("OS_HEADING")) * (float)M_PI / 180.0f;
         if (getenv("OS_YAW"))   cam.yaw   += (float)atof(getenv("OS_YAW")) * (float)M_PI / 180.0f;
@@ -9031,7 +9075,33 @@ static int session(int argc, char **argv)
             if (overhead_height < 1500.0f) overhead_height = 1500.0f;
         }
 
-        if (mode == RIDE) {
+        if (mode == RIDE && g_s2_on && !shot) {
+            /* SCREAMER 2: the game's own race, 50 steps a second; the keys are the port's
+               six controls; the view follows the player's car from behind (the port's own
+               until the game's cameras are read) */
+            static float owed;
+            controls_state ct;
+            s2_car_state c;
+            controls_read(&ct);
+            owed += paused ? 0.0f : dt;
+            if (owed > 0.25f) owed = 0.25f;
+            while (owed >= 0.02f) {
+                s2_controls(ct.throttle > 0.3f, ct.brake > 0.3f, ct.steer > 0.3f, ct.steer < -0.3f, ct.shift > 0, ct.shift < 0);
+                s2_frame(0.02f);
+                owed -= 0.02f;
+            }
+            s2_race_show();
+            s2_car(0, &c);
+            const float fx = sinf(c.angle[1]), fy = -cosf(c.angle[1]);
+            float want = atan2f(fy, fx), d = want - cam.yaw;
+            while (d >  (float)M_PI) d -= 2 * (float)M_PI;
+            while (d < -(float)M_PI) d += 2 * (float)M_PI;
+            float ease = 6.0f * dt; if (ease > 1.0f) ease = 1.0f;
+            cam.yaw += d * ease;
+            cam.x = (float)c.x - cosf(cam.yaw) * 2300.0f; cam.y = (float)c.y - sinf(cam.yaw) * 2300.0f;
+            cam.z = (float)c.height + 750.0f;
+            cam.pitch = -0.16f;
+        } else if (mode == RIDE) {
             if (!paused) t += ride_speed * dt;
             while (t >= r->count) t -= r->count;
             float keep = cam.yaw;
