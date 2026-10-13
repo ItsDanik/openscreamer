@@ -100,8 +100,8 @@ def convert(entry, t):
         a = int(m.group(1), 16)
         ty = gl.get(a, ("", 4, "undefined4"))[2]
         return f"((%s *)MP(0x{a:x}u))[" % CT.get(ty.rstrip("_*"), "uint32_t")
-    body = re.sub(r"\(&_?DAT_([0-9a-f]{8})(?:/\*[^*]*\*/)?\)\[", g_arr, body)
-    body = re.sub(r"&_?DAT_([0-9a-f]{8})(?:/\*[^*]*\*/)?", lambda m: f"0x{int(m.group(1),16):x}u", body)
+    body = re.sub(r"\(&_?(?:DAT|INT)_([0-9a-f]{8})(?:/\*[^*]*\*/)?\)\[", g_arr, body)
+    body = re.sub(r"&_?(?:DAT|INT)_([0-9a-f]{8})(?:/\*[^*]*\*/)?", lambda m: f"0x{int(m.group(1),16):x}u", body)
     def g_val(m):
         under, a = m.group(1), int(m.group(2), 16)
         if a in consts and not (0x119000 <= a):
@@ -112,7 +112,7 @@ def convert(entry, t):
             ty = {"float": "float", "double": "double"}.get(access.get(a), "undefined4")
         gl_all[a] = ty
         return f"(*(%s *)MP(0x{a:x}u))" % CT.get(ty, "uint32_t")
-    body = re.sub(r"\b(_?)DAT_([0-9a-f]{8})(?:/\*[^*]*\*/)?(\._\d+_\d+_)?", g_val, body)
+    body = re.sub(r"\b(_?)(?:DAT|INT)_([0-9a-f]{8})(?:/\*[^*]*\*/)?(\._\d+_\d+_)?", g_val, body)
     body = re.sub(r"\bPTR_\w*?_([0-9a-f]{8})\b", lambda m: f"(*(uint32_t *)MP(0x{int(m.group(1),16):x}u))", body)
     # variables the engine keeps in its CODE object (the ground query's results)
     body = re.sub(r"\b_FUN_(0004[0-9a-f]{4})\b(?!\()", lambda m: f"(*(int32_t *)MP(0x{int(m.group(1),16):x}u))", body)
@@ -124,11 +124,37 @@ def convert(entry, t):
                   r"(\1 *)MP(", body)
     body = re.sub(r"\((float|int|uint|undefined4|byte|char|short|ushort|undefined1|undefined2|double|undefined8|undefined|longlong|bool) \*\)(?!MP\()([A-Za-z_]\w*)",
                   r"(\1 *)MP(\2)", body)
+    # LOCALS WHOSE ADDRESS IS TAKEN (and every local array) live in the block too, on a stack
+    # of its own: `&local` is then an address like any other.  The routine becomes a body and
+    # a wrapper that gives the stack back.
+    stacked = []
+    def decl(m):
+        ind, ty, name, arr = m.group(1), m.group(2), m.group(3), m.group(4)
+        if not arr and not re.search(r"&%s\b" % name, body): return m.group(0)
+        n = arr.strip()[1:-1] if arr else "1"
+        stacked.append((name, bool(arr)))
+        acc = "((%s *)MP(%s_a))" % (ty, name) if arr else "(*(%s *)MP(%s_a))" % (ty, name)
+        return "%suint32_t %s_a = s2_push(sizeof(%s) * (%s));\n#define %s %s" % (ind, name, ty, n, name, acc)
+    body = re.sub(r"^(\s+)(\w+) (\w+)( \[\d+\])?;$", decl, body, flags=re.M)
+    for name, is_arr in stacked:
+        body = re.sub(r"\(int\)&%s\b|&%s\b" % (name, name), name + "_a", body)
+        if is_arr:
+            body = re.sub(r"(?<!define )\b%s\b(?!_a|\s*\[| \(\()" % name, name + "_a", body)
+    if stacked:
+        m = re.search(r"^(\w[\w \*]*?)\s*\n?(FUN_[0-9a-f]{8})\(([^)]*)\)\s*\n\{", body, re.M)
+        ret, fn, params = m.group(1).strip(), m.group(2), m.group(3)
+        names = ",".join(q.split()[-1].lstrip("*") for q in params.split(",") if q.strip() and q.strip() != "void")
+        body = body[:m.start()] + "static %s %s_body(%s)\n{" % (ret, fn, params) + body[m.end():]
+        body += "\n" + "".join("#undef %s\n" % n for n, _ in stacked)
+        if ret == "void":
+            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s_body(%s);\n  s2_sp = sp;\n}\n" % (ret, fn, params, fn, names)
+        else:
+            body += "%s %s(%s)\n{\n  uint32_t sp = s2_sp;\n  %s r = %s_body(%s);\n  s2_sp = sp;\n  return r;\n}\n" % (ret, fn, params, ret, fn, names)
     # a local that is a C pointer, handed on as an address: back to the number
     for name in set(re.findall(r"^\s+\w+ \*(\w+);", body, re.M)):
         body = re.sub(r"\(int\)\((%s\b[^()]*)\)" % name, r"PM(\1)", body)
         body = re.sub(r"\(int\)%s\b(?!\[)" % name, "PM(%s)" % name, body)
-    body = re.sub(r"^(\w[\w ]*?\**)\s*\n?(FUN_[0-9a-f]{8}\()", r"static \1 \2", body.lstrip("\n"), count=1, flags=re.M)
+    body = re.sub(r"^(?!static )(\w[\w ]*?\**)\s*\n?(FUN_[0-9a-f]{8}\()", r"static \1 \2", body.lstrip("\n"), flags=re.M)
     for pat, rep in fixes.get(entry, []):
         body, n = re.subn(pat, rep, body)
         if not n: print(f"fix did not apply @{entry:05x}: {pat}", file=sys.stderr)
@@ -147,7 +173,8 @@ for m in re.finditer(r"\t(f[a-z0-9]+) +(DWORD|QWORD) PTR ds:0x(1[1-3][0-9a-f]{4}
 texts = {e: convert(e, t) for e, t in sorted(funcs.items())}
 
 def proto(body):
-    m = re.match(r"static ([\w \*]+?) (FUN_[0-9a-f]{8})\(([^)]*)\)", body)
+    m = None
+    for m in re.finditer(r"^static ([\w \*]+?) (FUN_[0-9a-f]{8})\(([^)]*)\)", body, re.M): pass
     return f"static {m.group(1)} {m.group(2)}({m.group(3)});" if m else None
 
 with open(out, "w") as f:

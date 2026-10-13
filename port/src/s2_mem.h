@@ -38,6 +38,9 @@ static inline uint8_t *MP(uint32_t a)
 #define S2_TMP 0x13f000u
 /* word i of a record reached through a float pointer, as the whole number it is */
 #define WI(p, i) (((int32_t *)(p))[i])
+/* the routines' own stack, for locals whose address they hand on (it grows upwards) */
+extern uint32_t s2_sp;
+static inline uint32_t s2_push(uint32_t n) { uint32_t a = s2_sp; s2_sp += (n + 7u) & ~7u; memset(MP(a), 0, n); return a; }
 /* a float's bits as a whole number (the game compares floats that way against constants) */
 static inline int32_t s2_bits(float f) { int32_t i; memcpy(&i, &f, 4); return i; }
 #define BITS(x) s2_bits((float)(x))

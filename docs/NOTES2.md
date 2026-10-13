@@ -415,6 +415,23 @@ name things — not a rewrite from understanding, which is how feel gets lost.
 Next: the port's side (s2_hooks.c) — the car record's first values (`0x2f519`, `0x14e20`,
 `CARS.DTR`, the road kinds), the keys, the frame, drawing the car from its record.
 
+## S2-5i. No hand corrections left; the whole race frame converts — 2026-10-13
+
+- The decompile scripts now also retype, before the final pass, every pointer LOCAL
+  (`HighFunctionDBUtil.updateDBVariable` to int, up to three rounds) and every pointer
+  GLOBAL above `0x119000` (defined as an int in the listing; it is then named `INT_…`).
+  With parameters, locals and globals all plain numbers, every field access in the text is
+  `*(float *)(x + off)` or `*(int *)(x + off)`: nothing is left to tell apart by hand.
+  The wheel routine's field list of S2-5h came out the same from the tool; the fix file is
+  empty again.
+- The converter puts a routine's locals whose address is taken, and its local arrays, on a
+  stack of their own inside the block (`s2_push`), the routine becoming a body and a wrapper
+  that gives the stack back: `&local` is an address like any other.
+- The three per-car routines WITH the walls (`0x29571`): 21 routines, 3,327 lines, no
+  warning. The whole race frame `0x2baa4` + the car set-up `0x2f519` + `0x14e20`: 65
+  routines, 9,839 lines, 94 messages to go (mostly the set-up's file names and the engine's
+  object lists), 47 hooks.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

@@ -1,10 +1,1 @@
 # Corrections to the converted routines (tools/s2c.py --fix): @entry, then s/regex/replacement/
-@19cac   a local float is handed to 0x111d6 by address: through a word of the block
-s|FUN_000111d6\(\(int\)&local_6c,0\.0,10\);|*(float *)MP(S2_TMP) = local_6c; FUN_000111d6(S2_TMP,0.0,10); local_6c = *(float *)MP(S2_TMP);|
-@1bef1   the wheel record through a float pointer: its whole-number fields (from the instructions: fild / fistp / mov / add on +0x04 +0x28 +0x2c +0x30 +0x34 +0x44 +0x48 +0x5c +0x60)
-s|\(int\)pfVar3\[(1\|10\|0xb\|0xc\|0xd\|0x11\|0x12\|0x17\|0x18)\]|WI(pfVar3,\1)|
-s|pfVar3\[(0xc\|0x11\|0x12)\] = \(float\)|WI(pfVar3,\1) = (int32_t)|
-s|pfVar3\[0x12\] = 0\.0;|WI(pfVar3,0x12) = 0;|
-s|pfVar3\[1\] = 0\.0;|WI(pfVar3,1) = 0;|
-s|pfVar3\[1\] = 1\.4013e-45;|WI(pfVar3,1) = 1;|
-s|\(int\)fVar1\b|BITS(fVar1)|
