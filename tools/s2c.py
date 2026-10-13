@@ -86,6 +86,15 @@ def lit(kind, v):
     if kind == "double": return v if ("." in v or "e" in v or "n" in v) else v + ".0"
     return (v if ("." in v or "e" in v) else v + ".0") + "f"
 
+def close2(text, i):                         # index of the bracket matching the one at i
+    d = 0
+    for k in range(i, len(text)):
+        if text[k] == "(": d += 1
+        elif text[k] == ")":
+            d -= 1
+            if d == 0: return k
+    return -1
+
 review, strings, gl_all = [], {}, {}
 def convert(entry, t):
     gl = {}
@@ -161,12 +170,20 @@ def convert(entry, t):
         acc = "((%s *)MP(%s))" % (ty, at) if arr else "(*(%s *)MP(%s))" % (ty, at)
         return "#define %s %s\n#define %s_a (%s)" % (name, acc, name, at)
     nonlocal_frame = [0]
+    # (an array of byte pointers on the stack is an array of addresses)
+    body = re.sub(r"^(\s+)(?:undefined|undefined1|char|byte) \*((?:local|[a-z]+Stack)_[0-9a-f]+)( \[\d+\])?;$", r"\1uint32_t \2\3;", body, flags=re.M)
     body = re.sub(r"^(\s+)(?!return\b|goto\b)(\w+) ((?:local|[a-z]+Stack)_([0-9a-f]+))( \[\d+\])?;$", decl, body, flags=re.M)
     frame = (nonlocal_frame[0] + 15) & ~15
     for name, is_arr in stacked:
         body = re.sub(r"\(int\)&%s\b|&%s\b" % (name, name), name + "_a", body)
         if is_arr:
-            body = re.sub(r"(?<!define )\b%s\b(?!_a|\s*\[| \(\()" % name, name + "_a", body)
+            # `(int)(array + n)` counts in the array's elements: as the C pointer, then back
+            while True:
+                m = re.search(r"\(int\)\(%s\b" % name, body)
+                if not m: break
+                e = close2(body, m.start() + 5)
+                body = body[:m.start()] + "PM" + body[m.start() + 5:e + 1] + body[e + 1:]
+            body = re.sub(r"(?<!define )(?<!PM\()\b%s\b(?!_a|\s*\[| \(\()" % name, name + "_a", body)
     if stacked:
         m = re.search(r"^(\w[\w \*]*?)\s*\n?(FUN_[0-9a-f]{8})\(([^)]*)\)\s*\n\{", body, re.M)
         ret, fn, params = m.group(1).strip(), m.group(2), m.group(3)
@@ -233,6 +250,14 @@ def pad(t):
     out.append(t[i:])
     return "".join(out)
 texts = {e: pad(t) for e, t in texts.items()}
+# `x = FUN()` of a routine that gives nothing back (the caller was read as taking whatever
+# was left in the registers): the call alone
+voids = set()
+for e, t in texts.items():
+    for m in re.finditer(r"^static void (FUN_[0-9a-f]{8})\(", t, re.M): voids.add(m.group(1))
+def unvoid(t):
+    return re.sub(r"\b(\w+) = (FUN_[0-9a-f]{8})\(", lambda m: ("%s = 0; %s(" % (m.group(1), m.group(2))) if m.group(2) in voids else m.group(0), t)
+texts = {e: unvoid(t) for e, t in texts.items()}
 
 def proto(body):
     m = None

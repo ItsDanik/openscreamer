@@ -122,8 +122,10 @@ int s2_dtr(const char *file, const char *section, uint32_t dest, int stride, int
    libraries and files, text made with sprintf, and sound */
 #define HOOK_204af
 #define FUN_000204af(...) 0          /* a wheel's smoke */
+#if 0
 #define HOOK_22d35
-#define FUN_00022d35(...) 0          /* cars against cars: after the solver */
+#define FUN_00022d35(...) 0
+#endif
 #define HOOK_2da06
 #define FUN_0002da06(...) 0
 #define HOOK_31b00
@@ -163,8 +165,10 @@ int s2_dtr(const char *file, const char *section, uint32_t dest, int stride, int
 #define HOOK_b04a8
 
 /* THE SOLVER OF TOUCHING CARS (0x245a3) is not carried over yet: "the whole step can be done" */
+#if 0
 #define HOOK_245a3
 #define FUN_000245a3(...) 2.0
+#endif
 
 /* 0x10d9e: the angle of a vector (x, y), 0 .. 2 pi */
 #define HOOK_10d9e

@@ -8525,7 +8525,7 @@ static int session(int argc, char **argv)
                 printf("frame %d\n", f); s2_peek(0, from, n);
             }
             s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
-            s2_frame(0.02f);
+            s2_frame(getenv("OS_S2STEP") ? (float)atof(getenv("OS_S2STEP")) : 0.02f);
         }
         return 0;
     }

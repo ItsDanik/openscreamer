@@ -47,12 +47,35 @@ public class DecompRange extends GhidraScript {
                             java.util.Iterator<ghidra.program.model.pcode.HighSymbol> ls = r.getHighFunction().getLocalSymbolMap().getSymbols();
                             while (ls.hasNext()) {
                                 ghidra.program.model.pcode.HighSymbol hs = ls.next();
-                                if (hs.isParameter() || !(hs.getDataType() instanceof Pointer)) continue;
-                                if (hs.getDataType().getLength() != 4) continue;
-                                try {
-                                    HighFunctionDBUtil.updateDBVariable(hs, null, IntegerDataType.dataType, SourceType.USER_DEFINED);
-                                    any = true;
-                                } catch (Exception e) { }
+                                if (hs.isParameter() || hs.getDataType().getLength() != 4) continue;
+                                if (hs.getDataType() instanceof Pointer) {
+                                    try {
+                                        HighFunctionDBUtil.updateDBVariable(hs, null, IntegerDataType.dataType, SourceType.USER_DEFINED);
+                                        any = true;
+                                    } catch (Exception e) { }
+                                    continue;
+                                }
+                                /* a 4-byte local the decompiler leaves untyped (undefined4) that is
+                                   written or read by floating-point operations IS a float: left
+                                   untyped, `local = 1.0 - x` reads in C as a conversion to a whole
+                                   number */
+                                if (!hs.getDataType().getName().equals("undefined4") || hs.getHighVariable() == null) continue;
+                                boolean fl = false;
+                                for (ghidra.program.model.pcode.Varnode vn : hs.getHighVariable().getInstances()) {
+                                    ghidra.program.model.pcode.PcodeOp d = vn.getDef();
+                                    if (d != null && d.getMnemonic().startsWith("FLOAT_") || d != null && d.getMnemonic().equals("INT2FLOAT")) fl = true;
+                                    java.util.Iterator<ghidra.program.model.pcode.PcodeOp> us = vn.getDescendants();
+                                    while (us != null && us.hasNext()) {
+                                        String mn = us.next().getMnemonic();
+                                        if (mn.startsWith("FLOAT_") || mn.equals("FLOAT2FLOAT") || mn.equals("TRUNC")) fl = true;
+                                    }
+                                }
+                                if (fl) {
+                                    try {
+                                        HighFunctionDBUtil.updateDBVariable(hs, null, ghidra.program.model.data.FloatDataType.dataType, SourceType.USER_DEFINED);
+                                        any = true;
+                                    } catch (Exception e) { }
+                                }
                             }
                             if (!any) break;
                             r = di.decompileFunction(f, 120, monitor);
