@@ -357,6 +357,35 @@ About 5,000 lines of decompiled text for the car alone. The plan for it: transla
 by routine into the port keeping the record's layout (word numbers as in the game), then
 name things — not a rewrite from understanding, which is how feel gets lost.
 
+## S2-5g. Carrying the car's routines over: the converter — 2026-10-13
+
+- `tools/DecompRange.java` / `DecompTo.java` now (a) retype every POINTER parameter as a
+  plain int before decompiling — with a pointer the text reads `(float)p[0x135]`, which does
+  not say whether a float is read or an int converted; as an int it is `*(float *)(p +
+  0x4d4)` / `*(int *)(p + 0x50)` — and (b) write a `// GLOBAL name @addr size type` line for
+  every global a function uses (the decompiler's own types).
+- **`tools/s2c.py <out.c> <roots> [--hook …] [--fix file]`** turns routines into C the port
+  compiles: names stay addresses, memory is one block standing for the data object
+  (`port/src/s2_mem.h`: `MP(address)`, the decompiler's type words, `ROUND` = cut off),
+  constants become numbers, everything from `0x4a000` up (engine, libraries) and anything
+  named with `--hook` is left as a call for the port to answer. From the three per-car
+  routines (`0x1b36f`, `0x16824`, `0x1b92b`) it takes 25 routines, 3,550 lines; what is left
+  to settle by hand is one family, below, and the routines it lists as having stack /
+  register artefacts (a float argument on the stack is dropped by the decompiler: `0x19810`,
+  `0x14dc0`, `0x10388` … — read the pushes).
+- **The ground under a wheel** (`0x28f96`, for each of the four points at car `+0x514 + 12·i`):
+  x, y into `0x11cdcc` / `0x11cdd4`, then `0x28ce6(0)`: the 3 × 3 cells round the point
+  (`(x + 0x100000) >> 13`; offsets from the table at `0x112e84`, 12 bytes an entry) and in
+  each `0x28db7`: every record of the cell's first run, the object's bound circle, then
+  `0x4c24c` (`0x4c474` when the argument is 1) up to five times with the point moved by 4 —
+  Screamer 1's test again. Results in variables kept in the CODE object: `0x4cb98` the
+  height, `0x4cba0` / `a4` / `a8` the normal (turned back by the record's heading),
+  `0x4cbec` the road kind (to wheel `+0x5C`). With three wheels found the fourth's height is
+  put on their plane; with fewer, the missing take the mean.
+  For the port this family (`0x28ce6` down) is a hook answered from its own scene.
+- The wheels are 0x70-byte records at car `+0x574`; `+0x08` on the ground, `+0x44` height,
+  `+0x5C` road kind, `+0x64..+0x6C` normal.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).
