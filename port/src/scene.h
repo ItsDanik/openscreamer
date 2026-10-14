@@ -109,6 +109,8 @@ typedef struct {
     const mesh *m;
     const car_pose *pose;   /* NULL for everything that is not a car */
     float zbias;            /* 0, or how much nearer to count it in the depth test (shadows) */
+    int   over;             /* the road it stands in does not hide it (the game draws objects whole,
+                               back to front: Screamer 2's cones have their middle at the ground) */
     int   sprite;           /* record +0x04 bit 0x8000 (0x118a4 sets it on the smoke puffs): the
                                engine builds this object's turn from its angles LESS the
                                camera's (0x8abc7 -> 0x8b26c -> 0x4bca0), so it keeps facing

@@ -15,6 +15,7 @@ int  s2_dtr(const char *file, const char *section, uint32_t dest, int stride, in
    the player's.  0 if the game's files will not have it. */
 extern int s2_level;                         /* 0 pro, 1 normal, 2 rookie; before s2_race_start */
 int  s2_race_start(int track, int condition, int ncars, const int *team, const int *model);
+void s2_sound_start(int track);            /* the samples of a race read and the mixer started: before s2_race_start */
 void s2_controls(int accelerate, int brake, int left, int right, int gear_up, int gear_down);
 void s2_go(void);                            /* the start: before it the cars are held */
 void s2_frame(float step);
@@ -72,6 +73,12 @@ void s2_put(int i, int x, int y, float heading);
 void s2_throw(int i, int height, float speed, float step);
 void s2_dump(const char *path);
 void s2_robot(int on);
+typedef struct { int kind, car, x, height, y, phase, carried; } s2_puff;     /* (carried: x, height, y are from the car's place) */
+int  s2_puffs(s2_puff *out, int max);
+typedef struct { int id, kind; float x, height, y, angle[3]; } s2_spark;          /* (id: which of the game's sixty records) */
+int  s2_sparks(s2_spark *out, int max);
+typedef struct { int id; const char *name; float x, height, y, angle[3]; int flying; } s2_obstacle;
+int  s2_obstacles(s2_obstacle *out, int max);
 int  s2_laps_done(int i);
 int  s2_touched(void);
 void s2_state(void);

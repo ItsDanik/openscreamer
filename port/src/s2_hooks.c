@@ -23,6 +23,7 @@
 #include "s2_mem.h"
 #include "s2_port.h"
 #include "port.h"
+#include "sound.h"
 
 #ifdef S2_CONVERTED
 uint8_t  s2_mem[S2_SIZE];
@@ -151,13 +152,146 @@ int s2_dtr(const char *file, const char *section, uint32_t dest, int stride, int
 #ifdef S2_CONVERTED
 /* nothing to do in the port (yet): the engine's lists of what is drawn, its material
    libraries and files, text made with sprintf, and sound */
-#define HOOK_204af
-#define FUN_000204af(...) 0          /* a wheel's smoke */
 #if 0
 #define HOOK_22d35
 #define FUN_00022d35(...) 0
 #endif
 #endif
+/*
+ * SOUND.  The game's race routines call six routines of its sound manager (0xae..0xaf..,
+ * over HMI's digital driver); here they drive the port's mixer.  The manager has 64 "slots"
+ * (the engine of car n, its tyres, a crash ...): a slot plays one sample at a time.
+ *   0xaea54(m, sample, slot, rate, volume, replace)  start the sample in the slot (rate 0 =
+ *            its own; volume 0 = its own, 1 = silent; `replace`: if the slot is playing
+ *            this very sample, stop that first)
+ *   0xaebf0(m, sample, slot, rate, volume)  the same, unless the slot is already playing
+ *            this sample (what keeps a looping sound going); another sample is stopped
+ *   0xaee18(m, slot, volume)   0xaee98(m, slot) stop   0xaf45c(m) forget the distances
+ *   0xaf168(m, record)  a sound somewhere on the track, heard from the listener: record =
+ *            slot, source x, y, the listener's heading, listener x, y, how far it carries
+ *            (whole numbers), and a pitch (float).  With d the distance: beyond the range
+ *            silent; within it  rate = the sample's x pitch^2, + rate x (last d - d) /
+ *            range x 5 (it rises as it comes nearer);  volume = the sample's x ((range -
+ *            d) / range)^2;  pan = 32768 - 32767 x cos((1 - across / range) x 1.87), across
+ *            = the source's place along the listener's (cos, sin) of its heading.
+ * Samples: SOUND/GAME.DTR (numbers 0 .. 0x20: engines M_*, skids, hits, crashes, tyres,
+ * turbos T_*) and AMBIENT<track - 1>.DTR (0x40 ..): name, number, loop length, loop count
+ * (-1 = round and round), volume (of 0x7fff); then rate, bits, channels, format.
+ */
+#define S2_SAMPLES 128
+#define S2_SLOTS 64
+static struct { int id, rate, volume, loops; } s2_sample[S2_SAMPLES];
+static struct { int handle, sample; float last; } s2_slot[S2_SLOTS];
+static int s2_sound_on;
+/* (how loud the whole of it is against the mixer's scale, which was set for Screamer's
+   samples: four engines and a skid at once clipped at 1.  The port's own; OS_S2SNDGAIN) */
+static float s2_sound_gain = 0.5f;
+
+static void s2_sound_table(const char *file)
+{
+    FILE *f = os_fopen(file, "rb");
+    char line[256], name[32];
+    int in = 0, at = -1;
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        unsigned num = 0; int rate = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!in) { if (!strncmp(p, "SOUND_DATA", 10)) in = 1; continue; }
+        if (!strncmp(p, "END_LIST", 8)) break;
+        if (*p == 's' && sscanf(p, "s%31s x%x", name, &num) == 2) {
+            /* (the numbers after the name: number, loop length, loop count, volume) */
+            const char *q = strrchr(p, 'x');
+            const unsigned vol = q ? (unsigned)strtoul(q + 1, NULL, 16) : 0x7fffu;
+            at = num < S2_SAMPLES ? (int)num : -1;
+            if (at < 0) continue;
+            { char *dot = strrchr(name, '.'); if (dot) *dot = 0; }        /* (the mixer adds .RAW) */
+            s2_sample[at].loops = strstr(p, "x-1") != NULL;
+            s2_sample[at].volume = (int)(vol && vol <= 0x7fff ? vol : 0x7fff);
+            s2_sample[at].rate = 11025;
+            s2_sample[at].id = snd_add(name, 1.0f, s2_sample[at].loops ? -1 : 0, 0, 0);   /* (the mixer's count: -1 = for ever) */
+        } else if (*p == 'd' && at >= 0 && sscanf(p, "d%d", &rate) == 1) { if (rate > 0) s2_sample[at].rate = rate; at = -1; }
+    }
+    fclose(f);
+}
+
+/* the samples of a race on `track`, the mixer started (main.c says when) */
+void s2_sound_start(int track)
+{
+    char file[96];
+    for (int i = 0; i < S2_SAMPLES; i++) s2_sample[i].id = -1;
+    for (int i = 0; i < S2_SLOTS; i++) { s2_slot[i].handle = -1; s2_slot[i].sample = -1; s2_slot[i].last = -1.0f; }
+    snd_init("build/dec/SOUND", "build/dec/SOUND/none");
+    s2_sound_table("build/dec/SOUND/GAME.DTR");
+    snprintf(file, sizeof file, "build/dec/SOUND/AMBIENT%d.DTR", track - 1);
+    s2_sound_table(file);
+    s2_sound_on = !getenv("OS_NOSOUND");
+    if (getenv("OS_S2SNDGAIN")) s2_sound_gain = (float)atof(getenv("OS_S2SNDGAIN"));
+}
+
+static int s2_slot_live(int slot) { return slot >= 0 && slot < S2_SLOTS && s2_slot[slot].handle >= 0 && snd_playing(s2_slot[slot].handle); }
+static void s2_slot_rate(int slot, int rate) { if (s2_slot_live(slot)) snd_pitch(s2_slot[slot].handle, (int)((double)rate * 65536.0 / 11025.0)); }
+static void s2_slot_volume(int slot, int volume) { if (s2_slot_live(slot)) snd_volume(s2_slot[slot].handle, s2_sound_gain * (float)(volume < 0 ? 0 : volume > 0x7fff ? 0x7fff : volume) / 32767.0f); }
+
+static int FUN_000aea54(uint32_t m, int sample, int slot, int rate, int volume, int replace)
+{
+    (void)m;
+    if (!s2_sound_on || slot < 0 || slot >= S2_SLOTS || sample < 0 || sample >= S2_SAMPLES || s2_sample[sample].id < 0) return 0;
+    if (getenv("OS_SNDLOG")) printf("sound: slot %d starts sample 0x%x rate %d volume %d\n", slot, sample, rate, volume);
+    if (replace && s2_slot_live(slot) && s2_slot[slot].sample == sample) snd_stop(s2_slot[slot].handle);
+    s2_slot[slot].handle = snd_play(s2_sample[sample].id);
+    s2_slot[slot].sample = sample;
+    s2_slot[slot].last = -1.0f;
+    s2_slot_rate(slot, rate ? rate : s2_sample[sample].rate);
+    s2_slot_volume(slot, volume == 1 ? 0 : volume ? volume : s2_sample[sample].volume);
+    return 0;
+}
+static int FUN_000aebf0(uint32_t m, int sample, int slot, int rate, int volume)
+{
+    if (!s2_sound_on || slot < 0 || slot >= S2_SLOTS) return 0;
+    if (s2_slot_live(slot)) {
+        if (s2_slot[slot].sample == sample) return 0;
+        snd_stop(s2_slot[slot].handle); s2_slot[slot].handle = -1;
+    }
+    return FUN_000aea54(m, sample, slot, rate, volume, 1);
+}
+static int FUN_000aee18(uint32_t m, int slot, int volume) { (void)m; s2_slot_volume(slot, (int16_t)volume); return 0; }
+static int FUN_000aee98(uint32_t m, int slot)
+{
+    (void)m;
+    if (slot >= 0 && slot < S2_SLOTS && s2_slot[slot].handle >= 0) { snd_stop(s2_slot[slot].handle); s2_slot[slot].handle = -1; }
+    return 0;
+}
+static int FUN_000af45c(uint32_t m) { (void)m; for (int i = 0; i < S2_SLOTS; i++) s2_slot[i].last = -1.0f; return 0; }
+static int FUN_000af168(uint32_t m, uint32_t rec)
+{
+    (void)m;
+    const int slot = I32(rec);
+    if (!s2_sound_on || !s2_slot_live(slot)) return 0;
+    const int sample = s2_slot[slot].sample;
+    const double dx = (double)(I32(rec + 0x10) - I32(rec + 4)), dy = (double)(I32(rec + 0x14) - I32(rec + 8));
+    const float d = (float)sqrt(dx * dx + dy * dy);
+    const int range = I32(rec + 0x18);
+    int rate = 11025, volume = 0, pan = 0x8000;
+    if (s2_slot[slot].last == -1.0f) s2_slot[slot].last = d;
+    if ((float)range > d) {
+        const double pitch = (double)F32(rec + 0x1c);
+        const int own = (int)((double)s2_sample[sample].rate * (pitch * pitch));
+        rate = (int)((double)own + (double)own * (double)((s2_slot[slot].last - d) / (float)range) * 5.0);
+        const double near_ = ((double)range - (double)d) / (double)range;
+        volume = (int)((double)s2_sample[sample].volume * (near_ * near_));
+        const float c = (float)cos((double)F32(rec + 0xc)), sn = (float)sin((double)F32(rec + 0xc));
+        const float across = (float)(I32(rec + 8) - I32(rec + 0x14)) * sn + (float)(I32(rec + 4) - I32(rec + 0x10)) * c;
+        pan = (int)(32768.0 - cos((1.0 - (double)across / (double)range) * 1.87) * 32767.0);
+    }
+    if (getenv("OS_SNDLOG")) { static int n_; if (n_++ % 71 == 0) printf("sound: slot %d (sample 0x%x) heard at distance %.0f of %d, pitch %.3f -> rate %d volume %d pan %d\n", slot, sample, (double)d, range, (double)F32(rec + 0x1c), rate, volume, pan); }
+    s2_slot_rate(slot, rate);
+    s2_slot_volume(slot, volume);
+    if (s2_slot_live(slot)) snd_pan(s2_slot[slot].handle, (float)(pan - 32768) / 32768.0f);
+    s2_slot[slot].last = d;
+    return 0;
+}
+
 /* 0x37e06: a time as text, "%02d:%02d:%02d" of minutes, seconds, hundredths (each cut off),
    or "--:--:--" for 3599.999 (no time yet).  Its sprintf's arguments are on the stack. */
 #define HOOK_37e06
@@ -177,7 +311,6 @@ static int FUN_00037e06(uint32_t to, uint32_t r1, uint32_t r2, uint32_t r3, floa
 #define HOOK_4f6c4
 #define FUN_0004f6c4(...) 0          /* the picture's size and eye line (320, 200 rows, 65 % down) */
 #define HOOK_af45c
-#define FUN_000af45c(...) 0
 #define HOOK_31b00
 #define FUN_00031b00(...) 0          /* the network */
 #define HOOK_31c8c
@@ -193,21 +326,16 @@ static int FUN_00037e06(uint32_t to, uint32_t r1, uint32_t r2, uint32_t r3, floa
 #define HOOK_4c01c
 #define FUN_0004c01c(...) 0
 #define HOOK_4c0cf
-#define FUN_0004c0cf(...) 0
+#define HOOK_4c15f
 #define HOOK_4eaed
 #define FUN_0004eaed(...) 0
 #define HOOK_4feb4
 #define FUN_0004feb4(...) 0
 #define HOOK_aea54
-#define FUN_000aea54(...) 0
 #define HOOK_aebf0
-#define FUN_000aebf0(...) 0
 #define HOOK_aee18
-#define FUN_000aee18(...) 0
 #define HOOK_aee98
-#define FUN_000aee98(...) 0
 #define HOOK_af168
-#define FUN_000af168(...) 0
 #define HOOK_4ea98
 #define FUN_0004ea98(...) 0          /* (arc cosine: its calls are rewritten, tools/s2c_fix.txt) */
 #define HOOK_afed2
@@ -341,7 +469,7 @@ static uint64_t s2_nearest(int walls)
  * 0x20 bytes each with the block's place in the object at +0x14 (0x4f9e2).  0x4bc94 gives
  * a car's model its number, 0x4bc03 finds a block of it by name.
  */
-#define S2_OBJECTS 16
+#define S2_OBJECTS 200            /* (the engine's own list holds 200: 0x4bd1b) */
 #define S2_BLOCKS  16
 static struct { int nblock; char name[S2_BLOCKS][16]; } s2_object[S2_OBJECTS];
 static int s2_nobject;
@@ -374,15 +502,43 @@ static int s2_object_load(const char *file)
 #define HOOK_4b843                     /* an object by its file's name: the shadow -- none yet */
 static int FUN_0004b843(uint32_t list, uint32_t name, uint32_t to)
 {
-    (void)list; (void)name;
+    (void)list;
     if (s2_nobject >= S2_OBJECTS) return 3;
     const int k = s2_nobject++;
     const uint32_t object = s2_alloc(0x40 + 0x20);
     U32(0x11da20 + (uint32_t)k * 0x1c) = object;
     U32(0x11da24 + (uint32_t)k * 0x1c) = object + 0x40;
+    I32(0x11da28 + (uint32_t)k * 0x1c) = 1;               /* (it has frames: what 0x4c0cf / 0x4c15f ask) */
     s2_object[k].nblock = 0;
+    snprintf(s2_object[k].name[0], sizeof s2_object[k].name[0], "%.15s", (const char *)MP(name));
     I32(to) = k;
     return 0;
+}
+
+/*
+ * AN OBJECT'S ANIMATION (the smoke's): the object's record +0x20 is how far through it is,
+ * 0 .. 65535.  0x4c15f(list, record, .., .., part) sets it; 0x4c0cf(list, record, .., ..,
+ * step) moves it on by step x 65535 and gives -1 when it has run out (and takes one whole
+ * run off), 0 otherwise, 0x11 for an object without frames.
+ */
+static int FUN_0004c15f(uint32_t list, uint32_t rec, uint32_t r2, uint32_t r3, float part)
+{
+    (void)r2; (void)r3;
+    const uint32_t k = U32(rec);
+    if (!I32(list + k * 0x1c + 0x14)) return 0x11;
+    I32(U32(list + k * 0x1c + 0xc) + 0x20) = (int32_t)(part * 65535.0f);
+    return 0;
+}
+static int FUN_0004c0cf(uint32_t list, uint32_t rec, uint32_t r2, uint32_t r3, float step)
+{
+    (void)r2; (void)r3;
+    const uint32_t k = U32(rec);
+    if (!I32(list + k * 0x1c + 0x14)) return 0x11;
+    const uint32_t at = U32(list + k * 0x1c + 0xc) + 0x20;
+    I32(at) = (int32_t)(float)(step * 65535.0f + (float)I32(at));
+    if (I32(at) < 0x10000) return 0;
+    I32(at) -= 0x10000;
+    return -1;
 }
 
 #define HOOK_4bc94                     /* the car's model: AUTO<model> of CARS<team><condition & 1>1 */
@@ -434,6 +590,14 @@ static int h_28ce6(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_00028ce6((int)c->r[
 static int h_2a371(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)s2_nearest((int)c->r[S2_EAX]); return 1; }
 static int h_4b843(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004b843(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
 static int h_4bc94(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004bc94(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
+static int h_4c15f(s2_cpu *c) { const uint32_t w = s2_arg(c, 0); float v; memcpy(&v, &w, 4); c->r[S2_EAX] = (uint32_t)FUN_0004c15f(c->r[S2_EAX], c->r[S2_EDX], 0, 0, v); return 1; }
+static int h_4c0cf(s2_cpu *c) { const uint32_t w = s2_arg(c, 0); float v; memcpy(&v, &w, 4); c->r[S2_EAX] = (uint32_t)FUN_0004c0cf(c->r[S2_EAX], c->r[S2_EDX], 0, 0, v); return 1; }
+static int h_aea54(s2_cpu *c) { FUN_000aea54(c->r[S2_EAX], (int)c->r[S2_EDX], (int)c->r[S2_EBX], (int)c->r[S2_ECX], (int)s2_arg(c, 0), (int)s2_arg(c, 1)); c->r[S2_EAX] = 0; return 1; }
+static int h_aebf0(s2_cpu *c) { FUN_000aebf0(c->r[S2_EAX], (int)c->r[S2_EDX], (int)c->r[S2_EBX], (int)c->r[S2_ECX], (int)s2_arg(c, 0)); c->r[S2_EAX] = 0; return 1; }
+static int h_aee18(s2_cpu *c) { FUN_000aee18(c->r[S2_EAX], (int)c->r[S2_EDX], (int)c->r[S2_EBX]); c->r[S2_EAX] = 0; return 1; }
+static int h_aee98(s2_cpu *c) { FUN_000aee98(c->r[S2_EAX], (int)c->r[S2_EDX]); c->r[S2_EAX] = 0; return 1; }
+static int h_af168(s2_cpu *c) { FUN_000af168(c->r[S2_EAX], c->r[S2_EDX]); c->r[S2_EAX] = 0; return 1; }
+static int h_af45c(s2_cpu *c) { FUN_000af45c(c->r[S2_EAX]); c->r[S2_EAX] = 0; return 1; }
 static int h_4bc03(s2_cpu *c) { c->r[S2_EAX] = (uint32_t)FUN_0004bc03(c->r[S2_EAX], c->r[S2_EDX], c->r[S2_EBX]); return 1; }
 /* the arc cosine (its number comes and goes on the 387's stack): out of range it is taken
    as 0 -- what the program's own error routine (0xbb541) makes of it is not read; in range
@@ -443,9 +607,9 @@ static int h_4ea98(s2_cpu *c) { const double x = s2_st0(); (void)c; if (x * x <=
 static void s2_hooks_set(void)
 {
     static const struct { uint32_t at; int pop; } nothing[] = {
-        { 0x204af, 0 }, { 0x132b4, 0 }, { 0x4f6c4, 0 }, { 0xaf45c, 0 }, { 0x31b00, 0 }, { 0x31c8c, 0 }, { 0x4a455, 0 },
-        { 0x4b49f, 0 }, { 0x4b4d4, 0 }, { 0x4bfbe, 0 }, { 0x4c01c, 0 }, { 0x4c0cf, 4 }, { 0x4eaed, 0 }, { 0x4feb4, 0 },
-        { 0xaea54, 8 }, { 0xaebf0, 4 }, { 0xaee18, 0 }, { 0xaee98, 0 }, { 0xaf168, 0 }, { 0xb04a8, 0 },
+        { 0x132b4, 0 }, { 0x4f6c4, 0 }, { 0x31b00, 0 }, { 0x31c8c, 0 }, { 0x4a455, 0 },
+        { 0x4b49f, 0 }, { 0x4b4d4, 0 }, { 0x4bfbe, 0 }, { 0x4c01c, 0 }, { 0x4eaed, 0 }, { 0x4feb4, 0 },
+        { 0xb04a8, 0 },
     };
     s2_hooks_clear();
     for (unsigned k = 0; k < sizeof nothing / sizeof nothing[0]; k++) s2_hook(nothing[k].at, nothing[k].pop, h_nothing);
@@ -455,6 +619,9 @@ static void s2_hooks_set(void)
     s2_hook(0x28ce6, 0, h_28ce6); s2_hook(0x2a371, 0, h_2a371);
     s2_hook(0x4b843, 0, h_4b843); s2_hook(0x4bc94, 0, h_4bc94); s2_hook(0x4bc03, 0, h_4bc03);
     s2_hook(0x4ea98, 0, h_4ea98);
+    s2_hook(0x4c15f, 4, h_4c15f); s2_hook(0x4c0cf, 4, h_4c0cf);
+    s2_hook(0xaea54, 8, h_aea54); s2_hook(0xaebf0, 4, h_aebf0); s2_hook(0xaee18, 0, h_aee18);
+    s2_hook(0xaee98, 0, h_aee98); s2_hook(0xaf168, 0, h_af168); s2_hook(0xaf45c, 0, h_af45c);
 }
 #define FUN_000309b0(a)          ((void)s2_call(0x309b0, (uint32_t)(a), 0, 0, 0, 0, NULL))
 #define FUN_0004b016()           ((void)s2_call(0x4b016, 0, 0, 0, 0, 0, NULL))
@@ -462,6 +629,10 @@ static void s2_hooks_set(void)
 #define FUN_00012d31(a, b)       ((void)s2_call(0x12d31, (uint32_t)(a), (uint32_t)(b), 0, 0, 0, NULL))
 #define FUN_0001d9fc(a)          ((void)s2_call(0x1d9fc, (uint32_t)(a), 0, 0, 0, 0, NULL))
 #define FUN_0002baa4()           ((void)s2_call(0x2baa4, 0, 0, 0, 0, 0, NULL))
+#define FUN_0002cc74()           ((void)s2_call(0x2cc74, 0, 0, 0, 0, 0, NULL))
+#define FUN_0002c475()           ((void)s2_call(0x2c475, 0, 0, 0, 0, 0, NULL))
+#define FUN_0002a639(a)          ((void)s2_call(0x2a639, (uint32_t)(a), 0, 0, 0, 0, NULL))
+#define FUN_00030b29(a, b)       ((int)s2_call(0x30b29, (uint32_t)(a), (uint32_t)(b), 0, 0, 0, NULL))
 #define FUN_00012dff(a, b)       ((void)s2_call(0x12dff, (uint32_t)(a), (uint32_t)(b), 0, 0, 0, NULL))
 static void s2_gen_tables(void) { }
 #undef S2_FPU_IN
@@ -598,6 +769,47 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
         S2_FPU_OUT;
         if (bad) return 0;
     }
+    /* the smoke's objects (0x2ef4e, at the top detail): for every car eight "asmoke" (car
+       +0x228, 0x28 bytes each) and eight "a2smoke" (+0x368) -- the puffs of 0x204af */
+    if (I32(0x130c54) == 2) {
+        s2_str(S2_TMP + 0x100, "asmoke"); s2_str(S2_TMP + 0x110, "a2smoke");
+        for (int i = 0; i < ncars; i++)
+            for (uint32_t k = 0; k < 8; k++) {
+                FUN_0004b843(0x11da14, S2_TMP + 0x100, CAR(i) + 0x228 + k * 0x28);
+                FUN_0004b843(0x11da14, S2_TMP + 0x110, CAR(i) + 0x368 + k * 0x28);
+            }
+    }
+    /* the sparks' objects (0x30db4): sixty records of 0x3c bytes from 0x125dd4, the object at
+       +0x28 -- thirty "aztri" (cars touching, 0x245a3 -> 0x2aeb9) and thirty "az1tri" */
+    s2_str(S2_TMP + 0x120, "aztri"); s2_str(S2_TMP + 0x130, "az1tri");
+    for (uint32_t k = 0; k < 60; k++) {
+        if (FUN_0004b843(0x11da14, S2_TMP + (k < 30 ? 0x120u : 0x130u), 0x125dfc + k * 0x3c)) { I32(0x125e08 + k * 0x3c) = 0; I32(0x125e04 + k * 0x3c) = 0; }
+    }
+    /* THE OBSTACLES (0x30a4e, 0x30b29): the names of MAPnDAT.DTR's OSTACLES (rows of three, 12
+       bytes each, at 0x126be4; how many rows: 0x124660) and, if there are any, the places of
+       MAPnOST.SPL (0x124658: its entry; 0x12465c set) -- a node's +4, +8 the place and +0xc
+       which row.  0x30b29 makes a record of each (0x3c bytes from 0x124664, as a spark's)
+       and stands it on the ground along the road. */
+    {
+        int32_t hdr[2];
+        FILE *f;
+        snprintf(file, sizeof file, "build/dec/MAP%d/MAP%dDAT.DTR", track, track);
+        I32(0x124660) = s2_dtr(file, "OSTACLES", 0x126be4, 0x24, 0x24);
+        I32(0x12465c) = 0; U32(0x124658) = 0; I32(0x126d4c) = 0;
+        snprintf(file, sizeof file, "build/dec/MAP%d/MAP%dOST.SPL", track, track);
+        f = I32(0x124660) > 0 && !getenv("OS_NOPROPS") ? os_fopen(file, "rb") : NULL;
+        if (f && fread(hdr, 4, 2, f) == 2 && hdr[0] > 0 && hdr[0] <= 64) {
+            const uint32_t entry = s2_alloc(0x24), nodes = s2_alloc((uint32_t)hdr[0] * 0x38);
+            if (entry && nodes && fread(MP(nodes), 0x38, (size_t)hdr[0], f) == (size_t)hdr[0]) {
+                U32(entry) = nodes; I32(entry + 0x1c) = hdr[0]; I32(entry + 0x20) = hdr[1];
+                U32(0x124658) = entry; I32(0x12465c) = 1;
+            }
+        }
+        if (f) fclose(f);
+        S2_FPU_IN;
+        if (FUN_00030b29(1, 0)) { fprintf(stderr, "screamer 2: the obstacles could not all be made\n"); I32(0x126d4c) = 0; }
+        S2_FPU_OUT;
+    }
     /* the trackside cameras (0x14d00): CAMERASn.MCM is their number, then 0x20 bytes each --
        place, three angles, the kind 0..4 (+0x18) and a figure for it (+0x1c) -- to the
        camera record's +0xa60 and +0x60 (80 at most) */
@@ -704,6 +916,63 @@ void s2_robot(int on)
     if (on && U32(CAR(0) + 0xb4)) { kept = U32(CAR(0) + 0xb4); U32(CAR(0) + 0xb4) = 0; }
     else if (!on && kept) { U32(CAR(0) + 0xb4) = kept; kept = 0; }
 }
+/* the smoke: every puff that is on -- which of the two (1 asmoke, 2 a2smoke: by the road's
+   kind), where the engine has it (the object's place, 0x2073c) and how far through, 0 .. 65535 */
+int s2_puffs(s2_puff *out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < I32(0x130c48); i++)
+        for (uint32_t k = 0; k < 16 && n < max; k++) {
+            const uint32_t rec = CAR(i) + 0x228 + k * 0x28;
+            if (!I32(rec + 8)) continue;
+            const uint32_t o = U32(0x11da20 + U32(rec) * 0x1c);
+            out[n].kind = k < 8 ? 1 : 2;
+            out[n].car = i;
+            out[n].x = I32(o + 8); out[n].height = I32(o + 0xc); out[n].y = I32(o + 0x10);
+            out[n].phase = I32(o + 0x20);
+            /* a puff of the car the chase view follows is carried with the car (0x2073c: its
+               place is the car's + the record's +0xc..0x14, turned with the car) */
+            out[n].carried = I32(CAMERA + 0xae4) == 3 && i == I32(U32(CAMERA + 0xadc));
+            if (out[n].carried) { out[n].x = I32(rec + 0xc); out[n].height = I32(rec + 0x10); out[n].y = I32(rec + 0x14); }
+            n++;
+        }
+    return n;
+}
+/* the sparks that are flying (0x2cc74): where, how turned (three angles), which of the two */
+int s2_sparks(s2_spark *out, int max)
+{
+    int n = 0;
+    for (uint32_t k = 0; k < 60 && n < max; k++) {
+        const uint32_t b = 0x125dd4 + k * 0x3c;
+        if (!I32(b + 0x30)) continue;
+        if (getenv("OS_S2SPARKLOG")) printf("  spark %u: at %.0f %.0f %.0f going %.0f %.0f %.0f, left %.2f s, object %d, flags %d %d\n", k, (double)F32(b), (double)F32(b + 4), (double)F32(b + 8), (double)F32(b + 0x18), (double)F32(b + 0x1c), (double)F32(b + 0x20), (double)F32(b + 0x24), I32(b + 0x28), I32(b + 0x30), I32(b + 0x34));   /* a test */
+        out[n].id = (int)k;
+        out[n].kind = k < 30 ? 0 : 1;
+        out[n].x = F32(b); out[n].height = F32(b + 4); out[n].y = F32(b + 8);
+        for (uint32_t j = 0; j < 3; j++) out[n].angle[j] = F32(b + 0xc + 4 * j);
+        n++;
+    }
+    return n;
+}
+/* the obstacles (0x2c475, 0x2a639): its object's name, where it is, its three angles -- as
+   0x30b29 stands one up they are (pi, the road's direction, pi) on level ground */
+int s2_obstacles(s2_obstacle *out, int max)
+{
+    int n = 0;
+    if (getenv("OS_S2SPARKLOG")) printf("  obstacles in the game's list: %d; the first: object %d shown %d flying %d at %.0f %.0f %.0f (objects made: %d)\n", I32(0x126d4c), I32(0x124664 + 0x28), I32(0x124664 + 0x30), I32(0x124664 + 0x34), (double)F32(0x124664), (double)F32(0x124668), (double)F32(0x12466c), s2_nobject);   /* a test */
+    for (uint32_t k = 0; k < (uint32_t)I32(0x126d4c) && n < max; k++) {
+        const uint32_t b = 0x124664 + k * 0x3c;
+        const int o = I32(b + 0x28);
+        if (o < 0 || o >= s2_nobject) continue;          /* (+0x30 is "to be placed again", cleared once done: 0x2c475) */
+        out[n].id = (int)k;
+        out[n].name = s2_object[o].name[0];
+        out[n].x = F32(b); out[n].height = F32(b + 4); out[n].y = F32(b + 8);
+        for (uint32_t j = 0; j < 3; j++) out[n].angle[j] = F32(b + 0xc + 4 * j);
+        out[n].flying = I32(b + 0x34);
+        n++;
+    }
+    return n;
+}
 int s2_laps_done(int i) { return I32(CAR(i) + 0x4ac); }
 
 /* a test: how many times the last frame's step was cut short because cars touched (0x11cdb4) */
@@ -776,7 +1045,16 @@ void s2_frame(float step)
 {
     S2_FPU_IN;
     F32(0x133350) = step; F32(0x133354) = s2_raw_step >= 0.0f ? s2_raw_step : step;
+    /* the frame of the game's main loop (0x2b9b1): the race, the obstacles that are flying,
+       the sparks, [the track's animations 0x2cee4: not yet], and every car near the
+       player's against the obstacles */
     FUN_0002baa4();
+    FUN_0002c475();
+    FUN_0002cc74();
+    for (int i = 0; i < I32(0x130c48); i++) {
+        const uint32_t me = CAR(I32(0x11f0d0));
+        if (fabs((double)(I32(CAR(i) + 0x4dc) - I32(me + 0x4dc))) + fabs((double)(I32(CAR(i) + 0x4d8) - I32(me + 0x4d8))) < 20000.0) FUN_0002a639((int)CAR(i));
+    }
     FUN_00012dff((int)CAMERA, 1);                         /* (0x2b873: before each picture) */
     S2_FPU_OUT;
     s2_bend();

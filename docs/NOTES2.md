@@ -1240,6 +1240,180 @@ missing); Windows build not tried with these files; the MiSTer's build compiles 
 with `-ffast-math`, which this file overrides for itself -- to be looked at when the MiSTer
 is.
 
+## S2-5zd. Smoke and sparks; the see-through table is made, not read — 2026-10-14
+
+- **The see-through table** (routine 208's, S2-5p). The program reads no `.SMG`: `0x2ee76`
+  (race set-up) calls `0x504f2(palette, asmoke r, g, b, a2smoke r, g, b)` and `0x508be`, which
+  fill the table at `[0xbf3d0]` through `0x503a1(palette, to, r, g, b, rows)` -- for each of
+  the 256 colours the palette's nearest (first of equals, sum of the three squared
+  differences, 6-bit values) to the colour moved towards (r, g, b) by `row / (rows - 1)`:
+  rows 0-31 towards `asmoke` (TRACK_DATA's rgb / 4; England 225 225 225), 32-47 towards
+  black (the shadow), 48-79 towards `a2smoke` (England 52 149 54), 80-95 brighter (× 1 +
+  row / 15, at most 63), 96-111 towards white. (With all three of asmoke negative only the
+  shadow's rows are made. There is more when `0x11374c` is set: not read.) The files'
+  `MAPn.SMG` has BLACK ramps where the smoke's rows are: with it the smoke could not show.
+  The port: `s2_blend_make()` in `main.c` (112 rows; `OS_S2SMGFILE=1` = the file as before).
+  Track 7's stand-in rows are gone with it.
+- **Smoke** (`0x204af`, from `0x1b36f` every frame for a car on the ground; only at the top
+  detail, `0x130c54 == 2`). Every 0.05 s, for the two REAR wheels: when the wheels slip
+  (`car +0xc34 < 0.93`, argument 1) or the road kind's flag 4 is set and the speed is over 20
+  -- by the kind's flags `& 3`: 1 = a puff of `asmoke` (car `+0x228`, eight records of 0x28
+  bytes), 2 = of `a2smoke` (`+0x368`). The first free record (`+8`) is switched on, its
+  animation set to 0 (`0x4c15f`) and its place taken from the wheel (`+0x18..0x20`; for the
+  car the chase view follows it is kept relative to the car and turned with it, `0x2073c`),
+  moved by the kind's "dispersion" × the low three bits of the car's place. `0x2073c` (every
+  frame) puts the object there and moves its animation on by step × 1.5 (`0x4c0cf`: the
+  object's `+0x20`, 0..65535; at the end the puff is switched off): a puff lasts 2/3 s.
+  The objects are made in `0x2ef4e` (`0x4b843` by name, sixteen a car) -- which the port did
+  not do: every puff pointed at object 0. `ASMOKE.3DX` / `A2SMOKE.3DX`: one square 588 × 568
+  that faces the screen, materials 7 and 9 of `MISC.MLB`, six frames, texels = rows of the
+  table (0-31 / 48-79). The port: `0x204af` runs (no longer hooked), `0x4c15f` / `0x4c0cf`
+  are hooks in `s2_hooks.c`, the objects are made in `s2_race_start`, `s2_puffs()` →
+  Screamer's sprite objects in `main.c`. All four cars smoke off the line:
+  `build/png/s2_smoke.png`. `OS_S2PUFFLOG`, `OS_S2PUFFTEST`, `OS_NOSMOKE`.
+- **A puff shows whole** (Danik: "the grass particles are much more visible in the DOS
+  version"). The game draws its objects back to front, each whole: a puff, whose middle is
+  at the wheel's foot, shows its lower half too, over the road in front of it and over the
+  car's tail. The port's depth test hid that half under the ground -- the thicker one.
+  Now a puff is tested as if twice as near (`zbias` 2; `OS_S2PUFFBIAS`): the road under it
+  never hides it, things well in front still do. The port's own, by necessity (depth
+  buffer). Checked against the original at the same moments of a recorded run (`s2dos.py`
+  with `Up+F4:0.3,Up:8.5`, chase view, on a 1920 x 1440 hidden screen so that the whole
+  window is caught): the white haze off the line and the green blades on England's grass
+  look alike: `build/png/s2_grass_original_vs_port.png`. That run -- off the road and along
+  the grass at 100 mph, 153 frames -- is also THE SAME as the original's for all four cars
+  in every frame: the driving on grass had not been compared before.
+- **A carried puff goes where the car is DRAWN** (Danik again: "still not as visible as in
+  the DOS"). The port draws a car between two of the game's frames; the puffs of the car the
+  chase view follows are kept relative to that car (`0x2073c`), and the port placed them from
+  the game's LAST frame -- up to a frame ahead of the car as drawn, 900 units at 100 mph: on
+  the car's tail instead of behind it, and smaller. A still picture (`--shot`) never showed
+  it, being of one frame. Now `s2_puff.carried` and the drawn car's place. What the engine
+  does with such an object (`0x7eacb`: flag 0x8000 of its `+4` -> `0x7f1a8`): `0xae8c8` gives
+  it the camera's three angles (heading + half a turn), `0x759b8` makes the matrix, which is
+  then turned inside out -- it faces the screen, as the port has it. Tried against the
+  original's picture and NOT the cause: the picture upside down, twice the size, lying
+  flat. Measured in the two pictures at 640 x 480: the same number of dust-coloured pixels
+  (1456 against 1532) of the same colours; the original's sit about 20 pixels lower.
+  `OS_S2PUFFQUAD=1` shows each square whole.
+- **Sparks** (`0x2aeb9(place, direction, .., .., speed, which)`, from `0x245a3` when cars
+  touch (which = 1: records 0-29, `AZTRI`) and from `0x29571` at a wall (records 30-59,
+  `AZ1TRI`)): `speed × 3600 / 400000 × 30 / 60` of them, at most 30, each from the place +
+  100 up with the direction × 0.9 + chance (± 1500 along and across, 1000-3000 upwards),
+  three chance angles, two seconds to live. `0x2cc74` -- called by the main loop `0x2b9b1`
+  after the race's frame, which the port now does too -- moves them: 7848 a second squared
+  downwards, the angles turned by the speed, the object placed. Sixty records of 0x3c bytes
+  from `0x125dd4`; objects from `0x30db4`. The triangles are 28 × 24 units: two or three
+  pixels at the chase view's distance. `s2_sparks()`; `OS_S2SPARKLOG`.
+- **Two more faults of the converter, found by the sparks** (the interpreter build had them
+  right, which is how they were told from the game's own doing): `place = floatvar;` into
+  a place without a type stored a whole number (rule: the float's bytes go, `S2_SETF`); and
+  `(int)(&DAT_x + n)` for a four-byte variable stepped n bytes, not n fours (two places,
+  both in `0x2aeb9`).
+- **Seen in `0x2b9b1`, the frame of the game's main loop, and NOT run by the port yet:**
+  `0x2c475` (after the race's frame; uses the ground and the walls: the obstacles of
+  `OSTACLES`, by the look of it), `0x2cee4` (the track's animations, with their sounds),
+  `0x2a639(car)` for every car within 20000 of the player's (sound). The port's moving
+  scenery in Screamer 2 is still Screamer's way.
+
+## S2-5ze. The obstacles (cones) — 2026-10-14
+
+Three of the game's routines, none of which the port ran; all three are now run as they are
+(converted, or by the interpreter) and the port only draws what they leave.
+
+- **Set-up** (`0x30a4e`, `0x30b29`). `MAPnDAT.DTR`'s `OSTACLES` = rows of three names (12 bytes
+  each) at `0x126be4`, how many rows in `0x124660`; when there are any, `MAPnOST.SPL` (`"%sost"`)
+  is the list of places (`0x124658` its entry, `0x12465c` set): a node's `+4`, `+8` the
+  place, `+0xc` which row. `0x30b29(1)` makes a record of each -- 0x3c bytes from `0x124664`,
+  how many in `0x126d4c`, laid out as a spark's (S2-5zd): place (floats: x, height, y), three
+  angles, three speeds, `+0x28` the object (`0x4b843` by the row's name), `+0x30` "to be
+  placed again", `+0x34` flying, `+0x38` -- on the ground (`0x28ce6`), turned to the road's
+  direction (`0x2a371`) and tilted to the ground's slope: level it stands at (pi, direction,
+  pi). England 23 (a line of cones down the middle of the road at one bend), track 3 48,
+  track 4 53, track 6 22; tracks 2, 5, 7 none.
+- **A car against them** (`0x2a639(car)`, from the main loop `0x2b9b1` for every car whose
+  |height difference| + |x difference| from the player's is under 20000): an obstacle within
+  200 of the car's height and 2000 of it ... is sent flying (`+0x34`, `+0x38`) with a sound
+  (`0xaea54`). Read only as far as that.
+- **Flying** (`0x2c475`, every frame): as a spark -- 7848 a second squared downwards, the
+  angles turned by the speed -- but it bounces: off the ground (0.7 of each speed, upwards
+  again; under 300 it stops and lies along the ground's slope) and off a wall (turned about
+  the wall's direction, half the speed). Then the object is placed (`+0x30` cleared: that
+  flag is NOT "shown" -- taken for it, the port hid every cone after the first frame).
+- **Drawn**: `AZCONE.3DX` (the name's first letter, `s`, is the table's mark for a name),
+  materials 4-6 of `MISC.MLB`. Its middle is at the ground (the model is 318 high, from -159
+  to +159): the game draws objects whole, back to front, and the cone shows whole; the
+  port's depth test would bury half of it, so the road does not hide an obstacle
+  (`scene_object.over`, the smoke's rule). The angles go to the port's as (first - pi) =
+  tilt, second = heading, (third - pi) = lean: right for a standing cone, not checked for a
+  tumbling one. `s2_obstacles()`; `OS_NOPROPS` leaves them out. Pictures:
+  `build/png/s2_cones.png` (standing; knocked).
+- The engine's list holds 200 objects (`0x4bd1b`); a four-car race uses 132 (4 cars, 4
+  shadows, 64 puffs, 60 sparks) + the obstacles: 185 on track 4. The port's pool of drawn
+  objects is 256 now (`MAX_OBJS`).
+- Still not run of the main loop's frame: `0x2cee4`, the track's animations and their sounds.
+
+## S2-5zf. Sound in the race — 2026-10-14
+
+The race routines were already calling the game's sound manager; the port answered with
+silence. Now the six calls drive the port's mixer (`s2_hooks.c`, "SOUND"), so what sounds, when
+and how is the game's own doing.
+
+- **The manager** (`0xae..`–`0xaf..`, an object at `[0x124274]`, over HMI's digital driver:
+  `0xd05e1` start, `0xd075f` stop, `0xd029a` rate, `0xcffb4` volume, `0xd019e` pan, `0xd040c`
+  which sample a voice plays). 64 slots, one sample at a time each:
+  `0xaea54(m, sample, slot, rate, volume, replace)` start (rate 0 = the sample's own; volume
+  0 = its own, 1 = silent); `0xaebf0(m, sample, slot, rate, volume)` the same unless the slot
+  already plays that sample; `0xaee18(m, slot, volume)`; `0xaee98(m, slot)` stop;
+  `0xaf45c(m)` forget the distances; `0xaf168(m, record)` a sound heard from a distance.
+- **`0xaf168`**, record at `0x124280`: slot; the listener's x, y (the camera's `+0x48`,
+  `+0x50`); its heading - pi; the source's x, y; the range (50000 for an engine); a pitch.
+  d = the distance (`pow` by 2, read from the machine code: the decompiler loses its
+  arguments). Beyond the range: silent. Within: rate = the sample's × pitch², + that × (last
+  d - d) / range × 5; volume = the sample's × ((range - d) / range)²; pan = 32768 - 32767 ×
+  cos((1 - across / range) × 1.87), across = the listener-to-source difference along the
+  heading's (cos, sin). (A source dead ahead comes out at pan 42435, right of the middle:
+  the game's 1.87, kept.)
+- **What the race plays:** each car's engine in the slot of its number (`0x1f756`: sample =
+  its model, or team + 4 for a model 4; + 0x19, the `T_` samples, on road kinds 7, 13, 34,
+  43 -- tunnels; pitch = revs / most revs × 2, so the rate runs from near nothing to four
+  times the sample's); the tyres in slot car + 4 (`0x1b36f`: `0x12 +` and `7 +` the road
+  kind's two numbers, volume by the slip); in slot 4 the knocks: 0xc-0xe a wall (`0x29571`),
+  0xf-0x11 car against car by how hard (`0x245a3`), 0x10 an obstacle (`0x2a639`), 0x12 a
+  landing (`0x1bef1`). The track's animations' sounds (`0x2cee4`, slots 7 up, the ambient
+  samples) are not run yet.
+- **Samples**: `SOUND/GAME.DTR` (0 .. 0x20) and `AMBIENT<track - 1>.DTR` (0x40 ..): name,
+  number, loop length, loop count (-1 round and round), volume of 0x7fff; rate (8000 to
+  22050), bits, channels, format.
+- **The port's own:** the level against the mixer's scale (`s2_sound_gain` 0.5,
+  `OS_S2SNDGAIN`: four engines and a skid clipped at 1); the mixer's 3.2 kHz filter and its
+  pan law, Screamer's. Measured only as numbers (`OS_SNDWAV`: continuous, no clipping, the
+  loudness following the race); how it SOUNDS is Danik's to say. `OS_SNDLOG`, `OS_NOSOUND`.
+
+## S2-5zg. A plain menu for now; the animations put off — 2026-10-14
+
+- **`s2_menu()` (`main.c`), the port's own**: with no track on the command line Screamer 2
+  now opens on a list in the race's font -- TRACK (the seven names of `LOCAL/STRINGS.TXT`),
+  CAR 1-5, DAY / NIGHT / FOG, OPPONENTS ROOKIE / NORMAL / PRO, 1 / 3 / 5 / 10 LAPS; arrows,
+  ENTER starts, ESC leaves. The choice goes to the race through the test switches
+  (`OS_TRACK OS_CAR OS_COND OS_DIFF OS_LAPS`), which also keeps it; ESC in a race and EXIT at
+  its end come back to the list. A headless run or one with a test switch that picks the
+  race (`OS_S2PHYS OS_S2ROBOT OS_S2SCRIPT OS_SNDWAV OS_FRAMELOG OS_SNDLOG OS_NOMENU`) goes
+  straight to the track as before. `OS_S2MENU_SHOT=<file>` = its picture. The game's own menu
+  (3D scenes, `.BKK`, `SCENEn.PTH`, `0x32xxx`-`0x44xxx`) is not read.
+- **The track's animations (`0x2cee4`) are NOT done**, and why: a row of `ANIMATIONS` is name
+  (12 bytes; `@name` = a thing of the track itself, only its sound), `+0xc` how long one run
+  takes, `+0x10` when it started, `+0x14` the distance at which it starts (-1: 52000),
+  `+0x18` flags (1 starts when the player comes that near, 2 once only, 4 not turned along
+  its way), `+0x1c` which path, `+0x20` on which lap (0: any), `+0x24` its sample, `+0x28`
+  its object, `+0x30` where it is. The place comes from `0x129d5(path, part)` -> `0x126ad`: a
+  path is not a `.SPL` here but keyframed channels (x, y, z each a chain of cubic pieces by
+  time, `[0x118d2c + 4 n]`), built by a module of its own (`0x1150c` .. `0x12xxx`, the
+  `"%s.pth"` files) that would have to be run or rewritten first. Its sound: slot 7 + row,
+  started silent, then `0xaf168` with a range of 80000 and pitch 0 (which by that routine's
+  sum is a rate of 0: HMI's reading of that is not known). Birds, the helicopter and the
+  ambient samples wait for this.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

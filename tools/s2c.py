@@ -110,6 +110,13 @@ def convert(entry, t):
     body = t[t.index("\n", t.rindex("// ", 0, t.index("\n\n"))):] if "\n\n" in t else t
     body = "\n".join(l for l in body.split("\n") if not l.startswith("//") and not l.startswith("/* WARNING"))
     if re.search(r"in_stack_|unaff_|extraout_|in_E[A-D]X|in_ST", body): review.append(entry)
+    # `(int)(&DAT_x + E)` counts in the variable's own size, as C does with a pointer: for one
+    # the listing gives four bytes, E is in fours (0x2aeb9: the sparks' records, fifteen
+    # words each, were being stepped fifteen BYTES)
+    def scaled(m):
+        size = gl.get(int(m.group(2), 16), ("", 1, ""))[1]
+        return m.group(0) if size <= 1 else "(int)(&%sDAT_%s + (%s) * %d)" % (m.group(1), m.group(2), m.group(3), size)
+    body = re.sub(r"\(int\)\(&(_?)DAT_([0-9a-f]{8}) \+ ([^()\n]*)\)", scaled, body)
     # EVERY STORE OF A FLOAT IS A ROUNDING.  The game's code keeps a sum on the processor's
     # stack at full width and rounds it when it is put into a float (fstp dword) -- often into
     # a temporary that the very next instruction reads back.  The stock decompiler prints such
@@ -136,6 +143,17 @@ def convert(entry, t):
         for l in body.split("\n"):
             if re.search(r"\b%s\b" % n, l) and not re.search(r"S2_SETF\(.*, %s\);|\b%s = \(float\)f32\(|f32\(%s\)|float %s;" % (n, n, n, n), l):
                 print("%05x: a float temporary used otherwise: %s" % (entry, l.strip()[:110]), file=sys.stderr)
+    #   and the same for what the decompiler itself calls a float: `place = name;` puts the
+    #   float's bytes in the place.  (Where a whole number is meant the decompiler writes a
+    #   conversion.)  0x2aeb9: a spark's place and speed went into a table without a type as
+    #   whole numbers, and came out not numbers at all.
+    fl = set(re.findall(r"^\s+float ((?:local|[a-z]+Var|[a-z]+Stack)_?[0-9a-f_]*);", body, re.M))
+    db = set(re.findall(r"^\s+double ((?:local|[a-z]+Var|[a-z]+Stack)_?[0-9a-f_]*);", body, re.M))
+    def putf(m):
+        lv = m.group(2).strip()
+        if m.group(3) not in fl or lv in fl or lv in db or lv.startswith("dVar") or lv.startswith("*(float *)") or lv.startswith("*(double *)"): return m.group(0)
+        return "%sS2_SETF(%s, %s);" % (m.group(1), m.group(2), m.group(3))
+    body = re.sub(r"^([ \t]*)([^=;\n{}]+?) = (\w+);$", putf, body, flags=re.M)
     for m in reversed(list(re.finditer(r"\bf(32|64)\(", body))):
         e = close2(body, m.end() - 1)
         inner = body[m.end():e]
