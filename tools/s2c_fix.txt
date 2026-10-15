@@ -3,8 +3,8 @@
 # the decompiler drops them; each call is rewritten from the instructions before it.
 @19409   0x1fxxx: fld [car+0x4d4]; cos; fabs; fld 4.0 (0x110548); fxch; call pow
 s|  fcos\(\(float10\)\*\(float \*\)MP\(param_1 \+ 0x4d4\)\);\n  (fVar\d+) = \(float10\)FUN_000afed2\(\);|  \1 = pow(fabs(cos((double)*(float *)MP(param_1 + 0x4d4))), 4.0);|
-@1f756   0x1fa7b-0x1fb60: r = car[0xc78] / car[0x60]; G = table 0x112e24[gear]; (1 - (G*0.22 + r*c - 1)^2) * G^2 * 0.8, c = 1.6, or 1.5 in gear 0
-s|  if \(\*\(int \*\)MP\(param_1 \+ 0xc7c\) == 0\) \{\s+FUN_000afed2\(\);[\s\S]*?\n  \}\n  else \{[\s\S]*?\n  \}|  { double r_ = (double)(*(float *)MP(param_1 + 0xc78) / *(float *)MP(param_1 + 0x60)), G_ = (double)*(float *)MP(0x112e24u + *(int *)MP(param_1 + 0xc7c) * 4), c_ = *(int *)MP(param_1 + 0xc7c) == 0 ? 1.5 : 1.6; local_2c = (float)((1.0 - pow(G_ * 0.22 + r_ * c_ + -1.0, 2.0)) * pow(G_, 2.0) * 0.8); }|
+@1f756   0x1fa7b-0x1fb60: r = car[0xc78] / car[0x60], KEPT AS A FLOAT (fstp DWORD [ebp-0x14]); G = table 0x112e24[gear]; (1 - (G*0.22 + (r*c - 1))^2) * G^2 * 0.8, c = 1.6, or 1.5 in gear 0 -- in that order of sums (fld G; fmul 0.22; fld r; fmul c; fadd -1.0; faddp): the last bit of the revs depends on it (the original in DOSBox, 2026-10-15)
+s|  if \(\*\(int \*\)MP\(param_1 \+ 0xc7c\) == 0\) \{\s+FUN_000afed2\(\);[\s\S]*?\n  \}\n  else \{[\s\S]*?\n  \}|  { double r_ = (double)(float)(*(float *)MP(param_1 + 0xc78) / *(float *)MP(param_1 + 0x60)), G_ = (double)*(float *)MP(0x112e24u + *(int *)MP(param_1 + 0xc7c) * 4), c_ = *(int *)MP(param_1 + 0xc7c) == 0 ? 1.5 : 1.6; local_2c = (float)((1.0 - pow(G_ * 0.22 + (r_ * c_ + -1.0), 2.0)) * pow(G_, 2.0) * 0.8); }|
 @2d59c   0x2d720: fld [cursor+0x1c]; call arc cosine
 s|(fVar\d+) = \(float10\)FUN_0004ea98\(\);|\1 = s2_acos((double)*(float *)MP(param_2 + 0x1c));|
 @2da06   a double kept in two halves (0x3f847ae1 47ae147b = 0.01): how far along SKILLS's row, 0.01 .. 5.99
@@ -14,4 +14,46 @@ s|\(double\)CONCAT44\(uStack_40,local_44\)|local_3c|
 @14acf   "the distance is not nought": a double's two halves tested (fabs, compare with 0)
 s~\(\(\(\(ulonglong\)(dVar\d+) & 0x7fffffff00000000\) != 0\) [|][|]\s+\(local_4c = SUB84\(dVar\d+,0\), local_4c != 0\)\)~(\1 != 0.0)~
 @29571   0x297a6-0x297e3: |push x| + |push z| of the furthest corner so far (ebx) <= this corner's (eax + edx): take it. The sums are handed on in registers through the library's abs.
+@29571   0x2a0b0..: the knock's force = the corner's speed x |sin| -- the speed sqrt(y y + x x + z z) IN THAT ORDER of sums (fld [+4]; fmul [+4]; fld [+0]; fmul [+0]; faddp; fld [+8]; fmul [+8]; faddp): the decompiler prints z z + x x + y y, which at 53 bits rounds differently (the damage one bit off the original in DOSBox, 2026-10-15)
+s|SQRT\(\*\(float \*\)MP\(pfVar4 \+ 8\) \* \*\(float \*\)MP\(pfVar4 \+ 8\) \+\s*\*\(float \*\)MP\(pfVar4\) \* \*\(float \*\)MP\(pfVar4\) \+\s*\*\(float \*\)MP\(pfVar4 \+ 4\) \* \*\(float \*\)MP\(pfVar4 \+ 4\)\)|SQRT((long double)*(float *)MP(pfVar4 + 4) * *(float *)MP(pfVar4 + 4) + (long double)*(float *)MP(pfVar4) * *(float *)MP(pfVar4) + (long double)*(float *)MP(pfVar4 + 8) * *(float *)MP(pfVar4 + 8))|
 s~if \(extraout_EBX_01 <= iVar\d+ \+ extraout_EDX\) \{~if (s2_abs(*(int *)MP(local_1c + 0x154)) + s2_abs(*(int *)MP(local_1c + 0x15c)) <= s2_abs(*(int *)MP(local_3c + 0x10)) + s2_abs(*(int *)MP(local_3c + 0x18))) {~
+@29571   0x29c33: fild [car+0x4e0]; fstp [ebp-0x104] -- the car's z, the third word of the point handed to 0x20970 (where the car's line meets the wall's): the decompiler dropped the store and the converted text read a stale word (found against the hand-written routine, 2026-10-15)
+s|(    local_124\[0\] = \(float\)\(\(float\)\*\(int \*\)MP\(local_1c \+ 0x4d8\)\);)|\1\n    local_124[2] = (float)((float)*(int *)MP(local_1c + 0x4e0));|
+# The engine's loaders of a picture, sprites, a font (taken: they read through the engine's file
+# layer, which the port answers).  Watcom's routines keep every register but EAX; the decompiler
+# took freeing the old one for changing the container and entry (EDX, EBX), the open's answer in
+# EAX for a lost value, and a read for changing the loop's counter (ECX).
+@51532 the picture's pixels: as many as the header says (ECX = record +0x18)
+s/extraout_ECX\)/*(int *)MP(r0 + 0x18))/
+s|\n    r1 = extraout_EDX(?:_00)?;\n    r2 = extraout_EBX;||
+s|FUN_0004eba5\(([^;]*)\);\n  if \(extraout_EAX != 0\) \{|if (FUN_0004eba5(\1) != 0) {|
+@50a9c
+s|\n    r1 = extraout_EDX(?:_00)?;\n    r2 = extraout_EBX;||
+s|FUN_0004eba5\(([^;]*)\);\n  if \(extraout_EAX != 0\) \{|if (FUN_0004eba5(\1) != 0) {|
+@50dd3
+s|\n    r1 = extraout_EDX(?:_00)?;\n    r2 = extraout_EBX;||
+s|FUN_0004eba5\(([^;]*)\);\n  if \(extraout_EAX != 0\) \{|if (FUN_0004eba5(\1) != 0) {|
+s/iVar1 = extraout_ECX(?:_00)? \+ 1;/iVar1 = iVar1 + 1;/
+@514fa the picture record made ready: it gives back the record (EAX kept in ECX)
+s/return CONCAT44\(param_2,extraout_ECX\);/return (uint32_t)param_1;/
+@5160b a picture let go: EBX is the record all through (mov ebx, eax at the top)
+s/(?<!int )extraout_EBX(?:_00)?\b/param_1/
+@50b71 the sprites let go: EBX is the record all through
+s/(?<!int )extraout_EBX(?:_0\d)?\b/param_1/
+@50ef4 the font let go: the same
+s/(?<!int )extraout_EBX(?:_0\d)?\b/param_1/
+# The menu's loop, resumed after a race: the race is another part of the port (its own fresh
+# block), so the menu keeps its block, leaves, and comes back here -- right after the call
+# (s2_menu_hooks.h s2m_race, s2_hooks.c s2_menu_run)
+@38540 the menu comes back from its race (s2m_resume 1), or from its attract race (2: the rest of 0x3c9ac done, s2m_attract_done, then on to the page it set), or from a replay of the best times' page (3: VIEW REPLAY, 0x1324e0 = -1 -- back to that page)
+s|(  \(\*\(int32_t \*\)MP\(0x1324d8u\)\) = 1;\n)|  if (s2m_resume == 2) { s2m_resume = 0; s2m_attract_done(); goto s2_after_attract; }\n  if (s2m_resume == 3) { s2m_resume = 0; puVar4 = 0; goto s2_after_replay; }\n  if (s2m_resume) { s2m_resume = 0; puVar5 = 0; goto s2_after_race; }\n\1|
+s|(        puVar4 = FUN_0002b2a8\(\(int\)uVar2,\(int\)\(\(ulonglong\)uVar2 >> 0x20\)\);\n)|\1      s2_after_replay:\n|
+s|(    while \(\(\*\(int32_t \*\)MP\(0x132494u\)\) != 0\) \{\n)|  s2_after_attract:\n\1|
+s|(        puVar5 = FUN_0002b2a8\(\(int\)uVar2,\(int\)\(\(ulonglong\)uVar2 >> 0x20\)\);\n)|\1      s2_after_race:\n|
+# The garage car page's maxspeed (0x3da8e..): the number is pushed straight from the FPU (fld the
+# player's car +0x5c, fmul 1.188 [, fdiv 1.6 in miles], cut, fistp) and the decompiler lost it
+@3cbb8 the car's maxspeed, as the instructions work it out
+s|FUN_0004eaed\(\(int\)auStack_c8_a,0x1113ac\);|FUN_0004eaed((int)auStack_c8_a,0x1113ac,(int)((double)(*(float *)MP(0x11935cu)) * *(double *)MP(0x1113b2u)));|
+s|FUN_0004eaed\(\(int\)auStack_c8_a,0x111396\);|FUN_0004eaed((int)auStack_c8_a,0x111396,(int)((double)(*(float *)MP(0x11935cu)) * *(double *)MP(0x11139cu) / *(double *)MP(0x1113a4u)));|
+@331dc the settings file's mode ("wb") is an address in the game's memory, as in 0x32d53's open
+s|&\(\*\(uint32_t \*\)MP\((0x110fb6u)\)\)|\1|

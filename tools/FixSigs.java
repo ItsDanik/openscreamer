@@ -36,8 +36,9 @@ public class FixSigs extends GhidraScript {
                         new VariableStorage(currentProgram, currentProgram.getRegister(regs[i])), currentProgram));
             int off = 4;
             Parameter ret = null;
-            boolean intResult = false;
+            boolean intResult = false, varargs = false;
             for (int i = 2; i < w.length; i++) {
+                if (w[i].equals("...")) { varargs = true; continue; }   /* and as many more as the call pushes */
                 if (w[i].equals("->float")) {         /* it leaves its result in ST0 */
                     ret = new ReturnParameterImpl(Float10DataType.dataType,
                             new VariableStorage(currentProgram, currentProgram.getRegister("ST0")), currentProgram);
@@ -61,6 +62,7 @@ public class FixSigs extends GhidraScript {
                 Parameter r = new ReturnParameterImpl(ret != null ? DoubleDataType.dataType : VoidDataType.dataType, currentProgram);
                 f.setCustomVariableStorage(false);
                 f.updateFunction("__cdecl", r, dyn, Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+                if (varargs) f.setVarArgs(true);
                 n++;
                 continue;
             }

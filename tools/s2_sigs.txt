@@ -18,3 +18,14 @@
 # the library's abs: one whole number in, one out (taken for a routine that hands EDX and EBX on, the
 # wall test's "which corner is furthest in" came out always true: the last corner won)
 0xafeca inline
+# the library's sprintf (buffer, format, ...): all on the stack, as many as the format wants --
+# without this the decompiler shows the buffer and the format only (the menu's file names and texts)
+0x4eaed 0 int int ...
+# the engine's file in a container: open(handle, container, entry, mode) -- the decompiler saw two
+0x4eba5 4
+# the engine's loaders of a picture, a font, a sprite sheet: (record, container, entry)
+0x51532 3
+0x50dd3 3
+0x50a9c 3
+# the palette faded (amount, red, green, blue towards which, 0..255): all on the stack
+0x512f1 0 float int int int

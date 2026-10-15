@@ -146,6 +146,9 @@ int snd_find(const char *name)
  * OS_SFXLP=<Hz> moves the cut (0 = no filter, the port of 2026-10-09).
  */
 static float g_sfx_gain = 192.0f, g_sfx_base = 192.0f, g_music_base = 0.6f;
+/* a CD song's loudness in the mix (its samples are the disc's 16 bits): the port's own, set
+   against the game's effects at their full volume (OS_CDVOL=<k>, 1 = as here) */
+static float g_cd_gain = 0.5f;
 static float g_lp_b0 = 1.0f, g_lp_b1, g_lp_b2, g_lp_a1, g_lp_a2;      /* the filter: one stage, as it comes */
 
 static void lowpass_set(float hz)
@@ -157,7 +160,9 @@ static void lowpass_set(float hz)
     g_lp_a1 = -2.0f * cs / a0; g_lp_a2 = (1.0f - al) / a0;
 }
 
-static void mix(int16_t *out, int frames)
+/* the mix at RATE_OUT; with `cd` the CD's song too (the test's WAV file: the device's path adds
+   it at twice the rate, callback()) */
+static void mix(int16_t *out, int frames, int cd)
 {
     static float holdl, holdr;
     static int   phase;
@@ -192,6 +197,7 @@ static void mix(int16_t *out, int frames)
         float ml = 0.0f, mr = 0.0f;
         fmchip_at(2 * i);
         music_frame(&ml, &mr);
+        if (cd) cd_audio_frame(&ml, &mr, g_cd_gain);
         accl += ml; accr += mr;
         if (accl > 32767.0f) accl = 32767.0f;
         if (accl < -32768.0f) accl = -32768.0f;
@@ -202,30 +208,26 @@ static void mix(int16_t *out, int frames)
     }
 }
 
+/* The device plays 44100 Hz.  MISTER: the core plays 44100, and SDL's own way of making that
+   out of 22050 took an eighth of a processor.  Everywhere: Screamer 2's CD songs are the disc's
+   44100 (at 22050 their top octave was gone).  So each frame mixed here at 22050 goes out twice,
+   half-way to the next one the second time, and the CD's song is added at the full rate. */
 static void callback(void *user, Uint8 *stream, int len)
 {
     (void)user;
-#ifdef MISTER_HYBRID
-    /* MISTER: the core plays 44100 Hz, and SDL's own way of making that out of
-       22050 took an eighth of a processor.  The device is opened at 44100
-       and each frame mixed here goes out twice, half-way to the next one the
-       second time. */
-    static int16_t half[2048 * 2], last[2];
+    static int16_t half[4096 * 2], last[2];
     int16_t *out = (int16_t *)stream;
     int frames = len / 8;
-    if (frames > 2048) frames = 2048;
-    mix(half, frames);
+    if (frames > 4096) frames = 4096;
+    mix(half, frames, 0);
     for (int i = 0; i < frames; i++) {
         const int l = half[2 * i], r = half[2 * i + 1];
-        out[4 * i]     = (int16_t)((last[0] + l) / 2);
-        out[4 * i + 1] = (int16_t)((last[1] + r) / 2);
-        out[4 * i + 2] = (int16_t)l;
-        out[4 * i + 3] = (int16_t)r;
+        float o[4] = { (float)((last[0] + l) / 2), (float)((last[1] + r) / 2), (float)l, (float)r };
+        cd_audio_frame(&o[0], &o[1], g_cd_gain);
+        cd_audio_frame(&o[2], &o[3], g_cd_gain);
+        for (int k = 0; k < 4; k++) out[4 * i + k] = (int16_t)(o[k] > 32767.0f ? 32767 : o[k] < -32768.0f ? -32768 : (int)o[k]);
         last[0] = (int16_t)l; last[1] = (int16_t)r;
     }
-#else
-    mix((int16_t *)stream, len / 4);
-#endif
 }
 
 static void lock(void)   { if (g_open) SDL_LockAudio(); }
@@ -272,13 +274,8 @@ int snd_init(const char *sound_dir, const char *list_file)
     }
     SDL_AudioSpec want;
     memset(&want, 0, sizeof want);
-#ifdef MISTER_HYBRID
-    want.freq = RATE_OUT * 2;               /* MISTER: see callback() */
-    want.samples = 1024;
-#else
-    want.freq = RATE_OUT;
-    want.samples = 512;
-#endif
+    want.freq = RATE_OUT * 2;               /* see callback() */
+    want.samples = 1024;                    /* (the PC's 512 at 22050 before: the same time) */
     want.format = AUDIO_S16SYS;
     want.channels = 2;
     want.callback = callback;
@@ -299,7 +296,7 @@ void snd_render(float seconds)
     int frames = (int)(seconds * RATE_OUT + 0.5f);
     while (frames > 0) {
         int n = frames > 4096 ? 4096 : frames;
-        mix(buf, n);
+        mix(buf, n, 1);
         fwrite(buf, 4, (size_t)n, g_wav);
         g_wav_frames += n;
         frames -= n;
@@ -322,7 +319,33 @@ void snd_close(void)
         g_wav = NULL;
     }
     if (g_open) { SDL_CloseAudio(); g_open = 0; }
+    cd_audio_stop();
 }
+
+int snd_open(void) { return g_open || g_wav; }
+
+void snd_forget(void)
+{
+    lock();
+    memset(g_voice, 0, sizeof g_voice);
+    g_nsample = 0;
+    unlock();
+}
+
+int snd_cd(int track, int loop)
+{
+    if (getenv("OS_CDVOL")) g_cd_gain = 0.5f * (float)atof(getenv("OS_CDVOL"));
+    lock();
+    int ok = 0;
+    if (track > 0) ok = cd_audio_play(track, loop, g_wav ? RATE_OUT : RATE_OUT * 2);
+    else cd_audio_stop();
+    unlock();
+    return ok;
+}
+int snd_cd_track(void) { lock(); const int t = cd_audio_track(); unlock(); return t; }
+void snd_cd_volume(float v) { lock(); cd_audio_volume(v); unlock(); }
+void snd_cd_pause(int on) { lock(); cd_audio_pause(on); unlock(); }
+int snd_cd_paused(void) { lock(); const int p = cd_audio_paused(); unlock(); return p; }
 
 static voice *voice_of(int handle)
 {

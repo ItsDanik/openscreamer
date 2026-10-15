@@ -94,6 +94,7 @@ typedef struct {
     float spin, steer;
     float body_pitch, body_roll, body_drop;   /* the body on its suspension */
     float env_scroll;       /* how far the reflections have slid, in texels */
+    float env_u;            /* SCREAMER 2: ... sideways too (the game's 0..255; Screamer's is 0) */
     int   env;              /* which reflection picture: 0, 0x8000 or 0xff00 */
     /* SCREAMER 2: each wheel by itself -- how far it has turned and how far its
        suspension is pushed in (wheel 0 front +X, 1 rear +X, 2 front -X, 3 rear -X) */
@@ -108,9 +109,12 @@ typedef struct {
 typedef struct {
     const mesh *m;
     const car_pose *pose;   /* NULL for everything that is not a car */
+    const float *mat;       /* not NULL: the world directions of the object's own x, y (up) and z,
+                               three rows of three (Screamer 2's menu: the engine's turn, 0x759b8);
+                               yaw, pitch and roll are then not used */
     float zbias;            /* 0, or how much nearer to count it in the depth test (shadows) */
-    int   over;             /* the road it stands in does not hide it (the game draws objects whole,
-                               back to front: Screamer 2's cones have their middle at the ground) */
+    int   over;             /* the road it stands in does not hide it, unless well in front of it (the
+                               game draws objects whole, back to front: the smoke's middle is at the ground) */
     int   sprite;           /* record +0x04 bit 0x8000 (0x118a4 sets it on the smoke puffs): the
                                engine builds this object's turn from its angles LESS the
                                camera's (0x8abc7 -> 0x8b26c -> 0x4bca0), so it keeps facing

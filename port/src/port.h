@@ -38,6 +38,8 @@ void *os_malloc(size_t n);
 void *os_calloc(size_t n, size_t each);
 void *os_realloc(void *p, size_t n);
 void  os_free(void *p);
+/* memory that outlives the parts -- for what an os_slot keeps; never freed */
+void *os_keep_calloc(size_t n, size_t each);
 
 /*
  * ONE PROGRAM, SEVERAL PARTS.  The menu, a race and the intro each expect to
@@ -58,7 +60,7 @@ void os_next(int argc, const char *a1, const char *a2);   /* arguments of the pa
 int  os_has_next(void);
 void os_next_done(void);                 /* the next part's arguments have been taken */
 int  os_once(int id);                   /* 1 the first time it is asked about `id`, 0 after */
-void *os_slot(int id);                  /* a pointer that outlives the parts (window, renderer, texture) */
+void *os_slot(int id);                  /* a pointer that outlives the parts (window, renderer, texture), ids 0..15; what it points at must too (os_keep_calloc) */
 void os_slot_set(int id, void *p);
 
 #ifdef MISTER_HYBRID

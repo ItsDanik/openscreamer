@@ -23,14 +23,14 @@ set(OS_SOURCES
   src/scene.c
   src/drive.c
   src/sound.c
+  src/cdaudio.c
+  src/third_party/decoders.c
   src/music.c
   src/fmchip.c
   src/nuked/opl3.c
   src/port.c
   src/controls.c
   src/s2_hooks.c
-  src/s2_cpu.c
-  src/s2_exe.c
 )
 
 # MISTER (branch mister): the hybrid core.  SDL is the framework's, linked
@@ -83,21 +83,27 @@ if(WIN32)
   target_compile_options(openscreamer PRIVATE ${SDL2_CFLAGS_OTHER})
 endif()
 
-# Screamer 2's race routines are the game's own, run from the player's STARTL.EXE by the
-# interpreter of src/s2_cpu.c.  Its floating point is the 387's at the precision the game
-# sets, a double's: the sums must not be contracted (a * b + c in one step) on any processor.
-set_source_files_properties(src/s2_cpu.c PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math")
-# Where src/s2_gen.inc is present -- the routines converted to C by tools/s2c.py, which is
-# made from the game's program and is NOT in the repository -- the build uses it: several
-# times faster, and what the race is developed and judged with.  Without the file, or with
-# -DS2_INTERPRETER=ON, the interpreter runs them.  The converted sums are done on the x87.
-option(S2_INTERPRETER "Screamer 2: run the game's routines in the interpreter even if src/s2_gen.inc is there" OFF)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/s2_gen.inc" AND NOT S2_INTERPRETER)
-  message(STATUS "Screamer 2: the routines converted to C (src/s2_gen.inc)")
-  target_compile_definitions(openscreamer PRIVATE S2_CONVERTED)
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86")
-    set_source_files_properties(src/s2_hooks.c PROPERTIES COMPILE_OPTIONS "-mfpmath=387;-fexcess-precision=standard")
+# the decoders of the CD's songs as files (src/third_party: stb_vorbis, dr_mp3, dr_wav) are
+# others' code, taken as it is: their warnings are not ours to mend
+set_source_files_properties(src/third_party/decoders.c PROPERTIES COMPILE_OPTIONS "-w")
+# Screamer 2's race and menu routines: the game's own, written by hand (src/s2r_car.h, docs/NOTES2.md
+# S2-8), the sums done on the x87 as the game's are.  S2_REFERENCE (the developer's): instead the
+# routines converted to C from the game's program (src/s2_gen.inc, made by tools/s2c.py -- NOT in
+# the repository, never published), the reference the hand-written ones are checked against.
+option(S2_REFERENCE "Screamer 2 from the converted routines (src/s2_gen.inc, the developer's reference)" OFF)
+target_compile_definitions(openscreamer PRIVATE S2_CONVERTED)
+if(S2_REFERENCE)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/s2_gen.inc")
+    message(FATAL_ERROR "S2_REFERENCE needs src/s2_gen.inc (tools/s2c.py)")
   endif()
-else()
-  message(STATUS "Screamer 2: the routines run from the player's STARTL.EXE (interpreter)")
+  message(STATUS "Screamer 2: the reference -- the routines converted to C (src/s2_gen.inc)")
+  target_compile_definitions(openscreamer PRIVATE S2_REFERENCE)
+  target_sources(openscreamer PRIVATE src/s2_exe.c)   # (the menu's data out of the player's STARTL.EXE: the reference's alone)
 endif()
+# the game's words are read both as floats and as whole numbers (F32 / I32 of one address): the
+# compiler must not assume the two never meet (it moved a read of a word before the write of it)
+set(S2_OPTS "-fno-strict-aliasing")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86")
+  list(APPEND S2_OPTS "-mfpmath=387" "-fexcess-precision=standard")
+endif()
+set_source_files_properties(src/s2_hooks.c PROPERTIES COMPILE_OPTIONS "${S2_OPTS}")

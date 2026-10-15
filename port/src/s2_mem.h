@@ -2,8 +2,8 @@
  * SCREAMER 2's routines work on the game's own memory layout: the program's data object,
  * 0x110000 up, and after it room the port hands out for what the game kept in allocated
  * memory (splines).  An address is a NUMBER; MP(a) is the byte it names.  The data object
- * starts as the player's program has it (s2_cpu.h); what the game's loaders read from its
- * files is put there by the port (s2_hooks.c).
+ * starts empty (the menu copies in the player's STARTL.EXE's data object, s2_exe.c); what the
+ * game's loaders read from its files is put there by the port (s2_hooks.c).
  */
 #ifndef OS_S2_MEM_H
 #define OS_S2_MEM_H
@@ -14,11 +14,11 @@
 #include <string.h>
 
 #define S2_BASE 0x110000u
-#define S2_SIZE 0x100000u          /* the data object is 0x2a000 of it; the rest is s2_alloc()'s */
+#define S2_SIZE 0x800000u          /* the data object is 0x2a000 of it; the rest is s2_alloc()'s (8 MB: the menu's pictures,
+                                      fonts and sprites; the race used under one) */
 void s2_bad_address(uint32_t a);
-#ifdef S2_CONVERTED
-/* (the developer's build with the routines converted to C, tools/s2c.py: not in the
-   repository -- see s2_cpu.h) */
+/* (the routines themselves: src/s2r_car.h, written by hand; the developer's reference build has
+   them converted from the game's program instead, src/s2_gen.inc, never published) */
 extern uint8_t s2_mem[S2_SIZE];
 
 /* the engine keeps a few variables in its CODE object (0x4cb98: what the ground query
@@ -30,17 +30,6 @@ static inline uint8_t *MP(uint32_t a)
     if (a - S2_BASE >= S2_SIZE - 16) return s2_code_var(a);
     return s2_mem + (a - S2_BASE);
 }
-#else
-/* THE PLAYER'S PROGRAM, RUN AS IT IS (s2_cpu.h): the block is part of the flat memory the
-   program's image is read into, so an address is simply an offset in it, code and all */
-#include "s2_cpu.h"
-#define s2_mem (s2_flat + S2_BASE)
-static inline uint8_t *MP(uint32_t a)
-{
-    if (a > S2_FLAT - 16) { s2_bad_address(a); return s2_flat + S2_BASE; }
-    return s2_flat + a;
-}
-#endif
 /* the address of a byte of the block */
 #define PM(p) ((uint32_t)((const uint8_t *)(p) - s2_mem) + S2_BASE)
 /* a spare word in the block, for a routine's own local that has to be handed on by address */
@@ -110,5 +99,9 @@ static inline double s2_acos(double x) { return x * x <= 1.0 ? acos(x) : 0.0; }
 #define ROUND(x) truncl((long double)(x))
 #define ABS(x)   fabsl((long double)(x))
 #define CONCAT44(hi, lo) (((int64_t)(int32_t)(hi) << 32) | (uint32_t)(lo))
+#define CONCAT22(hi, lo) ((uint32_t)(uint16_t)(hi) << 16 | (uint16_t)(lo))
+#define CONCAT11(hi, lo) ((uint16_t)((uint8_t)(hi) << 8 | (uint8_t)(lo)))
+#define NAN(x)           isnan((double)(x))      /* (a compare's "unordered" flag) */
+#define SUB84(x, at)     ((uint32_t)((uint64_t)(x) >> (8 * (at))))
 
 #endif

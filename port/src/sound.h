@@ -1,6 +1,8 @@
 #ifndef SCREAMER_SOUND_H
 #define SCREAMER_SOUND_H
 
+#include <stddef.h>
+
 #define SND_MAX 96
 
 /* the game's own numbers for the effects of SFXSBASE.DTR */
@@ -31,5 +33,22 @@ int  snd_play_once(int id, int handle);
    a WAV file, advanced by this much each call */
 void snd_render(float seconds);
 void snd_masters(float effects, float music);   /* 1 = the game's starting level */
+int  snd_open(void);                   /* the device is open (or the test's WAV file) */
+void snd_forget(void);                 /* every sample let go, the device left open (the CD's song plays on) */
+
+/* Screamer 2's CD songs as files (cdaudio.c): track_NN.ogg / .mp3 / .wav */
+int  snd_cd(int track, int loop);      /* 0 = no file for it; track 0 stops */
+int  snd_cd_track(void);               /* what is playing, 0 none */
+void snd_cd_volume(float v);           /* the CD's volume, 0..1 (0x4d7c0's 0..255) */
+int  cd_audio_find(int track, char *out, size_t n);
+int  cd_audio_play(int track, int loop, int out_rate);
+void cd_audio_stop(void);
+int  cd_audio_track(void);
+void cd_audio_volume(float v);
+void cd_audio_frame(float *left, float *right, float gain);
+void cd_audio_pause(int on);
+int  cd_audio_paused(void);
+void snd_cd_pause(int on);             /* the song held where it is (1) or going on (0) */
+int  snd_cd_paused(void);
 
 #endif

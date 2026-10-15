@@ -67,18 +67,27 @@ for part in plan.split(","):
     k, secs = part.split(":"); steps.append(([x for x in k.split("+") if x != "none"], float(secs)))
 rows, last = [], None
 extra = open(out + ".walls", "w")
+carsf = open(out + ".cars", "wb")
 def guest(ptr, n):
     """bytes at a pointer of the game's (its addresses are the data object's moved by one amount)"""
     delta = struct.unpack("<I", rd(CAR + 0xb4, 4))[0] - 0x127708
     if not delta or not ptr: return None
     try: return rd((ptr - delta) & 0xffffffff, n)
     except (OSError, ValueError): return None
+pending = None
+def commit():
+    global pending
+    if pending is None: return
+    row, cars, lines = pending
+    rows.append(row); carsf.write(cars); extra.write(lines)
+    pending = None
 def sample():
-    global last
+    """Every few milliseconds: everything read between two reads of the clock that agree; the
+    frame's numbers are the LAST such reading before the clock moves on (DOSBox takes ~56 ms a
+    frame here: a reading early in it can catch the game half way through its sums -- a step of
+    0.005 between two of 0.057, a car's +0x4fc set in the original and not yet in the port)."""
+    global last, pending
     c = f32(0x13335c)
-    if c == last: return
-    last = c
-    time.sleep(0.015)          # (the clock goes on at the frame's start: let the frame's sums finish before reading)
     n = i32(0x130c48)
     ctl = struct.unpack("<6i", rd(KEYS + 0xa8, 24))
     row = [time.time(), c, f32(0x133350), f32(0x133354)] + list(ctl)
@@ -86,18 +95,18 @@ def sample():
         b = rd(CAR + k * 0xcc0 + 0x4d8, 0x30)
         x, h, z = struct.unpack_from("<3i", b, 0); pit, head, lean = struct.unpack_from("<3f", b, 12)
         row += [x, h, z, pit, head, lean, struct.unpack_from("<f", b, 0x28)[0], f32(CAR + k * 0xcc0 + 0x4d4), f32(CAR + k * 0xcc0 + 0xbc)]
-    rows.append(row)
+    cars = rd(CAR, n * 0xcc0)          # (every car's whole record: the port's OS_S2TRACEFILE writes the same)
+    lines = ""
     wp, dp = struct.unpack("<I", rd(0x11cdd8, 4))[0], struct.unpack("<I", rd(0x11cde8, 4))[0]
     wb, db = guest(wp, 28), guest(dp, 12)
     me = rd(CAR + 0x150, 0x18)
-    extra.write("%.4f wall %s dir %s car+0x34 %.3f +0x150 %s\n" % (c,
+    lines += "%.4f wall %s dir %s car+0x34 %.3f +0x150 %s\n" % (c,
         (struct.unpack("<f6i", wb) if wb and len(wb) == 28 else None), (struct.unpack("<f2i", db) if db and len(db) == 12 else None),
-        f32(CAR + 0x34), struct.unpack("<i2ifi", me[:20])))
-    cam = guest(struct.unpack("<I", rd(0x1192f4, 4))[0], 0x60)
-    if cam and len(cam) == 0x60:
-        extra.write("      camera at %d %d %d angles %.4f %.4f %.4f rows %d\n" % (struct.unpack_from("<3i", cam, 0x48) + struct.unpack_from("<3f", cam, 0x54) + struct.unpack_from("<i", cam, 0x1c)))
-    cn = struct.unpack("<12f", rd(CAR + 0x514, 48)); fl = [struct.unpack("<i", rd(CAR + 0x170 + k * 0x20, 4))[0] for k in range(4)]
-    extra.write("      corners %s off-ground %s last asked %d %d\n" % (" ".join("(%.0f %.0f)" % (cn[k * 3], cn[k * 3 + 2]) for k in range(4)), fl, i32(0x11cdcc), i32(0x11cdd4)))
+        f32(CAR + 0x34), struct.unpack("<i2ifi", me[:20]))
+    if f32(0x13335c) != c: return                    # (the clock moved while reading: not one frame's)
+    if pending is not None and pending[0][1] != c: commit()      # (the clock has moved on: the last whole reading of the frame before is its)
+    if c == last and pending is None: return         # (already committed)
+    pending = (row, cars, lines); last = c
 # the grid cell (column 128, row 129) as the game has it in memory: its head, and which objects its lists hold
 try:
     grid = struct.unpack("<I", rd(0x11375c, 4))[0]
@@ -120,11 +129,12 @@ for keys, secs in steps:
     # (the plan's seconds are the RACE'S CLOCK's, so that a run can be repeated)
     c1 = f32(0x13335c); t1 = time.time()
     while f32(0x13335c) - c1 < secs and time.time() - t1 < secs * 3 + 20: sample(); time.sleep(0.002)
+commit()
 for k in held: key(k, 0)
 shot(out + "_end.png")
 open(out + ".block2", "wb").write(rd(0x110000, 0x2a000))
 with open(out + ".frames", "w") as f:
-    for r in rows: f.write(" ".join(("%.6f" % v) if isinstance(v, float) else str(v) for v in r) + "\n")
+    for r in rows: f.write(" ".join(("%.9g" % v) if isinstance(v, float) else str(v) for v in r) + "\n")   # (9 digits: a float exactly -- with 6 the port was handed steps dozens of last bits off)
 print(len(rows), "frames read")
 key("Escape", 1); time.sleep(0.1); key("Escape", 0)
 p.terminate(); subprocess.run(["flatpak", "kill", "io.github.dosbox-staging"])

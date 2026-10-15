@@ -32,9 +32,9 @@
  * 20000/8000 made each mesh ~400 KB, which is 76 MB for the 192 UNR objects and
  * would never fit a MiSTer.  1024/1024 is ~30 KB per mesh.
  */
-#define MESH_MAX_VERT 2560   /* the menu's track previews need 2337 (AMAP5) */
+#define MESH_MAX_VERT 3072   /* the menus' track maps: Screamer 1's AMAP5 needs 2337, Screamer 2's AMAP4-VS 2599 */
 #define MESH_MAX_PARTS 16
-#define MESH_MAX_FACE 1792   /* ... and 1579 faces (AMAP6) */
+#define MESH_MAX_FACE 2048   /* ... and 1579 faces (AMAP6), 1886 (Screamer 2's AMAP4-VS in MAPS2) */
 
 typedef struct { float x, y, z; } vec3;
 

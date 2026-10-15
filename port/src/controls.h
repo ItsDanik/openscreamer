@@ -20,6 +20,7 @@ typedef struct {
     int   steer_analog;   /* the steering comes from a stick: no easing (0x163e0) */
     int   brake_analog;   /* the brake comes from a trigger: no easing (0x16187) */
     int   shift;          /* +1 / -1 on the step a gear control goes down */
+    int   up_held, down_held;   /* the two gear controls as they are (Screamer 2 latches a press itself) */
 } controls_state;
 
 /* key[i]: a key's name for control i (accelerate, brake, left, right, gear up,
@@ -35,5 +36,8 @@ void controls_menu_mode(int on);
 /* the controller's heavy and light motor, 0..1 each; call it every picture */
 void controls_rumble(float low, float high);
 const char *controls_key_name(int i);
+/* the game controller as the six controls held (accelerate, brake, left, right, gear up, gear
+   down -- as controls_read takes them); 0 if there is none */
+int controls_pad(int sw[6]);
 
 #endif

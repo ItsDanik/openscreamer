@@ -51,7 +51,7 @@ typedef struct {
     size_t data_len;
     size_t *bss_at; uintptr_t *bss_val; size_t bss_n;   /* the few non-zero words of the rest */
     unsigned once[4];
-    void  *slot[8];
+    void  *slot[16];
     /* the game's own containers, read as they are (see packed_open) */
     int    packed;                      /* the data directory is a copy of the GAME, with its DATA and GFX folders */
     int    game;                        /* 1 = Screamer, 2 = Screamer 2 */
@@ -470,9 +470,14 @@ static void os_help(const char *me)
 "  openscreamer.champ     championship    openscreamer.replays/  replays of record races\n"
 "  openscreamer.ghosts/   time-attack ghosts\n"
 "\n"
+"SCREAMER 2'S MUSIC is its CD's audio tracks: put them, as files, in the game's folder's\n"
+"  music folder (or the game's folder, or the home's music folder), named track_02.ogg ..\n"
+"  track_09.ogg -- .mp3 or .wav do as well.  Track 2 is the menu's; the races' are 3 to 9.\n"
+"\n"
 "SWITCHES FOR ONE RUN (environment variables)\n"
 "  OS_RES=low|high    OS_DETAIL=0..3    OS_LAPS=n    OS_DIFF=0..3    OS_CAR=n\n"
-"  OS_MODE=cones|slalom|attack    OS_NOINTRO=1    OS_NOMUSIC=1    OS_NOSOUND=1\n",
+"  OS_MODE=cones|slalom|attack    OS_NOINTRO=1    OS_NOMUSIC=1    OS_NOSOUND=1\n"
+"  OS_S2PLAINMENU=1   Screamer 2 with the port's plain menu instead of the game's own\n",
         me, me, me, me);
 }
 
@@ -640,8 +645,8 @@ const char *os_data_dir(void) { return K ? K->data : "build/dec"; }
 const char *os_home_dir(void) { return K ? K->home : "."; }
 int   os_has_next(void) { return K->has_next; }
 void  os_next_done(void) { K->has_next = 0; }
-void *os_slot(int id) { return K->slot[id & 7]; }
-void  os_slot_set(int id, void *p) { K->slot[id & 7] = p; }
+void *os_slot(int id) { return K->slot[id & 15]; }
+void  os_slot_set(int id, void *p) { K->slot[id & 15] = p; }
 
 int os_once(int id)
 {
@@ -670,6 +675,11 @@ const char *os_path(const char *path)
     if (!strncmp(path, "build/dec/", 10)) snprintf(out, 1024, "%s/%s", K->data, path + 10);
     else if (!strcmp(path, "build/dec")) snprintf(out, 1024, "%s", K->data);
     else if (!strncmp(path, "openscreamer.", 13)) snprintf(out, 1024, "%s/%s", K->home, path);
+    else if (!strncmp(path, "S2REPLAYS/", 10)) {          /* Screamer 2's replays (the game's REPLAYS folder, its files as they are) */
+        snprintf(out, 1024, "%s/openscreamer.s2replays", K->home);
+        mkdir(out, 0755);
+        snprintf(out, 1024, "%s/openscreamer.s2replays/%s", K->home, path + 10);
+    }
     else if (!strncmp(path, "REPLAYS/", 8)) {            /* time-attack ghosts: the port's own, not the game's directory */
         snprintf(out, 1024, "%s/openscreamer.ghosts", K->home);
         mkdir(out, 0755);
@@ -704,6 +714,13 @@ void *os_malloc(size_t n)
     if (b->next) b->next->prev = b;
     if (K) K->blocks = b;
     return b + 1;
+}
+
+/* memory that outlives the parts (what an os_slot points at): the C library's own, which
+   os_state_restore() does not free */
+void *os_keep_calloc(size_t n, size_t each)
+{
+    return calloc(n, each);
 }
 
 void *os_calloc(size_t n, size_t each)

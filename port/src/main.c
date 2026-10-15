@@ -35,12 +35,14 @@
 #include "controls.h"
 #include <setjmp.h>
 
-/* every event loop gets the game controller's buttons as keys (controls.c) */
+/* every event loop gets the game controller's buttons as keys (controls.c), and F5 -- the
+   frames a second, on every screen -- is taken here (poll_event) */
+static int poll_event(SDL_Event *e);
 #ifdef MISTER_HYBRID
 static void tall_follow(void);          /* MISTER: once a picture, the core's Resolution option */
-#define SDL_PollEvent(e) (tall_follow(), controls_poll(e))
+#define SDL_PollEvent(e) (tall_follow(), poll_event(e))
 #else
-#define SDL_PollEvent(e) controls_poll(e)
+#define SDL_PollEvent(e) poll_event(e)
 #endif
 
 
@@ -131,6 +133,7 @@ static int g_tie_rule = 1;   /* OS_NOTIE=1 switches the same-depth rule off (for
 static unsigned char g_obj_ground[4096 + MAX_OBJS + 8];   /* this picture: the object is a piece of the drivable track (record run 0) */
 static int g_ground_now, g_obj_sprite;               /* the object being drawn: is such a piece / faces the screen (smoke) */
 static unsigned char g_obj_carpet[4096 + MAX_OBJS + 8];   /* this picture: the object is a ground carpet (mesh.carpet) */
+static int   g_tiemark;                           /* OS_TIEMARK, a test (render_frame) */
 static float g_obj_d2[4096 + MAX_OBJS + 8];   /* this picture: camera to each object's own position, squared (by object id) */
 static int16_t  *pxi;         /* palette index of the pixel, -1 = not known (sky) */
 static uint8_t   g_smg[112 * 256];  /* MAPn.SMG, see raster_tri; Screamer 2 makes its own, of 112 rows (s2_blend_make) */
@@ -313,6 +316,7 @@ static SDL_Window *sys_window(SDL_Renderer **ren)
         if (!win) fprintf(stderr, "no picture: %s\n", SDL_GetError());
 #else
         SDL_Renderer *r = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC) : NULL;
+        if (!r) fprintf(stderr, "no %s: %s\n", win ? "renderer" : "window", SDL_GetError());
         SDL_RendererInfo info;
         if (r && SDL_GetRendererInfo(r, &info) == 0)
             printf("display: %s, vsync %s\n", info.name,
@@ -563,6 +567,10 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
                       const sky *s, float focal_x, float focal_y)
 {
     (void)focal_x;
+    if (getenv("OS_SKYMARK")) {                 /* a test: no backdrop but magenta, to find holes in the scene */
+        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = 0xFFFF00FFu;
+        return;
+    }
     if (!s->pix) {
         /* no backdrop (Screamer 2: indoors, or the condition without one): the clear colour */
         const uint32_t clear = os_game() == 2 && g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_SKY_FALLBACK;
@@ -811,7 +819,7 @@ static void path_from_road(path *r, const scene *sc)
  * were once taken for a pair of palette colours, and every texture for a
  * 256x16 strip; both readings are dead.
  */
-#define MAT_FRAMES 96   /* the menu's letter cubes have 76 */
+#define MAT_FRAMES 128  /* the menu's letter cubes have 76; Screamer 2's cars 128, picked by the car's flags */
 typedef struct {
     int type;               /* routine selector: 16, 64, 224, ... */
     int su, sv;             /* rectangle size in texels */
@@ -825,9 +833,19 @@ typedef struct {
 static material g_mat[MAT_MAX];
 static float    g_obj_zbias = 1.0f;
 static int      g_obj_over;     /* the object being drawn is not hidden by the road it stands in (scene_object.over) */
+static float    g_obj_ground_vy;   /* ...and the height in the view of the place it stands on (its middle) */
+static float    g_obj_eye_h;       /* ...and the camera's height over that road (over_ground) */
+static float    g_eye_h = 400.0f;  /* this picture: the camera's height over the road under it */
 static int      g_wheel_bias = 1;     /* OS_NOWHEELBIAS=1 turns it off */
 static int      g_flat_colour = -1;   /* >= 0: the face being drawn is one flat palette colour */
 static int      g_env_phase;    /* 0..65535: which reflection picture (routine 160) */
+/* SCREAMER 2: THE REFLECTIONS' MAP.  A library loaded with flag 4 (0x4feb4: the race's "env" of
+   gfx\envp<track><look>1.dat, the menu's of envm<..>.dat) is the engine's 0xae4e8, and while
+   there is one routine 160 (0xcc510 .. 0xcd443) takes its PIXELS from that library's first
+   material -- picture (frames x the object's +0x3c) >> 16 -- and only the size of the face's own
+   material (a car's: 8 x 8, a placeholder of blue squares); 0x50165 / 0x50247 let it go.
+   The material number of that first material, or -1 (Screamer 1: always -1) */
+static int      g_env_mat = -1;
 static int      g_tex_phase;    /* 0..16383: which frame of each texture is being drawn */
 static int      g_anim_clock;   /* 0..65535, once round every 3.33 s (0x21538) */
 static float    g_anim_time;    /* the same as 0..1 (0x18e08) */
@@ -845,6 +863,7 @@ static void mlb_load(const char *path)
 {
     memset(g_mat, 0, sizeof g_mat);
     g_nmat = 0;
+    g_env_mat = -1;
     mlb_read(path, 0);
 }
 
@@ -1027,11 +1046,35 @@ static uint32_t mix(uint32_t a, uint32_t b, float t)
 static inline int ifloor(float x) { int i = (int)x; return i - (x < (float)i); }
 static inline int iceil(float x)  { int i = (int)x; return i + (x > (float)i); }
 
+/*
+ * A PUFF OVER THE ROAD IT STANDS IN (raster_tri, "smoke is not cut off by the
+ * road").  The road may cover the puff's lower half only where it is the
+ * ground between the camera and the puff's foot: a point `below` units under
+ * the middle (the foot) of a puff at depth d is seen through flat road at
+ * depth d * h / (h + below), h being the camera's height over the road (on an
+ * even slope too, measured from the slope; the port takes the smaller of its
+ * height over the road under it and over the puff's foot).  Road nearer than that -- a
+ * crest, a bump -- hides it, as does any road over its upper half, and walls,
+ * scenery and cars are tested as for anything else.  0.85: room for a road
+ * that is not quite flat.  (It was: the road hid no puff less than 2.2 times
+ * nearer, and Screamer 2's puffs were tested as twice as near as they are --
+ * so an opponent's smoke showed through bumps and walls (Danik).)  The rule
+ * starts 64 units over the middle, not at it: a puff's middle is the wheel's
+ * foot, a little under the road as drawn, and the row just over the middle fell
+ * to the plain test and lost to the road -- a one-pixel line through each puff,
+ * long straight streaks when a sliding car's puffs stand side by side (Danik).
+ */
+static inline int over_ground(float mine, float there, float py, float gvy, float h)
+{
+    const float below = gvy - (g_cy - py) / (g_focal_y * mine);
+    return below > -64.0f && mine > there * 0.85f * h / (h + below);
+}
+
 /* what raster_tri's rules of depth (they are explained there) say about a
    pixel that is not clearly in front of what is there: 1 = draw it */
-static inline int depth_keep(float mine, float there, int other, int id, int cm, int sprite, int tie)
+static inline int depth_keep(float mine, float there, int other, int id, int cm, int sprite, int tie, float py, float gvy, float eh)
 {
-    if (sprite && other >= 0 && g_obj_ground[other]) return 1;
+    if (sprite && other >= 0 && g_obj_ground[other] && over_ground(mine, there, py, gvy, eh)) return 1;
     if (mine * 2.0f < there) return 0;
     const int co = other >= 0 ? g_obj_carpet[other] : 0;
     if (tie && other >= 0 && cm != co && there > 0.0f)
@@ -1059,6 +1102,7 @@ typedef struct {
     int   id, flat, sprite, tex_phase, env_phase;
     const uint8_t *fade;
     float zbias;
+    float ground_vy, eye_h;             /* sprite: g_obj_ground_vy, g_obj_eye_h */
 } tri_job;
 
 static void raster_job(const tri_job *j, int rows, int counted);
@@ -1088,7 +1132,7 @@ static void raster_tri(const vtx *a, const vtx *b, const vtx *c,
     }
     j.au = a->u; j.av = a->v; j.bu = b->u; j.bv = b->v; j.cu = c->u; j.cv = c->v;
     j.m = m; j.id = id;
-    j.flat = g_flat_colour; j.sprite = g_obj_sprite | g_obj_over; j.zbias = g_obj_zbias; j.fade = g_fade_row;
+    j.flat = g_flat_colour; j.sprite = g_obj_over; j.zbias = g_obj_zbias; j.fade = g_fade_row; j.ground_vy = g_obj_ground_vy; j.eye_h = g_obj_eye_h;
     j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
     raster_list(&j);
 }
@@ -1133,10 +1177,11 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     float inv = 1.0f / area;
     const int keyed = (m->type == 64);
     const int glass = (m->type == 224);
-    int fr = (m->type == 160) ? (m->levels * j->env_phase >> 16) : (m->levels * j->tex_phase >> 14);
-    if (fr < 0 || fr >= m->levels) fr = 0;
-    const uint8_t *page = m->frame[fr];
-    const long avail = m->frame_avail[fr];
+    const material *const pm = (m->type == 160 && g_env_mat >= 0) ? &g_mat[g_env_mat] : m;   /* (Screamer 2: the reflections' map) */
+    int fr = (m->type == 160) ? (pm->levels * j->env_phase >> 16) : (m->levels * j->tex_phase >> 14);
+    if (fr < 0 || fr >= pm->levels) fr = 0;
+    const uint8_t *page = pm->frame[fr];
+    const long avail = pm->frame_avail[fr];
     /* a decal is coplanar with what it is stuck on; let it win the tie */
     /* a reflection (routine 160) is the glass UNDER the bodywork's cut-out
        texture: it must lose every tie with the faces lying on it */
@@ -1173,7 +1218,9 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     int ys = y0 - 0.5f <= (float)miny ? miny : iceil(y0 - 0.5f);         /* (y0 is at most FB_H here) */
     int ye = y2 - 0.5f >= (float)maxy ? maxy : ifloor(y2 - 0.5f);         /* (and y2 at least 0) */
     const int   wraps = (m->type == 160), fbw = FB_W;
+    const int   wrap_mask = pm != m ? 127 : 255;     /* (Screamer 2's reflections' map: 0x7f7f, 0xcd5a1) */
     const int   flat = j->flat, sprite = j->sprite, tie = g_tie_rule;
+    const float gvy = j->ground_vy, eh = j->eye_h;
     const int   cm = id >= 0 ? g_obj_carpet[id] : 0;
     const float fog = g_fog;
     const int   fogged = fog > 0.0f;
@@ -1224,7 +1271,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                   union { float f; uint32_t u; } mz, tz;
                   mz.f = iz * zbias;
                   tz.u = zp[k_];
-                  if (mz.u <= tz.u + 0x00800000u && !depth_keep(mz.f, tz.f, ip[k_], id, cm, sprite, tie)) continue;
+                  if (mz.u <= tz.u + 0x00800000u && !depth_keep(mz.f, tz.f, ip[k_], id, cm, sprite, tie, py, gvy, eh)) continue;
                   int tu = ui >> 16, tv = vi >> 16;
                   if ((tu | tv) & ~255) {
                       tu = tu < 0 ? 0 : tu > 255 ? 255 : tu;
@@ -1244,6 +1291,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
               continue;
           }
           for (int k_ = 0; k_ < n_; k_++, x++, pi++, iz += diz, ui += dui, vi += dvi) {
+            int tiewon = 0;
             {
                 /*
                  * TWO OBJECTS IN THE SAME PLACE.  The engine has no depth
@@ -1283,18 +1331,20 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                  * the puff, a separate object, over the road it stands on and
                  * the whole rectangle shows; a depth buffer hid the lower
                  * half and left a straight edge along the ground (Danik).  So
-                 * a puff is never hidden by a piece of the drivable track;
-                 * walls, scenery and cars still hide it.
+                 * a puff's lower half is not hidden by the drivable track
+                 * between it and the camera (over_ground: a crest further in
+                 * front still hides it); walls, scenery and cars do.
                  */
                 /* Most pixels are nowhere near what is there already -- more
                    than twice as near, or more than twice as far -- and for
                    those every rule above says the same as the plain test. */
                 const float mine = iz * zbias, there = zb[pi];
+                tiewon = 0;
                 if (mine > there * 2.0f) { }
                 else {
                     const int other = idb[pi];
                     const int co = other >= 0 ? g_obj_carpet[other] : 0;
-                    if (sprite && other >= 0 && g_obj_ground[other]) { }
+                    if (sprite && other >= 0 && g_obj_ground[other] && over_ground(mine, there, py, gvy, eh)) { }
                     else if (mine * 2.0f < there) continue;
                     else if (tie && other >= 0 && cm != co && there > 0.0f) {
                         if (cm ? mine < there * 2.0f : mine * 2.0f < there) continue;
@@ -1303,11 +1353,12 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                         mine > there * 0.9999f && mine < there * 1.0001f &&
                         g_obj_d2[id] != g_obj_d2[other]) {
                         if (g_obj_d2[id] > g_obj_d2[other]) continue;
+                        tiewon = g_tiemark;
                     } else if (mine < there) continue;
                 }
             }
             int tu = ui >> 16, tv = vi >> 16;
-            if (wraps) { tu &= 255; tv &= 255; }                                       /* reflections wrap */
+            if (wraps) { tu &= wrap_mask; tv &= wrap_mask; }                           /* reflections wrap */
             else {
                 if (tu < 0) tu = 0;
                 if (tu > 255) tu = 255;
@@ -1364,7 +1415,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
             }
             if (fogged)
                 col = mix(col, COL_FOG, 1.0f - expf(-1.0f / (iz * fog)));
-            fb[pi]  = col;
+            fb[pi]  = tiewon ? 0xFFFF00FFu : col;      /* (OS_TIEMARK: won on a tie of depth, by the nearer object) */
             /* the depth that is KEPT is the biased one too.  Keeping the raw
                depth let a later face that was really behind (a tyre's black
                outer wall after its hub disc, a window's reflection after the
@@ -1700,7 +1751,7 @@ static void emit_face(const vtx *in, float prj[][3], int nc, unsigned any, const
     fade_for(in, nc);
     tri_job j;
     j.m = m; j.id = id;
-    j.flat = g_flat_colour; j.sprite = g_obj_sprite | g_obj_over; j.zbias = g_obj_zbias; j.fade = g_fade_row;
+    j.flat = g_flat_colour; j.sprite = g_obj_over; j.zbias = g_obj_zbias; j.fade = g_fade_row; j.ground_vy = g_obj_ground_vy; j.eye_h = g_obj_eye_h;
     j.tex_phase = g_tex_phase; j.env_phase = g_env_phase;
     j.ax = prj[0][0]; j.ay = prj[0][1]; j.ia = prj[0][2]; j.au = in[0].u; j.av = in[0].v;
     for (int k = 1; k + 1 < nc; k++) {
@@ -1775,6 +1826,11 @@ static void draw_object(const scene_object *so, int id, int pass,
     to_view(centre, &vc);
     if (vc.z < -so->radius) return;
     if (g_far_z > 0.0f && vc.z - so->radius > g_far_z) return;      /* all of it beyond the far plane */
+    g_obj_ground_vy = vc.y;
+    if (so->over) {         /* (the smaller of the camera's height over its own road and over this one's foot) */
+        g_obj_eye_h = cam->z - so->z < g_eye_h ? cam->z - so->z : g_eye_h;
+        if (g_obj_eye_h < 60.0f) g_obj_eye_h = 60.0f;
+    }
     /* ...or all of it off to the side of the picture: the picture's furthest
        corner is 1.61 times as far out as it is deep, whichever way it leans */
     {
@@ -1805,8 +1861,8 @@ static void draw_object(const scene_object *so, int id, int pass,
      *    of the picture is dropped before it is cut and set up.
      * Faces are drawn in the same order as below, to the same picture.
      */
-    int plain_piece = !so->pose && !so->sprite && so->pitch == 0.0f && so->roll == 0.0f && mm->nvert <= MESH_MAX_VERT;
-    for (int i = 0; plain_piece && i < mm->nblock; i++) if (mm->block[i].has_vnormal) plain_piece = 0;
+    int plain_piece = !so->pose && !so->sprite && ((so->pitch == 0.0f && so->roll == 0.0f) || so->mat) && mm->nvert <= MESH_MAX_VERT;
+    for (int i = 0; plain_piece && i < mm->nblock && !so->mat; i++) if (mm->block[i].has_vnormal) plain_piece = 0;
     if (plain_piece) {
         static vtx seen[MESH_MAX_VERT];
         static unsigned seen_at[MESH_MAX_VERT], stamp;
@@ -1814,7 +1870,8 @@ static void draw_object(const scene_object *so, int id, int pass,
         static float seen_prj[MESH_MAX_VERT][3];         /* where on the screen it is, and 1 / its depth */
         const float half_w = FB_W * 0.5f;
         float ax_[3][3];                                 /* where the piece's x, y (up) and z point, in view space */
-        const float dirs[3][3] = { { c, sn, 0.0f }, { 0.0f, 0.0f, 1.0f }, { -sn, c, 0.0f } };
+        float dirs[3][3] = { { c, sn, 0.0f }, { 0.0f, 0.0f, 1.0f }, { -sn, c, 0.0f } };
+        if (so->mat) for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) dirs[a][b] = so->mat[a * 3 + b];
         for (int a = 0; a < 3; a++) {
             const float fx = g_vc * dirs[a][0] + g_vs * dirs[a][1];
             const float x = g_vs * dirs[a][0] - g_vc * dirs[a][1];
@@ -1823,7 +1880,10 @@ static void draw_object(const scene_object *so, int id, int pass,
             ax_[a][1] = y * g_vcr - x * g_vsr;
             ax_[a][2] = g_vsp * dirs[a][2] + g_vcp * fx;
         }
-        const float ex_ = -dx * c - dy * sn, ez_ = dx * sn - dy * c, ey_ = -dz;     /* the eye, in the piece's frame */
+        /* the eye, in the piece's frame (each of its axes' share of the way to the eye) */
+        const float ex_ = -(dirs[0][0] * dx + dirs[0][1] * dy + dirs[0][2] * dz),
+                    ey_ = -(dirs[1][0] * dx + dirs[1][1] * dy + dirs[1][2] * dz),
+                    ez_ = -(dirs[2][0] * dx + dirs[2][1] * dy + dirs[2][2] * dz);
         const float side = FB_W * 0.5f / g_focal_x, top = g_cy / g_focal_y, bottom = ((float)g_vh - g_cy) / g_focal_y;
         const float far_z = g_far_z;
         const int   culling = g_cull;
@@ -1876,6 +1936,22 @@ static void draw_object(const scene_object *so, int id, int pass,
                 in[k].x = v->x; in[k].y = v->y; in[k].z = v->z;
                 in[k].u = (float)mm->uv[vi][0] * su;
                 in[k].v = (float)mm->uv[vi][1] * sv;
+                if (mat->type == 160 && so->mat && mm->face_block[fi] >= 0 && mm->block[mm->face_block[fi]].has_vnormal) {
+                    /* a reflecting face of an object the engine turns (Screamer 2's menu: the cars):
+                       the same sum as below, the corner's normal turned as the object is; no slide */
+                    const vec3 *nv = &mm->vnormal[vi];
+                    const float nx = nv->x * ax_[0][0] + nv->y * ax_[1][0] + nv->z * ax_[2][0];
+                    const float ny = nv->x * ax_[0][1] + nv->y * ax_[1][1] + nv->z * ax_[2][1];
+                    const float nz = nv->x * ax_[0][2] + nv->y * ax_[1][2] + nv->z * ax_[2][2];
+                    float el = sqrtf(v->x * v->x + v->y * v->y + v->z * v->z);
+                    if (el < 1.0f) el = 1.0f;
+                    const float ex = v->x / el, ey = v->y / el, ez = v->z / el;
+                    const float d2 = 2.0f * (ex * nx + ey * ny + ez * nz);
+                    const float rx = d2 * nx - ex, ry = d2 * ny - ey;
+                    const float rk = g_env_mat >= 0 ? 16.0f : 1.0f;
+                    in[k].u = (127.0f + 127.0f * (rx * g_vcr - ry * g_vsr)) * su * rk;
+                    in[k].v = (127.0f + 127.0f * (ry * g_vcr + rx * g_vsr)) * sv * rk;
+                }
                 prj[k][0] = seen_prj[vi][0]; prj[k][1] = seen_prj[vi][1]; prj[k][2] = seen_prj[vi][2];
                 all &= seen_out[vi]; any |= seen_out[vi];
             }
@@ -2048,6 +2124,7 @@ static void draw_object(const scene_object *so, int id, int pass,
             int ok = 1;
             unsigned all = 0x3f, any = 0;
             const float su = (float)mat->su * (1.0f / 256.0f), sv = (float)mat->sv * (1.0f / 256.0f);
+            const float rk = (mirror && g_env_mat >= 0) ? 16.0f : 1.0f;     /* (Screamer 2's reflections: see the long way below) */
             for (int k = 0; k < nc; k++) {
                 const int vi = mm->idx[fi][k];
                 if (vi < 0 || vi >= MESH_MAX_VERT) { ok = 0; break; }
@@ -2094,8 +2171,8 @@ static void draw_object(const scene_object *so, int id, int pass,
                         q_ref[vi][1] = ry * g_vcr + rx * g_vsr;
                         q_ref_at[vi] = q_stamp;
                     }
-                    in[k].u = (127.0f + 127.0f * q_ref[vi][0]) * su;
-                    in[k].v = (127.0f + 127.0f * q_ref[vi][1] - (so->pose ? so->pose->env_scroll : 0.0f)) * sv;
+                    in[k].u = (127.0f + 127.0f * q_ref[vi][0] - (so->pose ? so->pose->env_u : 0.0f)) * su * rk;
+                    in[k].v = (127.0f + 127.0f * q_ref[vi][1] - (so->pose ? so->pose->env_scroll : 0.0f)) * sv * rk;
                 }
             }
             if (!ok || (all & 3) || (!(any & 1) && (all & 0x3c))) { g_flat_colour = -1; continue; }
@@ -2161,8 +2238,13 @@ static void draw_object(const scene_object *so, int id, int pass,
                 float d2 = 2.0f * (ex * nx + ey * ny + ez * nz);
                 float rx = d2 * nx - ex, ry = d2 * ny - ey, rz = d2 * nz - ez;
                 float ru = rx * crx + ry * cry, rv = rx * cux + ry * cuy + rz * cuz;
-                uv[k][0] = (127.0f + 127.0f * ru) * (float)mat->su / 256.0f;
-                uv[k][1] = (127.0f + 127.0f * rv - (so->pose ? so->pose->env_scroll : 0.0f)) * (float)mat->sv / 256.0f;
+                /* SCREAMER 2 (g_env_mat): the reflections' map wraps at 128 (0xcd5a1 masks the texel's
+                   address with 0x7f7f) and a face's size reads 16 times as far: a car's glass is 8 x 8,
+                   so the whole of r's range spans the map's 128 once -- as the original's windscreens
+                   show the map's streaks from side to side (DOSBox, the arcade page) */
+                const float rk = g_env_mat >= 0 ? 16.0f : 1.0f;
+                uv[k][0] = (127.0f + 127.0f * ru - (so->pose ? so->pose->env_u : 0.0f)) * (float)mat->su * rk / 256.0f;
+                uv[k][1] = (127.0f + 127.0f * rv - (so->pose ? so->pose->env_scroll : 0.0f)) * (float)mat->sv * rk / 256.0f;
             }
         }
         if (!ok) continue;
@@ -2218,8 +2300,14 @@ static void draw_guides(void)
     }
 }
 
+static int track_under(float x, float y, int want_height, float *out);
 static void render_scene(const camera *cam, const sky *s)
 {
+    {   /* the camera's height over the road (for the smoke: over_ground) */
+        float h;
+        g_eye_h = track_under(cam->x, cam->y, 1, &h) ? cam->z - h : 400.0f;
+        if (g_eye_h < 60.0f) g_eye_h = 60.0f;
+    }
     g_wheel_bias = !getenv("OS_NOWHEELBIAS");
     g_tie_rule = !getenv("OS_NOTIE");
     if (getenv("OS_ANIMCLOCK"))            /* 0..1: fix the animation clock (for --shot) */
@@ -2270,9 +2358,11 @@ static void render_scene(const camera *cam, const sky *s)
     MISTER_MARK(5);
 }
 
+static void s2_env_slide(const camera *cam);
 static void render_frame(const camera *cam, const sky *s)
 {
-    if (os_game() == 2) s2_dark_make();
+    g_tiemark = getenv("OS_TIEMARK") != NULL;           /* a test: pixels won on a tie of depth in magenta */
+    if (os_game() == 2) { s2_dark_make(); s2_env_slide(cam); }
 #ifdef MISTER_HYBRID
     /*
      * MISTER: HOW FAR IS DRAWN FOLLOWS THE TIME THERE IS.  A picture has one
@@ -2947,6 +3037,36 @@ static mesh     g_s2_car[S2_CARS];
 static car_pose g_s2_pose[S2_CARS];
 static scene_object *g_s2_obj[S2_CARS];
 static int      g_s2_on;                 /* the game's own race routines are running (s2_hooks.c) */
+/*
+ * HOW FAR A CAR'S REFLECTIONS HAVE SLID (0xb0040, every time the engine draws the object): its
+ * move since it was last drawn, turned into the camera's axes, times 0xb04a8 (s2_env_rate) is
+ * added to two sums kept with the object (+0x30, +0x38: the camera's right and up); each sum
+ * to the nearest whole number, of 256, is taken from that axis's coordinate of the reflection
+ * (127 + 127 r - it).  Screamer 1's engine does the same; the port's Screamer 1 slides by the
+ * distance driven alone (env_scroll), as before.
+ */
+static struct { float sum[2], last[3]; int have; } g_s2_slide[S2_CARS];
+static void s2_env_slide(const camera *cam)
+{
+    const float k = s2_env_rate();
+    const float cyw = cosf(cam->yaw), syw = sinf(cam->yaw), cp = cosf(cam->pitch), sp = sinf(cam->pitch);
+    const float rx = syw, ry = -cyw;                            /* the camera's right and up, as draw_object's */
+    const float ux = -cyw * sp, uy = -syw * sp, uz = cp;
+    for (int i = 0; i < g_s2_on && i < S2_CARS; i++) {
+        const scene_object *o = g_s2_obj[i];
+        if (!o) continue;
+        const float at[3] = { o->x, o->y, o->z };
+        if (g_s2_slide[i].have) {
+            const float dx = at[0] - g_s2_slide[i].last[0], dy = at[1] - g_s2_slide[i].last[1], dz = at[2] - g_s2_slide[i].last[2];
+            g_s2_slide[i].sum[0] += (dx * rx + dy * ry) * k;
+            g_s2_slide[i].sum[1] += (dx * ux + dy * uy + dz * uz) * k;
+        }
+        memcpy(g_s2_slide[i].last, at, sizeof at);
+        g_s2_slide[i].have = 1;
+        g_s2_pose[i].env_u = (float)((int)lrintf(g_s2_slide[i].sum[0]) & 255);
+        g_s2_pose[i].env_scroll = (float)((int)lrintf(g_s2_slide[i].sum[1]) & 255);
+    }
+}
 
 static void s2_race_read(void);
 
@@ -2954,6 +3074,16 @@ static void s2_race_read(void);
    on the grid as the game puts it; the others drive themselves */
 static scene_object *g_s2_shadow[S2_CARS];
 static scene_object *shadow_new(void);
+static int g_s2_mirror_on, g_s2_mirror_frame_ok = -1;      /* the mirror: on (R, OS_S2MIRROR); its frame's picture read */
+/* (the mirror's camera after the game's last two frames, and how far between them the
+   picture is: it is drawn in between like everything else, or what it shows would move
+   17.7 times a second on a faster screen) */
+static s2_camera_state g_s2_mir_was, g_s2_mir_is;
+static int g_s2_mir_was_ok, g_s2_mir_is_ok;
+static float g_s2_show_t = 1.0f;
+static int pkc_load(const char *file, int16_t *out);
+static void pkc_draw(const int16_t *pic);
+static int g_pkc_loads;
 #define S2_PUFFS 48
 #define S2_SPARKS 60
 static mesh g_s2_smoke[2], g_s2_tri[2];
@@ -2961,7 +3091,7 @@ static scene_object *g_s2_puff[S2_PUFFS], *g_s2_spark[S2_SPARKS];
 static int g_s2_npuff, g_s2_nspark;
 /* the obstacles (cones ...): a mesh for each name the track's list has, an object for each */
 #define S2_OBST 64
-#define S2_OBST_KINDS 4
+#define S2_OBST_KINDS 8
 static mesh g_s2_obst_mesh[S2_OBST_KINDS];
 static char g_s2_obst_name[S2_OBST_KINDS][16];
 static int  g_s2_obst_kinds, g_s2_obst_base = -1, g_s2_nobst;
@@ -2972,6 +3102,11 @@ static scene_object *g_s2_obst[S2_OBST];
    flying cone would jump from place to place on a faster screen. */
 static struct { int on; s2_spark s; } g_s2_spark_was[S2_SPARKS], g_s2_spark_is[S2_SPARKS];
 static struct { int on; s2_obstacle s; } g_s2_obst_was[S2_OBST], g_s2_obst_is[S2_OBST];
+/* the track's animations (birds ...): s2_hooks.c says which are to be seen and where */
+#define S2_ANIMS 24
+static scene_object *g_s2_anim[S2_ANIMS];
+static int g_s2_nanimobj;
+static struct { int on; s2_anim s; } g_s2_anim_was[40], g_s2_anim_is[40];
 static float s2_between(float a, float b, float t);
 
 static mesh *s2_obst_mesh(const char *name)
@@ -3045,17 +3180,53 @@ static void s2_puffs_show(float t)
             if (!mm) continue;
             scene_object *o = g_s2_obst[m++];
             o->m = mm;
-            o->x = s2_between(a->x, b->x, t); o->y = s2_between(a->y, b->y, t); o->z = s2_between(a->height, b->height, t);
+            /* The game has an obstacle's MIDDLE at the ground and, drawing whole objects back
+               to front, shows all of it.  With a depth test the lower half would be in the
+               ground; letting the road not hide it made it show through crests and walls
+               (Danik).  So it is stood ON the ground instead -- raised by what its model
+               has below its middle -- and hidden by whatever is in front like anything else.
+               The port's own. */
+            float low = 0.0f;
+            for (int vi = 0; vi < mm->nvert; vi++) if (mm->vert[vi].y < low) low = mm->vert[vi].y;
+            o->x = s2_between(a->x, b->x, t); o->y = s2_between(a->y, b->y, t); o->z = s2_between(a->height, b->height, t) - low;
             o->yaw = s2_between(a->angle[1], b->angle[1], t);
             o->pitch = s2_between(a->angle[0], b->angle[0], t) - 3.14159274f; o->roll = s2_between(a->angle[2], b->angle[2], t) - 3.14159274f;
         }
         for (int i = m; i < g_s2_nobst; i++) g_s2_obst[i]->z = -1.0e6f;
         if (getenv("OS_S2PUFFLOG") && m) printf("obstacles: %d\n", m);
     }
+    /* the track's animations: an object along its path (0x2cee4), drawn between the game's
+       last two frames; one that has just appeared starts where it is */
+    {
+        int m = 0;
+        for (int k = 0; k < 40 && m < g_s2_nanimobj; k++) {
+            if (!g_s2_anim_is[k].on) continue;
+            const s2_anim *b = &g_s2_anim_is[k].s, *a = g_s2_anim_was[k].on ? &g_s2_anim_was[k].s : b;
+            mesh *mm = s2_obst_mesh(b->name[0] == 's' ? b->name + 1 : b->name);
+            if (!mm) continue;
+            scene_object *o = g_s2_anim[m++];
+            o->m = mm;
+            o->sprite = b->faces_screen;
+            o->x = s2_between(a->x, b->x, t); o->y = s2_between(a->y, b->y, t); o->z = s2_between(a->height, b->height, t);
+            o->yaw = b->heading; o->pitch = -b->climb; o->roll = 0.0f;     /* (the game's up / down, +0x14, is the port's pitch the other way round:
+                                                                                 the cable cars on track 4's slopes leant against their rails -- Danik) */
+            if (getenv("OS_S2ANIMTURN")) { float a0 = 0, a1 = 0, a2 = 0; sscanf(getenv("OS_S2ANIMTURN"), "%f,%f,%f", &a0, &a1, &a2); o->pitch += a0; o->yaw += a1; o->roll += a2; }   /* a test */
+        }
+        for (int i = m; i < g_s2_nanimobj; i++) g_s2_anim[i]->z = -1.0e6f;
+        if (getenv("OS_S2PUFFLOG") && m) printf("animations seen: %d; the first at %.0f %.0f height %.0f\n", m, (double)g_s2_anim[0]->x, (double)g_s2_anim[0]->y, (double)g_s2_anim[0]->z);
+    }
     if (getenv("OS_S2PUFFTEST") && g_s2_npuff && g_s2_obj[0]) {       /* a test: one puff over the player's car, part-way through */
         scene_object *o = g_s2_puff[g_s2_npuff - 1];
         o->m = &g_s2_smoke[atoi(getenv("OS_S2PUFFTEST")) == 2];
         o->x = g_s2_obj[0]->x; o->y = g_s2_obj[0]->y; o->z = g_s2_obj[0]->z + 400.0f; o->phase = 30000;
+        const int c = getenv("OS_S2PUFFCAR") ? atoi(getenv("OS_S2PUFFCAR")) : -1;
+        if (c >= 0 && c < S2_CARS && g_s2_obj[c] && g_s2_npuff >= 5)    /* ...or five where car n stands, as its own would */
+            for (int k = 0; k < 5; k++) {
+                o = g_s2_puff[g_s2_npuff - 1 - k];
+                o->m = &g_s2_smoke[atoi(getenv("OS_S2PUFFTEST")) == 2];
+                o->x = g_s2_obj[c]->x + (float)(k % 3 - 1) * 300.0f; o->y = g_s2_obj[c]->y + (float)(k / 3) * 300.0f;
+                o->z = g_s2_obj[c]->z; o->phase = 20000;
+            }
     }
 }
 
@@ -3064,14 +3235,15 @@ static float g_s2_end_t;
 static int   g_s2_end_sel, g_s2_track;
 
 static void volumes_apply(float fade);
+static void s2_attract_start(void);
 static void s2_race_begin(int track, const char *gfxdir)
 {
     if (getenv("OS_LAPS")) s2_laps = atoi(getenv("OS_LAPS")) > 0 ? atoi(getenv("OS_LAPS")) : 3;
     g_s2_track = track; g_s2_end_t = 0.0f; g_s2_end_sel = 0;
+    s2_attract_start();
     /* the cars as the menu gives them (0x339e7): the player's team (0 until there is a menu)
        and its car -- every team's choice starts as car 1 (0x32d53) -- and the others the
        next teams and the next cars round, of four */
-    static const int team[S2_CARS] = { 0, 1, 2, 3 };
     int model[S2_CARS] = { 1, 2, 3, 0 };
     if (getenv("OS_CAR")) {
         model[0] = (atoi(getenv("OS_CAR")) % 5 + 5) % 5;
@@ -3079,6 +3251,31 @@ static void s2_race_begin(int track, const char *gfxdir)
     }
     int n = getenv("OS_S2CARS") ? atoi(getenv("OS_S2CARS")) : S2_CARS;
     if (n < 1 || n > S2_CARS) n = S2_CARS;
+    /* the kind of game (0x339e7): time attack is the player and the ghost, by day; a free
+       run the player alone */
+    if (getenv("OS_S2GAME")) s2_mode = atoi(getenv("OS_S2GAME"));
+    if (getenv("OS_S2GHOST")) s2_ghost_on = atoi(getenv("OS_S2GHOST")) != 0;
+    if (s2_mode == 4) n = 2;
+    if (s2_mode == 8) n = 1;
+    /* the player's team, and the others the next teams round (0x339e7); in the championship's
+       fourth league every other car is its team's fifth */
+    int team[S2_CARS] = { 0, 1, 2, 3 };
+    if (getenv("OS_TEAM")) for (int t = 0; t < S2_CARS; t++) team[t] = (atoi(getenv("OS_TEAM")) + t) & 3;
+    if (s2_mode == 2) {
+        n = S2_CARS;
+        if (getenv("OS_S2LEAGUE") && atoi(getenv("OS_S2LEAGUE")) == 3) for (int t = 1; t < S2_CARS; t++) model[t] = 4;
+    }
+    if (getenv("OS_S2ENTRIES") && getenv("OS_FROM_MENU")) {     /* (the game's menu: the cars its record has, 0x339e7) */
+        const char *p = getenv("OS_S2ENTRIES");
+        int cnt = 0, used = 0;
+        if (sscanf(p, "%d%n", &cnt, &used) == 1 && cnt >= 1 && cnt <= S2_CARS) {
+            int ok = 1, tm[S2_CARS], md[S2_CARS];
+            p += used;
+            for (int t = 0; t < cnt && ok; t++) { ok = sscanf(p, "%d %d%n", &tm[t], &md[t], &used) == 2 && tm[t] >= 0 && tm[t] < 4 && md[t] >= 0 && md[t] < 5; p += used; }
+            if (ok) { n = cnt; for (int t = 0; t < cnt; t++) { team[t] = tm[t]; model[t] = md[t]; } }
+        }
+    }
+    s2_attack_plan(track, team, model);
     for (int t = 0; t < n && g_ncar < MAX_CARS; t++) {
         char file[600];
         snprintf(file, sizeof file, "build/dec/CARS%d%d1/AUTO%d.MLB", team[t] + 1, g_s2_cond & 1, model[t] + 1);
@@ -3094,6 +3291,14 @@ static void s2_race_begin(int track, const char *gfxdir)
         o->phase = -1;
         o->radius = 1200.0f;
         g_s2_obj[t] = o;
+    }
+    /* the reflections' map (0x2ecb0, after the cars): "env" of gfx\envp<track><look & 1>1.dat,
+       flag 4 -- every car's glass reads it (g_env_mat) */
+    {
+        char file[600];
+        snprintf(file, sizeof file, "build/dec/ENVP%d%d1/ENV.MLB", track, g_s2_cond & 1);
+        g_env_mat = mlb_add(file);
+        memset(g_s2_slide, 0, sizeof g_s2_slide);
     }
     /* the shadow: ASHADOW.3DX of the track's pictures, an object of its own for every car
        (0x2f519; placed by 0x1f4a8) */
@@ -3121,14 +3326,12 @@ static void s2_race_begin(int track, const char *gfxdir)
                 memset(o, 0, sizeof *o);
                 o->m = &g_s2_smoke[0];
                 o->sprite = 1;
+                o->over = 1;
                 o->radius = 500.0f;
                 /* The game draws its objects back to front, whole: a puff, whose middle is at
-                   the wheel's foot, shows its lower half too, over the road in front of it.
-                   With a depth test that half would be under the ground -- and it is the
-                   thicker half.  So a puff is tested as if twice as near: the road under it
-                   (nearer by no more than height / (height + 284) of the eye's height) never
-                   hides it, things well in front of it still do.  The port's own. */
-                o->zbias = getenv("OS_S2PUFFBIAS") ? (float)atof(getenv("OS_S2PUFFBIAS")) : 2.0f;
+                   the wheel's foot, shows its lower half too, over the road in front of it
+                   (the thicker half).  `over`: the road between it and the camera does not
+                   hide that half, a crest or a wall does (over_ground). */
                 o->z = -1.0e6f;
                 g_s2_puff[g_s2_npuff++] = o;
             }
@@ -3141,10 +3344,20 @@ static void s2_race_begin(int track, const char *gfxdir)
                 scene_object *o = &g_car[g_ncar++];
                 memset(o, 0, sizeof *o);
                 o->phase = -1;
-                o->over = 1;
                 o->radius = 300.0f;
                 o->z = -1.0e6f;
                 g_s2_obst[g_s2_nobst++] = o;
+            }
+            /* the track's animations */
+            g_s2_nanimobj = 0;
+            memset(g_s2_anim_was, 0, sizeof g_s2_anim_was); memset(g_s2_anim_is, 0, sizeof g_s2_anim_is);
+            for (int i = 0; i < S2_ANIMS && g_ncar < MAX_CARS - S2_SPARKS; i++) {
+                scene_object *o = &g_car[g_ncar++];
+                memset(o, 0, sizeof *o);
+                o->phase = -1;
+                o->radius = 3000.0f;
+                o->z = -1.0e6f;
+                g_s2_anim[g_s2_nanimobj++] = o;
             }
             /* the sparks: AZTRI.3DX and AZ1TRI.3DX */
             g_s2_nspark = 0;
@@ -3171,6 +3384,10 @@ static void s2_race_begin(int track, const char *gfxdir)
     if (os_once(2)) atexit(snd_close);
     if (!s2_race_start(track, g_s2_cond, n, team, model)) { fprintf(stderr, "screamer 2: the race did not start\n"); return; }
     g_s2_on = n;
+    if (getenv("OS_S2MIRROR")) g_s2_mirror_on = atoi(getenv("OS_S2MIRROR")) != 0;
+    s2_mirror_set(g_s2_mirror_on);
+    g_s2_mirror_frame_ok = -1;
+    g_s2_mir_was_ok = g_s2_mir_is_ok = 0;
     s2_hud_load();
     s2_race_read(); s2_race_read();
 }
@@ -3219,13 +3436,21 @@ static void s2_race_read(void)
         memset(g_s2_spark_is, 0, sizeof g_s2_spark_is); memset(g_s2_obst_is, 0, sizeof g_s2_obst_is);
         for (int i = 0; i < ns; i++) if (sp[i].id >= 0 && sp[i].id < S2_SPARKS) { g_s2_spark_is[sp[i].id].on = 1; g_s2_spark_is[sp[i].id].s = sp[i]; }
         for (int i = 0; i < no; i++) if (ob[i].id >= 0 && ob[i].id < S2_OBST) { g_s2_obst_is[ob[i].id].on = 1; g_s2_obst_is[ob[i].id].s = ob[i]; }
+        s2_anim an[40];
+        const int na = s2_anims(an, 40);
+        memcpy(g_s2_anim_was, g_s2_anim_is, sizeof g_s2_anim_was);
+        memset(g_s2_anim_is, 0, sizeof g_s2_anim_is);
+        for (int i = 0; i < na; i++) if (an[i].id >= 0 && an[i].id < 40) { g_s2_anim_is[an[i].id].on = 1; g_s2_anim_is[an[i].id].s = an[i]; }
     }
     g_s2_cam_was = g_s2_cam_is; s2_camera(&g_s2_cam_is);
+    g_s2_mir_was = g_s2_mir_is; g_s2_mir_was_ok = g_s2_mir_is_ok;
+    g_s2_mir_is_ok = s2_mirror(&g_s2_mir_is);
 }
 
 /* one frame of the game's race */
 static void s2_race_step(void)
 {
+    if (s2_mode & 0x80) s2_attract_step();               /* (the attract race: the game drives every car) */
     if (getenv("OS_S2ROBOT")) {                          /* a test: the game's driver has the player's car for so many frames */
         static int f, said;
         s2_robot(f++ < atoi(getenv("OS_S2ROBOT")));
@@ -3255,9 +3480,69 @@ static float s2_angle_between(float a, float b, float t) { return a + s2_half_tu
 /* the cars where the game's routines have them, `t` of the way from the frame before to the
    last: a car's place is car +0x4d8 (x, height, y), its heading +0x4e8 with forward =
    (sin, -cos), which is the port's yaw as it is */
+/* F12 in a race also writes shot_NNN.txt: every object that owns pixels of the picture, how
+   many and where on the screen, and what it is -- a piece of the track (its model, record run,
+   place, materials) or one of the race's own (a car, a shadow, a puff, a spark, an obstacle,
+   moving scenery).  For finding what something on the screen is. */
+static const char *s2_what(const scene_object *o, int *k)
+{
+    for (*k = 0; *k < S2_CARS; (*k)++) { if (o == g_s2_obj[*k]) return "car"; if (o == g_s2_shadow[*k]) return "car's shadow"; }
+    for (*k = 0; *k < g_s2_npuff; (*k)++) if (o == g_s2_puff[*k]) return "smoke puff";
+    for (*k = 0; *k < g_s2_nspark; (*k)++) if (o == g_s2_spark[*k]) return "spark";
+    for (*k = 0; *k < g_s2_nobst; (*k)++) if (o == g_s2_obst[*k]) return "obstacle";
+    for (*k = 0; *k < g_s2_nanimobj; (*k)++) if (o == g_s2_anim[*k]) return "moving scenery";
+    *k = -1;
+    return "other (the port's own)";
+}
+static void shot_report(const char *ppm, const camera *cam)
+{
+    char name[96];
+    snprintf(name, sizeof name, "%.*s.txt", (int)(strlen(ppm) > 4 ? strlen(ppm) - 4 : strlen(ppm)), ppm);
+    FILE *f = fopen(name, "w");
+    if (!f || !g_scene) { if (f) fclose(f); return; }
+    const int nid = g_scene->count + g_ncar;
+    int *cnt = calloc((size_t)nid + 1, sizeof(int)), *box = malloc(sizeof(int) * 4 * ((size_t)nid + 1));
+    if (!cnt || !box) { free(cnt); free(box); fclose(f); return; }
+    for (int i = 0; i < nid; i++) { box[4 * i] = box[4 * i + 1] = 1 << 30; box[4 * i + 2] = box[4 * i + 3] = -1; }
+    for (int y = 0; y < FB_H; y++)
+        for (int x = 0; x < FB_W; x++) {
+            const int id = idb[y * FB_W + x];
+            if (id < 0 || id >= nid) continue;
+            cnt[id]++;
+            if (x < box[4 * id]) box[4 * id] = x; if (y < box[4 * id + 1]) box[4 * id + 1] = y;
+            if (x > box[4 * id + 2]) box[4 * id + 2] = x; if (y > box[4 * id + 3]) box[4 * id + 3] = y;
+        }
+    fprintf(f, "picture %s, %dx%d; camera at %.0f %.0f height %.0f, heading %.3f, pitch %.3f\n", ppm, FB_W, FB_H, cam->x, cam->y, cam->z, cam->yaw, cam->pitch);
+    if (g_s2_on && g_s2_obj[s2_player()]) fprintf(f, "the player's car at %.0f %.0f height %.0f\n", g_s2_obj[s2_player()]->x, g_s2_obj[s2_player()]->y, g_s2_obj[s2_player()]->z);
+    fprintf(f, "pixels  screen box (x0 y0 x1 y1)  what\n");
+    for (int id = 0; id < nid; id++) {
+        if (!cnt[id]) continue;
+        const scene_object *o = id < g_scene->count ? &g_scene->obj[id] : &g_car[id - g_scene->count];
+        fprintf(f, "%6d  %3d %3d %3d %3d  ", cnt[id], box[4 * id], box[4 * id + 1], box[4 * id + 2], box[4 * id + 3]);
+        if (id < g_scene->count) fprintf(f, "track piece V%d run %d", o->v, o->layer);
+        else { int k; const char *w = s2_what(o, &k); fprintf(f, "%s %d", w, k); }
+        fprintf(f, " at %.0f %.0f height %.0f, heading %.3f, pitch %.3f, roll %.3f", o->x, o->y, o->z, o->yaw, o->pitch, o->roll);
+        if (o->m) {
+            fprintf(f, "; %d faces, materials", o->m->nface);
+            int seen = 0;
+            for (int fi = 0; fi < o->m->nface && seen < 6; fi++) {
+                const int mi = o->m->material[fi] / 16;
+                int dup = 0;
+                for (int fj = 0; fj < fi; fj++) if (o->m->material[fj] / 16 == mi) { dup = 1; break; }
+                if (dup) continue;
+                fprintf(f, " %d(routine %d)", mi, mi >= 0 && mi < MAT_MAX ? g_mat[mi].type : -1);
+                seen++;
+            }
+        }
+        fputc('\n', f);
+    }
+    free(cnt); free(box);
+    fclose(f);
+}
 static void s2_race_show_cars(float t);
 static void s2_race_show(float t)
 {
+    g_s2_show_t = t;
     s2_race_show_cars(t);
     s2_puffs_show(t);                                   /* (after the cars: some puffs go where their car is drawn) */
 }
@@ -3272,6 +3557,9 @@ static void s2_race_show_cars(float t)
         /* the game's is + nose up, the port's tilt() + tail up */
         o->pitch = -s2_angle_between(a->angle[0], b->angle[0], t);
         o->roll = s2_angle_between(a->angle[2], b->angle[2], t);
+        o->phase = b->look;     /* (which picture of each texture: brake lights, wheels' blur, dents -- s2_car_state.look) */
+        g_s2_pose[i].env = b->env;                      /* (the reflections' picture) */
+        if (getenv("OS_S2LOOKFLAGS")) o->phase = (int)strtol(getenv("OS_S2LOOKFLAGS"), NULL, 16);   /* a test: those flags drawn */
         /* the shadow lies on the ground under the car, at the ground's own slope (0x1f4a8; the
            game also moves it 30 units away from the camera and 2 under the road for its
            back-to-front drawing -- the port's depth test does not need that) */
@@ -3301,6 +3589,10 @@ static void s2_race_show_cars(float t)
             p->wheel_spin[w] = s2_angle_between(a->wheel_spin[w], b->wheel_spin[w], t);
             p->wheel_in[w] = s2_between((float)a->wheel_in[w], (float)b->wheel_in[w], t);
         }
+        if (!b->shown) {                                /* (time attack's ghost, none to show) */
+            o->z = -1.0e7f;
+            if (g_s2_shadow[i]) g_s2_shadow[i]->z = -1.0e7f;
+        }
     }
 }
 
@@ -3325,10 +3617,59 @@ static void s2_camera_show(camera *cam, float t)
     cam->yaw = atan2f(-cosf(h), sinf(h));
     cam->pitch = s2_half_turn(s2_angle_between(a->angle[0], b->angle[0], t));
     cam->roll = -s2_half_turn(s2_angle_between(a->angle[2], b->angle[2], t));
-    g_hide = (b->view == 2 || b->view == 6) ? g_s2_obj[0] : NULL;
+    g_hide = (b->view == 2 || b->view == 6) ? g_s2_obj[s2_player()] : NULL;
     /* the scene's rows are the view's, the eye line 0.65 of them (0x12dff -> 0x4f6c4): view
        6 draws only down to the dashboard */
     if (b->rows > 0 && b->rows <= 200) { g_vh = b->rows * SY + (b->rows == 200 ? g_tall : 0); g_cy = EYE_LINE * (float)g_vh; }
+}
+
+/*
+ * THE MIRROR (s2_hooks.c s2_mirror has what the game does).  The port draws the mirror's
+ * scene first, into the top rows of the picture, keeps it squeezed and turned round, draws
+ * the picture itself, and then lays the kept strip and its frame over it.  R turns it on and
+ * off (OS_S2MIRROR=1 starts with it on); the game has it as an option of its menu.
+ */
+static int g_s2_mirror_have, g_s2_mirror_w, g_s2_mirror_h;
+static uint32_t g_s2_mirror_px[(FB_MAXW / 2) * 100];
+static int16_t g_s2_mirror_frame[FB_MAXW * FB_MAXH];
+
+static void s2_render(const camera *cam, const sky *sk)
+{
+    g_s2_mirror_have = 0;
+    if (g_s2_on && g_s2_mirror_on && g_s2_mir_is_ok) {
+        const s2_camera_state m = g_s2_mir_is, *b = &g_s2_mir_is, *a = g_s2_mir_was_ok ? &g_s2_mir_was : b;
+        const float t = g_s2_show_t;
+        camera mc = *cam;
+        const scene_object *hid = g_hide;
+        const int vh = g_vh; const float cy = g_cy;
+        float shadow_z = 0.0f;
+        const float h = s2_angle_between(a->angle[1], b->angle[1], t);
+        mc.x = s2_between((float)a->x, (float)b->x, t); mc.y = s2_between((float)a->y, (float)b->y, t);
+        mc.z = s2_between((float)a->height, (float)b->height, t);
+        mc.yaw = atan2f(-cosf(h), sinf(h));
+        mc.pitch = s2_half_turn(s2_angle_between(a->angle[0], b->angle[0], t));
+        mc.roll = -s2_half_turn(s2_angle_between(a->angle[2], b->angle[2], t));
+        g_vh = m.rows * SY; g_cy = EYE_LINE * (float)g_vh;
+        g_hide = g_s2_obj[s2_player()];                       /* (0x2b6b4: the car and its shadow are not in it) */
+        if (g_s2_shadow[0]) { shadow_z = g_s2_shadow[0]->z; g_s2_shadow[0]->z = -1.0e6f; }
+        render_frame(&mc, sk);
+        g_s2_mirror_w = FB_W / 2; g_s2_mirror_h = g_vh;
+        for (int y = 0; y < g_s2_mirror_h && y < 100; y++)
+            for (int x = 0; x < g_s2_mirror_w; x++)
+                g_s2_mirror_px[y * (FB_MAXW / 2) + x] = fb[y * FB_W + (FB_W - 2 - 2 * x)];
+        g_s2_mirror_have = 1;
+        if (g_s2_shadow[0]) g_s2_shadow[0]->z = shadow_z;
+        g_hide = hid; g_vh = vh; g_cy = cy;
+    }
+    render_frame(cam, sk);
+    if (g_s2_mirror_have) {
+        const int x0 = 80 * g_s, y0 = 14 * SY;
+        for (int y = 0; y < g_s2_mirror_h && y0 + y < FB_H; y++)
+            for (int x = 0; x < g_s2_mirror_w && x0 + x < FB_W; x++)
+                fb[(y0 + y) * FB_W + x0 + x] = g_s2_mirror_px[y * (FB_MAXW / 2) + x];
+        if (g_s2_mirror_frame_ok < 0) { g_s2_mirror_frame_ok = pkc_load("build/dec/GAME1/MIRROR_L.PKC", g_s2_mirror_frame); g_pkc_loads++; }
+        if (g_s2_mirror_frame_ok > 0) { LAY_TOP(); pkc_draw(g_s2_mirror_frame); }
+    }
 }
 
 /* the path sample nearest a point -- "where on the lap am I?" */
@@ -3916,6 +4257,7 @@ static void smoke_init(const char *gfxdir)
         memset(o, 0, sizeof *o);
         o->m = &g_smoke_mesh;
         o->sprite = 1;
+        o->over = 1;
         o->radius = 500.0f;
         o->z = -1.0e6f;
         g_puff[i].obj = o;
@@ -4669,11 +5011,15 @@ static void s2_blend_rows(int first, int n, float r, float g, float b, int brigh
 static void s2_blend_make(const int smoke[3], const int dust[3])
 {
     for (int row = 0; row < 112; row++) for (int i = 0; i < 256; i++) g_smg[row * 256 + i] = (uint8_t)i;
-    s2_blend_rows(0, 32, (float)(smoke[0] >> 2), (float)(smoke[1] >> 2), (float)(smoke[2] >> 2), 0);
+    /* (0x504f2: with all three of asmoke's below 0 only the shadow's rows -- the menu's rooms) */
+    const int all = !(smoke[0] < 0 && smoke[1] < 0 && smoke[2] < 0);
+    if (all) s2_blend_rows(0, 32, (float)(smoke[0] >> 2), (float)(smoke[1] >> 2), (float)(smoke[2] >> 2), 0);
     s2_blend_rows(32, 16, 0.0f, 0.0f, 0.0f, 0);
-    s2_blend_rows(48, 32, (float)(dust[0] >> 2), (float)(dust[1] >> 2), (float)(dust[2] >> 2), 0);
-    s2_blend_rows(80, 16, 0.0f, 0.0f, 0.0f, 1);
-    s2_blend_rows(96, 16, 63.0f, 63.0f, 63.0f, 0);
+    if (all) {
+        s2_blend_rows(48, 32, (float)(dust[0] >> 2), (float)(dust[1] >> 2), (float)(dust[2] >> 2), 0);
+        s2_blend_rows(80, 16, 0.0f, 0.0f, 0.0f, 1);
+        s2_blend_rows(96, 16, 63.0f, 63.0f, 63.0f, 0);
+    }
     g_smg_rows = 112;
 }
 
@@ -5622,6 +5968,7 @@ static void hud_put(int x, int y, int idx)
     y += g_oy;
     if (x < g_clip[0] || x >= g_clip[1] || y < g_clip[2] || y >= g_clip[3]) return;
     fb[y * FB_W + x] = g_pal[idx & 255];
+    if (pxi) pxi[y * FB_W + x] = (int16_t)(idx & 255);   /* (the colour's number too: what is darkened, blended, faded) */
 }
 
 /* 0x24fc0 with draw = 1, 0x25448 with draw = 0.  Positions and the width
@@ -5637,7 +5984,10 @@ static int hud_text(int x, int y, const char *str, int font, int colour, int dra
     if (font < 0 || font >= g_nfont) return 0;
     const hud_font *ft = &g_font[font];
     x *= g_s; y *= g_s;
-    int cell = ft->widest + 2 * g_s, fixed = 0, gap = g_s, x0 = x;
+    /* (figures in a column, after a byte 1: every one takes the widest letter's room and
+       what is left between two -- in Screamer 2 the routine's own argument, which makes
+       the clocks' figures 5 apart in the small font, as the original's picture has them) */
+    int cell = ft->widest + (g_hud_space != NO_SPACE ? g_hud_space * g_s : 2 * g_s), fixed = 0, gap = g_s, x0 = x;
     for (const unsigned char *p = (const unsigned char *)str; *p; p++) {
         int ch = *p;
         if (ch < ft->first || ch >= ft->first + ft->count) {
@@ -5702,6 +6052,15 @@ static void hud_clock(char *out, size_t n, float t)
     int whole = (int)t;                 /* the game's float -> int (0x4d7b4) cuts, it does not round */
     int hund = (int)((t - (float)whole) * 100.0f);
     snprintf(out, n, "%02d:%02d:%02d", whole / 60, whole % 60, hund);
+}
+/* Screamer 2's (0x37e06): the same, but "no time yet" (3599.999, the lists' empty row) is
+   "--:--:--" */
+static void s2_clock(char *out, size_t n, float t)
+{
+    uint32_t bits;
+    memcpy(&bits, &t, 4);
+    if (bits == 0x4560fffcu) snprintf(out, n, "--:--:--");
+    else hud_clock(out, n, t);
 }
 
 /*
@@ -5980,11 +6339,20 @@ static char g_s2_gt[64][40];        /* GAME.TXT's lines, the notes (*) left out:
 #define g_s2_text (g_s2_gt + 20)    /* THIS LAP, TOTAL, BEST LAP, BEST TOTAL, BEST LAP!, WRONG WAY, POSITION, LAP */
 static float g_s2_dial_speed, g_s2_dial_revs;
 static float g_s2_end_t;            /* seconds since the player's car finished (0x133050) */
-static int   g_s2_end_sel;          /* the end's choice: 0 RACE AGAIN, 1 EXIT (0x13306c) */
+static int   g_s2_end_sel;          /* the end's choice, from the left (0x13306c) */
+static int   s2_champ_kept(s2_result *r);
 static int   g_s2_track;
+static char  g_s2_team[4][16] = { "CONDOR", "ANGELS", "WASP", "ZEUS" };     /* (STRINGS.TXT's, 0x127edc) */
+static int text_lines(const char *file, char out[][40], int max);
 
 static void s2_hud_load(void)
 {
+    {
+        static char str[260][40];
+        const int n = text_lines("build/dec/LOCAL/STRINGS.TXT", str, 260);
+        for (int i = 0; i + 3 < n; i++)
+            if (!strcmp(str[i], "CONDOR")) { for (int k = 0; k < 4; k++) snprintf(g_s2_team[k], sizeof g_s2_team[k], "%s", str[i + k]); break; }
+    }
     g_fnt_file = "build/dec/GAME1/GAMEL.FNT";
     g_spr_file = "build/dec/GAME1/GAMEL.SPR";
     hud_load();
@@ -6119,6 +6487,228 @@ static void s2_dash_draw(const s2_hud_state *h)
     s2_dash_needle(r + 7, g_s2_dial_revs);
 }
 
+/*
+ * THE ATTRACT RACE'S SCREEN (0x37ea9, called by the race screen 0x45882 in its place when the
+ * mode has 0x80).  ATTRACT.TXT's lines: 0 and 1 under the two logos, then groups ended by '#'
+ * (the empty lines in them are places), an empty group the end.  By stages (0x127ecc):
+ *   0  the screen black; the next 1, the first group 2, the logo's place x 1000
+ *   1, 2  the screen black, sprite 0x6d + stage at (x, 10), x eased towards the middle by row
+ *         0x55 (0.925 to the power 50 x the step); once within 5 of it the line 0 / 1 under it
+ *         (y 0xa5, font 0 colour 1, spaced 2); three seconds after, the next, x 640
+ *   3  the race, out of white (the palette from white over 1 / 1.2 s), SCREAMER 2 (sprite 0x71
+ *      in the middle at y 4); the CD's song from here (0x4d758)
+ *   4  the logo, and the group (y 100 + 16 a line) for four seconds, then a second of nothing,
+ *      then the next group
+ * An empty group, or ENTER / ESC (0x131f20 0x10, 0x11, 0x20), ends it: before stage 3 at once,
+ * else after half a second's fade to black (0x13249c += 2 x step); then the race is over
+ * (0x11f0a8 |= 3).
+ */
+static struct { int stage, group, end, over; float x, shown, pause, black; } g_s2_att;
+static char g_s2_att_txt[160][40];
+static int  g_s2_att_n;
+
+static void s2_attract_start(void)
+{
+    memset(&g_s2_att, 0, sizeof g_s2_att);
+    g_s2_att_n = text_lines("build/dec/LOCAL/ATTRACT.TXT", g_s2_att_txt, 160);
+}
+
+static void s2_attract_fill(uint32_t to, float k)      /* every pixel k of the way to the colour */
+{
+    const float r = (float)(to >> 16 & 255), g = (float)(to >> 8 & 255), b = (float)(to & 255);
+    for (int i = 0; i < FB_W * FB_H; i++) {
+        const uint32_t c = fb[i];
+        fb[i] = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) + (r - (float)(c >> 16 & 255)) * k) << 16
+              | (uint32_t)((float)(c >> 8 & 255) + (g - (float)(c >> 8 & 255)) * k) << 8 | (uint32_t)((float)(c & 255) + (b - (float)(c & 255)) * k);
+    }
+}
+
+static void s2_attract_draw(float dt)
+{
+    LAY_TOP();
+    if (g_s2_att.stage == 0) {
+        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
+        g_s2_att.group = 2; g_s2_att.stage = 1; g_s2_att.x = 1000.0f; g_s2_att.pause = 0.0f;
+    } else if (g_s2_att.stage < 3) {
+        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
+        const int n = g_s2_att.stage + 0x6d;
+        if (n < g_nspr) {
+            const float to = (float)((320 - (g_spr[n].w / g_s + g_spr[n].ox / g_s)) / 2 - g_spr[n].ox / g_s / 2);
+            g_s2_att.x = (g_s2_att.x - to) * powf(0.925f, 50.0f * dt) + to;
+            hud_sprite_draw((int)g_s2_att.x, 10, n);
+            if (fabsf(g_s2_att.x - to) < 5.0f) {
+                if (g_s2_att.stage - 1 < g_s2_att_n) s2_text_centred(0xa5, g_s2_att_txt[g_s2_att.stage - 1], 0, 1, 2);
+                g_s2_att.shown += dt;
+                if (g_s2_att.shown > 3.0f) {
+                    g_s2_att.shown = 0.0f; g_s2_att.x = 640.0f;
+                    if (++g_s2_att.stage > 2) g_s2_att.shown = 1.0f;
+                }
+            }
+        } else g_s2_att.stage = 3, g_s2_att.shown = 1.0f;
+    } else if (g_s2_att.stage == 3) {
+        s2_sprite_centred(4, 0x71);
+        s2_attract_fill(0xffffffffu, g_s2_att.shown > 0.0f ? g_s2_att.shown : 0.0f);
+        if (!g_s2_att.over) { g_s2_att.over = 1; s2_race_music(); }
+        g_s2_att.shown -= dt * 1.2f;
+        if (g_s2_att.shown < 0.0f) { g_s2_att.shown = 1.0f; g_s2_att.pause = 0.0f; g_s2_att.stage = 4; }
+    } else if (g_s2_att.stage == 4) {
+        s2_sprite_centred(4, 0x71);
+        if (g_s2_att.pause == 0.0f) {
+            int k = 0;
+            while (g_s2_att.group + k < g_s2_att_n && g_s2_att_txt[g_s2_att.group + k][0] != '#') {
+                s2_text_centred(k * 0x10 + 100, g_s2_att_txt[g_s2_att.group + k], 0, 1, 2);
+                k++;
+            }
+            if (k == 0) { g_s2_att.stage = 5; g_s2_att.end = 1; }
+            else {
+                g_s2_att.shown -= dt * 0.25f;
+                if (g_s2_att.shown <= 0.0f) { g_s2_att.group += k + 1; g_s2_att.shown = 1.0f; g_s2_att.pause = 1.0f; }
+            }
+        } else {
+            g_s2_att.pause -= dt;
+            if (g_s2_att.pause <= 0.0f) g_s2_att.pause = 0.0f;
+        }
+    }
+    if (g_s2_att.black > 0.0f) s2_attract_fill(0xff000000u, g_s2_att.black > 1.0f ? 1.0f : g_s2_att.black);
+    if (g_s2_att.end) {
+        if (g_s2_att.stage < 3) g_s2_att.end = 2;                  /* (the race over now) */
+        else if (g_s2_att.stage > 3) {
+            g_s2_att.black += dt * 2.0f;
+            if (g_s2_att.black >= 1.0f) g_s2_att.end = 2;
+        }
+    }
+}
+
+/*
+ * THE RACE'S PAUSE SCREEN (0x49f8e; ESC in a race while the player's car has not finished --
+ * not in the attract race, nor in a replay: 0x2d7c0).  The items are GAME.TXT's RESUME,
+ * RESTART (not in the championship), CD PLAYER (when there is a drive: here, when there is a
+ * song file) and EXIT; n of them centred at y 0x66 - 11 n + 22 i (font 0 colour 1, spaced 2)
+ * over the race's picture, standing, darkened (0x51698), and a box of it darkened again over
+ * them (0x50, 0x5e - 11 n, 0xa0, 22 n + 12); the chosen one is drawn over that box, or under it
+ * while bit 0x20 of the hundredths' clock is set.  UP / DOWN round, ENTER, ESC = RESUME.  The
+ * effects die away at 32767 a second while it is up.  RESTART: the race again (0x11f0a8 |= 1);
+ * EXIT: the race over (|= 3); CD PLAYER (0x49aaf), then the race goes on.
+ *
+ * THE CD PLAYER (0x49aaf): the picture darkened twice more, sprite 10 at (0x1c, 0x28); the
+ * disc's tracks "\3%d" 13 apart from (0x40, 0x4e), the tenth and on 7 lower from the start
+ * again (font 5 colour 4, spaced 2), the one chosen blinking; seven buttons, the one under the
+ * cursor drawn at (x, 0x61) -- for 0.2 s after ENTER its pressed sprite (0x113480: x, pressed,
+ * plain); LEFT / RIGHT; ENTER: 0 play / pause, 1 eject (nothing here), 2 / 3 the track before /
+ * after (playing on if it was playing, else only chosen), 4 / 5 the chosen volume down / up by
+ * 480 a hundredth while held, 6 which volume, CD (0x130d5c) or FX (0x130d58); for 4..6 its
+ * name at (0x40, 0x45) (font 5 colour 2) and a stroke of colour 66 / 33 / 12 every 1024, 3
+ * apart from x 0x55, y 0x45..0x4a.  ESC leaves it.
+ */
+static struct { int on, sel, n, item[4], cd, cd_sel, chan, first, last, track; float clock, pressed; } g_s2_pz;
+
+static void s2_pause_open(void)
+{
+    char f[600];
+    memset(&g_s2_pz, 0, sizeof g_s2_pz);
+    g_s2_pz.first = 2; g_s2_pz.last = 0;
+    for (int t = 2; t < 100 && cd_audio_find(t, f, sizeof f); t++) g_s2_pz.last = t;      /* (the disc's audio tracks: the files there are) */
+    const int has[4] = { 1, !(s2_mode & 2), g_s2_pz.last >= 2, 1 };
+    for (int i = 0; i < 4; i++) if (has[i]) g_s2_pz.item[g_s2_pz.n++] = i;
+    g_s2_pz.on = 1;
+}
+
+static void s2_pause_line(int x0, int y0, int y1, int colour)
+{
+    for (int y = y0 * SY + g_oy; y < (y1 + 1) * SY + g_oy && y < FB_H; y++)
+        for (int x = x0 * g_s; x < x0 * g_s + g_s && x < FB_W; x++) fb[y * FB_W + x] = g_pal[colour & 255];
+}
+
+static void s2_pause_draw(float dt)
+{
+    static const int button[7][3] = { { 59, 15, 11 }, { 83, 16, 12 }, { 113, 17, 13 }, { 137, 18, 14 }, { 167, 22, 20 }, { 167, 23, 21 }, { 217, 25, 24 } };
+    static const char *name[2] = { "CD", "FX" };
+    static const int bar[4] = { 66, 33, 12, 12 };
+    char buf[16];
+    g_s2_pz.clock += dt * 100.0f;
+    if (!g_s2_pz.cd) s2_sound_pause(dt, 1);
+    const int blink = ((int)g_s2_pz.clock & 0x20) != 0, n = g_s2_pz.n;
+    g_oy = 0;
+    s2_dark_box(0, 0, 320, FB_H / SY);
+    for (int i = 0; i < n; i++)
+        if (i != g_s2_pz.sel || blink) s2_text_centred(i * 0x16 - n * 0xb + 0x66, g_s2_gt[34 + g_s2_pz.item[i]], 0, 1, 2);
+    s2_dark_box(0x50, 0x5e - n * 0xb, 0xa0, n * 0x16 + 0xc);
+    if (!blink) s2_text_centred(g_s2_pz.sel * 0x16 - n * 0xb + 0x66, g_s2_gt[34 + g_s2_pz.item[g_s2_pz.sel]], 0, 1, 2);
+    if (!g_s2_pz.cd) return;
+    /* the CD player */
+    s2_dark_box(0, 0, 320, FB_H / SY);
+    s2_dark_box(0, 0, 320, FB_H / SY);
+    hud_sprite_draw(0x1c, 0x28, 10);
+    const int now = snd_cd_track() ? snd_cd_track() : g_s2_pz.track;
+    if (now) g_s2_pz.track = now;
+    for (int k = 0, x = 0, y = 0; k <= g_s2_pz.last - g_s2_pz.first; k++, x += 0xd) {
+        if (k == 10 && y == 0) { y = 7; x = 0; }
+        if (k + g_s2_pz.first == g_s2_pz.track && !blink) continue;
+        snprintf(buf, sizeof buf, "\3%d", k + g_s2_pz.first);
+        s2_text(x + 0x40, y + 0x4e, buf, 5, 4, 2);
+    }
+    const int sel = g_s2_pz.cd_sel;
+    hud_sprite_draw(button[sel][0], 0x61, g_s2_pz.pressed > g_s2_pz.clock ? button[sel][1] : button[sel][2]);
+    if (sel == 4 || sel == 5) {                        /* (ENTER held: 480 a hundredth) */
+        const Uint8 *ks = SDL_GetKeyboardState(NULL);
+        if (ks[SDL_SCANCODE_RETURN] || ks[SDL_SCANCODE_KP_ENTER]) {
+            s2_volume_set(g_s2_pz.chan, s2_volume(g_s2_pz.chan) + (sel == 4 ? -1 : 1) * (int)(dt * 100.0f * 480.0f));
+            if (g_s2_pz.chan == 0) snd_cd_volume((float)(s2_volume(0) >> 7) / 255.0f);
+        }
+    }
+    if (sel > 3) {
+        s2_text(0x40, 0x45, name[g_s2_pz.chan], 5, 2, 2);
+        for (int k = 0; k < s2_volume(g_s2_pz.chan) / 1024; k++) s2_pause_line(k * 3 + 0x55, 0x45, 0x4a, bar[(k / 10) & 3]);
+    }
+}
+
+static void s2_pause_close(int pick)
+{
+    g_s2_pz.on = 0;
+    s2_sound_pause(0.0f, 0);
+    if (pick == 1) s2_race_again();                    /* RESTART */
+}
+
+/* a key on the pause screen: 1 = the race is to end (EXIT) */
+static int s2_pause_key(SDL_Keycode k)
+{
+    if (g_s2_pz.cd) {
+        if (k == SDLK_ESCAPE) { g_s2_pz.cd = 0; s2_pause_close(0); return 0; }
+        if (k == SDLK_LEFT && g_s2_pz.cd_sel > 0) g_s2_pz.cd_sel--;
+        if (k == SDLK_RIGHT && g_s2_pz.cd_sel < 6) g_s2_pz.cd_sel++;
+        if (k != SDLK_RETURN && k != SDLK_KP_ENTER) return 0;
+        g_s2_pz.pressed = g_s2_pz.clock + 0x14;
+        const int playing = snd_cd_track() && !snd_cd_paused();
+        switch (g_s2_pz.cd_sel) {
+        case 0:
+            if (playing) snd_cd_pause(1);
+            else if (snd_cd_track() == g_s2_pz.track && snd_cd_paused()) snd_cd_pause(0);
+            else if (g_s2_pz.track) snd_cd(g_s2_pz.track, 1);
+            break;
+        case 2: case 3: {
+            const int t = g_s2_pz.track + (g_s2_pz.cd_sel == 2 ? -1 : 1);
+            if (!g_s2_pz.track || t < g_s2_pz.first || t > g_s2_pz.last) break;
+            g_s2_pz.track = t;
+            if (playing) snd_cd(t, 1); else snd_cd(0, 0);
+            break;
+        }
+        case 6: g_s2_pz.chan ^= 1; break;
+        }
+        return 0;
+    }
+    const int n = g_s2_pz.n;
+    if (k == SDLK_ESCAPE) { s2_pause_close(0); return 0; }
+    if (k == SDLK_UP) g_s2_pz.sel = (g_s2_pz.sel + n - 1) % n;
+    if (k == SDLK_DOWN) g_s2_pz.sel = (g_s2_pz.sel + 1) % n;
+    if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+        const int pick = g_s2_pz.item[g_s2_pz.sel];
+        if (pick == 2) { g_s2_pz.cd = 1; g_s2_pz.cd_sel = 0; g_s2_pz.clock = 0.0f; return 0; }
+        s2_pause_close(pick);
+        return pick == 3 || pick == 1;
+    }
+    return 0;
+}
+
 static void s2_hud_draw(float dt)
 {
     s2_hud_state h;
@@ -6154,7 +6744,9 @@ static void s2_hud_draw(float dt)
         g_s2_dial_speed = ws + (g_s2_dial_speed - ws) * k;
         g_s2_dial_revs = wr + (g_s2_dial_revs - wr) * k;
     }
-    if (!h.finished) {
+    /* (0x45882: the instrument every frame but the attract race's, the race over too; the
+       texts below only while the player's car has not finished, car +0x4c bit 0) */
+    {
         LAY_BOT();
         if (h.view == 6) s2_dash_draw(&h);                /* (0x46b76: view 6 the dashboard, view 1 nothing, else the dial) */
         else if (h.view != 1) {
@@ -6167,8 +6759,10 @@ static void s2_hud_draw(float dt)
         s2_text(299, 0xb1, buf, 2, 4, 2);
         dash_needle(0x10f, 0xa8, 0x1e, g_s2_dial_revs * 3.1415927f, 0x5b);
         }
+    }
+    if (!h.finished && h.view != 1) {                    /* (0x45882: not over the trackside cameras) */
         LAY_TOP();
-        if (h.ncars > 1) {
+        if (h.ncars > 1 && (!(h.mode & 4) || h.ghost)) {
             if (h.position == 1) hud_sprite_draw(0x10e, 4, 0x72);
             s2_text(0x138 - s2_text_wide(g_s2_text[6], 3, -1), 2, g_s2_text[6], 3, 3, -1);
             snprintf(buf, sizeof buf, "%d", h.position);
@@ -6178,54 +6772,160 @@ static void s2_hud_draw(float dt)
             if (h.message[1] == '+') s2_text_centred(0x23, h.message, 8, 3, -1);
             else s2_text_centred(0x23, h.message, 7, 1, -1);
         }
+        if (!(h.mode & 8)) {
         s2_text(8, 2, g_s2_text[7], 3, 3, -1);
         snprintf(buf, sizeof buf, "%d:", h.lap);         /* ("%d%c": the figures' font has ':' after '9' and nothing else) */
         int w = s2_text_wide(buf, 1, 2);
         s2_text(8, 0xb, buf, 1, 1, 2);
         snprintf(buf, sizeof buf, "%d", h.laps);
         s2_text(w + 5, 0x14, buf, 4, 1, 2);
-        buf[0] = 1; hud_clock(buf + 1, sizeof buf - 1, h.this_lap);
+        buf[0] = 1; s2_clock(buf + 1, sizeof buf - 1, h.this_lap);
         s2_text(8, 0x38, g_s2_text[0], 3, 3, -1);
         s2_text(8, 0x40, buf, 3, 1, -1);
-        buf[0] = 1; hud_clock(buf + 1, sizeof buf - 1, h.total);
+        buf[0] = 1; s2_clock(buf + 1, sizeof buf - 1, h.total);
         s2_text(8, 0x48, g_s2_text[1], 3, 3, -1);
         s2_text(8, 0x50, buf, 3, 1, -1);
         s2_text(0x10e, 0x38, g_s2_text[2], 3, 3, -1);
         s2_text(0x10e, 0x40, h.best_lap, 3, 1, -1);
         s2_text(0x10e, 0x48, g_s2_text[3], 3, 3, -1);
         s2_text(0x10e, 0x50, h.best_total, 3, 1, -1);
+        }
         if (*h.best_lap_left > 0.0f && ((int)(*h.best_lap_left * 2.0f) & 1)) s2_text_centred(0xf, g_s2_text[4], 0, 1, 2);
+        if (h.mode & 8) {
+            /* a free run: the lap's five times, A to E, and against the best lap's; this
+               lap's clock and the best lap above them */
+            for (int k = 0; k < 5; k++) {
+                const char letter[2] = { (char)('A' + k), 0 };
+                s2_text(8, k * 8 + 0x38, letter, 3, 3, -1);
+                s2_text(0x105, k * 8 + 0x38, letter, 3, 3, -1);
+                s2_text(0x12, k * 8 + 0x38, h.split_now + k * 0xb, 3, 1, -1);
+                s2_text(0x10a, k * 8 + 0x38, h.split_best + k * 0xb, 3, 1, -1);
+            }
+            buf[0] = 1; s2_clock(buf + 1, sizeof buf - 1, h.this_lap);
+            s2_text(8, 0x10, g_s2_text[0], 3, 3, -1);
+            s2_text(8, 0x18, buf, 3, 1, -1);
+            s2_text(0x10e, 0x10, g_s2_text[2], 3, 3, -1);
+            s2_text(0x10e, 0x18, h.best_lap, 3, 1, -1);
+        }
         /* who is where (0x456fb): the bar, every other car's mark 50 pixels a 200000 of the
            track ahead of or behind the middle, the player's in the middle */
-        if (h.ncars > 1) {
+        if (h.ncars > 1 && (!(h.mode & 4) || h.ghost)) {
             s2_dark_box(0x6c, 4, 0x68, 7);
             hud_sprite_draw(0x6c, 2, 0x25);
-            for (int i = 1; i < h.ncars && i < 4; i++)
-                hud_sprite_draw((int)(160.0f - h.ahead[i] * 50.0f - 4.0f), 3, h.team[i] + 4);
+            for (int i = 0; i < h.ncars && i < 4; i++)
+                if (i != s2_player()) hud_sprite_draw((int)(160.0f - h.ahead[i] * 50.0f - 4.0f), 3, h.team[i] + 4);
             hud_sprite_draw(0x9c, 3, 9);
         }
     }
     /*
+     * A REPLAY'S BAND (0x463c0, while the player's car runs): a darkened band along the
+     * bottom and on it, in the big letters, the team of the car the cameras follow and the
+     * view -- "CONDOR - EXTERNAL" (the team's name from STRINGS.TXT, the view's from GAME.TXT:
+     * 1 EXTERNAL, 2 INCAR, 3 BACK, 4 NEAR, 6 INSIDE; no text for another view).
+     */
+    {
+        int team, view;
+        if (s2_replay_band(&team, &view)) {
+            static const int word[7] = { -1, 29, 30, 31, 32, -1, 33 };
+            LAY_TOP();
+            s2_dark_box(0, 0xb4, 0x140, 0x14);
+            if (view >= 0 && view < 7 && word[view] >= 0 && team >= 0 && team < 4) {
+                snprintf(buf, sizeof buf, "%s - %s", g_s2_team[team], g_s2_gt[word[view]]);
+                s2_text(10, 0xb4, buf, 0, 1, 2);
+            }
+        }
+    }
+    /*
      * THE END (0x4746a, a race's; the car is the trackside cameras' now, 0x201ee).  Four
-     * seconds of where the player came and the time, then the track's name, and RACE AGAIN /
-     * EXIT on a darkened band -- left and right choose, ENTER takes.  (The game's REPLAY and
-     * its table of the track's fifteen best times are not here yet.)
+     * seconds of where the player came and the time, then the track's name, and the choices
+     * on a darkened band -- left and right choose, ENTER takes -- and the track's best times.
      */
     if (h.finished) {
-        if (g_s2_end_t < 4.0f) {
+        if (g_s2_end_t < 4.0f && (h.mode & 4)) {
+            /* time attack's (0x48980): the total and the best lap */
+            s2_text_centred(0x3c, g_s2_text[1], 0, 1, 2);
+            s2_clock(buf, sizeof buf, h.total);
+            s2_text_centred(0x50, buf, 0, 1, 2);
+            s2_text_centred(100, g_s2_text[18], 0, 1, 2);
+            s2_clock(buf, sizeof buf, h.lap_best);
+            s2_text_centred(0x78, buf, 0, 1, 2);
+        } else if (g_s2_end_t < 4.0f) {
             if (h.position == 1) s2_text_centred(0x46, g_s2_gt[5], 0, 1, 2);
             snprintf(buf, sizeof buf, "%s %s", g_s2_gt[h.position >= 1 && h.position <= 4 ? h.position - 1 : 3], g_s2_gt[4]);
             s2_text_centred(100, buf, 0, 1, 2);
-            hud_clock(buf, sizeof buf, h.total);
+            s2_clock(buf, sizeof buf, h.total);
             s2_text_centred(0x82, buf, 0, 1, 2);
-        } else {
-            static const int at[2] = { 0, 0xa0 };
+        } else if (h.mode & 2) {
+            /* the championship's (0x47e75): CONTINUE -- REPLAY and CONTINUE in halves when there
+               is a replay -- and the cars that have done their laps by their places: name, car,
+               time and the points for the place (in a replay, the race's own: 0x132384) */
+            static const int points_of[4] = { 10, 6, 3, 0 };
+            s2_result r[4];
+            const int lit = (int)(g_s2_end_t * 3.0f) & 1, nr = s2_replaying() ? s2_champ_kept(r) : s2_results(r);
+            int done = 0;
+            for (int k = 0; k < nr; k++) done += r[k].done != 0;
+            s2_records_enter();
             s2_sprite_centred(4, 0x27 + g_s2_track - 1);
             s2_dark_box(0, 0xb4, 0x140, 0x14);
-            for (int k = 0; k < 2; k++) {
+            if (!s2_replay_offered())
+                s2_text_centred(0xb8, g_s2_gt[15], lit ? 8 : 7, lit ? 3 : 1, 2);
+            else
+                for (int k = 0; k < 2; k++) {
+                    const int on = lit && k == g_s2_end_sel;
+                    const char *t = g_s2_gt[k ? 15 : 11];
+                    s2_text(k * 0xa0 + ((0xa0 - s2_text_wide(t, on ? 8 : 7, 2)) >> 1), 0xb8, t, on ? 8 : 7, on ? 3 : 1, 2);
+                }
+            s2_dark_box(6, (done - 1) * -5 + 0x4f, 0x138, done * 0xd + 0xe);
+            s2_text(0x26, (done - 1) * -5 + 0x51, g_s2_gt[16], 7, 1, 2);
+            for (int k = 0; k < nr; k++) {
+                char clock[24];
+                const int y = (done - 1) * -5 + 0x5f + k * 0xc;
+                if (!r[k].done) continue;
+                s2_clock(clock, sizeof clock, r[k].time);
+                snprintf(buf, sizeof buf, "\001%c. %s        %s %s%d", '1' + k, r[k].car == s2_player() ? s2_name : "CPU", clock, points_of[k] < 10 ? " " : "", points_of[k]);
+                s2_text(0x26, y, buf, 7, 1, 2);
+                hud_sprite_draw(0x71, y - 1, r[k].team * 5 + 0x2e + r[k].model);
+            }
+        } else {
+            /* REPLAY / RACE AGAIN / EXIT in thirds, or RACE AGAIN / EXIT in halves when there
+               is no replay (0x4746a) */
+            const int three = s2_replay_offered(), wide = three ? 0x6a : 0xa0;
+            s2_sprite_centred(4, 0x27 + g_s2_track - 1);
+            s2_dark_box(0, 0xb4, 0x140, 0x14);
+            for (int k = 0; k < 2 + three; k++) {
                 const int lit = (k == g_s2_end_sel) && ((int)(g_s2_end_t * 3.0f) & 1);
-                const char *t = g_s2_gt[12 + k];
-                s2_text(at[k] + ((0xa0 - s2_text_wide(t, lit ? 8 : 7, 2)) >> 1), 0xb8, t, lit ? 8 : 7, lit ? 3 : 1, 2);
+                const char *t = g_s2_gt[11 + !three + k];
+                s2_text(k * wide + ((wide - s2_text_wide(t, lit ? 8 : 7, 2)) >> 1), 0xb8, t, lit ? 8 : 7, lit ? 3 : 1, 2);
+            }
+            /*
+             * The track's fifteen best times of this kind of race (0x4746a, 0x48980): the
+             * race is put into them as this screen comes up (0x353b3) and its row is lit.
+             * Six rows 12 apart from row 80 on a darkened band, "n. NAME      time" and the
+             * car's picture (sprite 0x2e + 5 * team + model); after a second the list moves
+             * up a row at a time, four rows a second, until the player's is the third.
+             * (The game cuts the rows off at the band's edges as they move; here a row
+             * is shown whole or not at all.)
+             */
+            {
+                static int first; static float part;
+                const int mine = s2_records_enter();
+                const uint8_t *list = s2_records_list();
+                int want = mine < 0 ? 0 : mine - 2;
+                if (want < 0) want = 0; else if (want > 14) want = 10;
+                if (g_s2_end_t - dt < 4.0f) { first = 0; part = 0.0f; }
+                s2_dark_box(0x1e, 0x4e, 0x104, 0x40);
+                for (int k = first, y = (int)(80.0f - part * 12.0f); list && k < first + 6 && k < 15; k++, y += 12) {
+                    float time; int team, model;
+                    char name[5] = { 0 }, clock[24];
+                    memcpy(&time, list + k * 4, 4); memcpy(name, list + 0x3c + k * 4, 4);
+                    memcpy(&team, list + 0xb4 + k * 4, 4); memcpy(&model, list + 0xf0 + k * 4, 4);
+                    if (y < 0x4f || y > 0x84) continue;
+                    s2_clock(clock, sizeof clock, time);
+                    snprintf(buf, sizeof buf, "\001%s%d. %s      %s", k < 9 ? " " : "", k + 1, name, clock);
+                    s2_text(0x32, y, buf, k == mine ? 8 : 7, k == mine ? 3 : 1, 2);
+                    if (team >= 0 && team < 4 && model >= 0 && model < 5) hud_sprite_draw(0x86, y - 1, model + team * 5 + 0x2e);   /* (every row: an untouched one is "MIL", team row & 3, model 0) */
+                }
+                if (first < want && g_s2_end_t >= 4.5f && (part += dt * 4.0f) > 1.0f) { part = 0.0f; first++; }
             }
         }
         g_s2_end_t += dt;
@@ -8193,6 +8893,18 @@ static void fps_toggle(void)
     if (g_fps_on) setenv("OS_FPS", "1", 1); else unsetenv("OS_FPS");
 }
 
+/* every screen's events: F5 turns the frames a second on and off wherever it is pressed, and
+   no screen sees it */
+static int poll_event(SDL_Event *e)
+{
+    for (;;) {
+        if (!controls_poll(e)) return 0;
+        if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_F5) { if (!e->key.repeat) fps_toggle(); continue; }
+        if (e->type == SDL_KEYUP && e->key.keysym.sym == SDLK_F5) continue;
+        return 1;
+    }
+}
+
 /* a number in the port's own 3 x 5 figures, at the top left, on line `line` */
 static void tiny_number(int value, int line)
 {
@@ -8431,17 +9143,6 @@ static int menu_run(int *track, int *car)
                     }
                 }
             }
-        }
-        {   /* F5, on any screen of the menu */
-            SDL_Event evs[16];
-            SDL_PumpEvents();
-            int n = SDL_PeepEvents(evs, 16, SDL_PEEKEVENT, SDL_KEYDOWN, SDL_KEYDOWN);
-            static Uint32 last_stamp;
-            for (int i = 0; i < n; i++)
-                if (evs[i].key.keysym.sym == SDLK_F5 && evs[i].key.timestamp != last_stamp) {
-                    last_stamp = evs[i].key.timestamp;
-                    fps_toggle();
-                }
         }
         /* the resolution line was changed: it is saved, and the menu comes back in it */
         if (!shotfile[0] && g_opt_res != (g_s == 2)) {
@@ -9187,6 +9888,7 @@ static int loading_show(int track)
     float hold = getenv("OS_LOADHOLD") ? (float)atof(getenv("OS_LOADHOLD")) : 1.0f;
     Uint32 t0 = SDL_GetTicks();
     do {
+        fps_draw();
         SDL_UpdateTexture(tex, NULL, fb, FB_W * (int)sizeof(uint32_t));
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
@@ -9207,23 +9909,654 @@ static int loading_show(int track)
  * round.  The words are the game's (LOCAL/STRINGS.TXT) where it has them.
  * Returns the track, or 0 to leave.
  */
+/*
+ * THE CHAMPIONSHIP, the port's side (the game's: s2_hooks.c).  What is being driven is kept
+ * in a slot that outlives the port's parts; what has been WON -- the leagues and tracks
+ * opened, the teams that have their fifth car -- in openscreamer.s2champ.  As the game
+ * starts: league 1 only, the first three tracks of the menu's order (0x128a14 + 3 of
+ * them: one more for each of the first three leagues won, the seventh when league 4 has
+ * been won with all four teams).  OS_UNLOCK=1 opens everything.
+ */
+typedef struct {
+    int on, league, race, left, team, model, report, nres;
+    unsigned number;
+    int points[4];
+    s2_result res[4];
+    int open_league, open_tracks, fifth[4];
+} s2_champ_t;
+
+static s2_champ_t *s2_champ(void);
+/* a replay's end shows the race's own places (0x47e75: kept as its ENTER was taken, 0x132384) */
+static int s2_champ_kept(s2_result *r)
+{
+    const s2_champ_t *c = s2_champ();
+    if (!c || !c->report) return 0;
+    memcpy(r, c->res, sizeof c->res);
+    return c->nres;
+}
+
+static s2_champ_t *s2_champ(void)
+{
+    s2_champ_t *c = os_slot(7);
+    if (!c) {
+        c = os_keep_calloc(1, sizeof *c);                  /* (not calloc: a change of part frees that) */
+        if (!c) return NULL;
+        FILE *f = os_fopen("openscreamer.s2champ", "r");
+        if (f) {
+            if (fscanf(f, "league %d tracks %d fifth %d %d %d %d", &c->open_league, &c->open_tracks, &c->fifth[0], &c->fifth[1], &c->fifth[2], &c->fifth[3]) != 6)
+                c->open_league = c->open_tracks = c->fifth[0] = c->fifth[1] = c->fifth[2] = c->fifth[3] = 0;
+            fclose(f);
+        }
+        if (c->open_league < 0 || c->open_league > 3) c->open_league = 0;
+        if (c->open_tracks < 0 || c->open_tracks > 4) c->open_tracks = 0;
+        os_slot_set(7, c);
+    }
+    return c;
+}
+static void s2_champ_save(const s2_champ_t *c)
+{
+    FILE *f = os_fopen("openscreamer.s2champ", "w");
+    if (!f) return;
+    fprintf(f, "league %d tracks %d fifth %d %d %d %d\n", c->open_league, c->open_tracks, c->fifth[0], c->fifth[1], c->fifth[2], c->fifth[3]);
+    fclose(f);
+}
+static int s2_open_all(void) { return getenv("OS_UNLOCK") && atoi(getenv("OS_UNLOCK")); }
+
+/* the league's next race: its track, the weather drawn, the others' level; the track's number */
+static int s2_champ_race(s2_champ_t *c)
+{
+    char num[24];
+    const int track = s2_track_order[c->race % 7] + 1;
+    const int cond = s2_champ_weather(c->league, c->race, &c->left, c->number);
+    snprintf(num, sizeof num, "%d", track); setenv("OS_TRACK", num, 1);
+    snprintf(num, sizeof num, "%d", cond); setenv("OS_COND", num, 1);
+    snprintf(num, sizeof num, "%d", s2_league[c->league][4]); setenv("OS_DIFF", num, 1);
+    snprintf(num, sizeof num, "%d", c->model); setenv("OS_CAR", num, 1);
+    snprintf(num, sizeof num, "%d", c->team); setenv("OS_TEAM", num, 1);
+    snprintf(num, sizeof num, "%u", s2_race_seed); setenv("OS_S2SEED", num, 1);
+    snprintf(num, sizeof num, "%d", c->league); setenv("OS_S2LEAGUE", num, 1);
+    setenv("OS_S2GAME", "2", 1);
+    return track;
+}
+
+static void s2_menu_show(SDL_Renderer *ren, SDL_Texture *tex)
+{
+    fps_draw();
+    SDL_UpdateTexture(tex, NULL, fb, FB_W * (int)sizeof(uint32_t));
+    SDL_RenderClear(ren);
+    SDL_RenderCopy(ren, tex, NULL, NULL);
+    SDL_RenderPresent(ren);
+}
+
+/*
+ * SCREAMER 2'S OWN MENU: THE SCREEN ITS ROUTINES DRAW ON.  The menu's routines are the game's
+ * (s2r_car.h, from 0x38540); the engine calls they make are answered in s2_menu_hooks.h, the
+ * drawing ones by these.  The game draws into a picture of palette numbers and shows it through
+ * the hardware palette, which the fades change (0x512f1 -> 0x51664); the port draws into its
+ * own picture, keeping each pixel's number (pxi), and shows that through the palette last set.
+ * The game's palette (0x1338cc, 64 levels) is the one everything is drawn with (g_pal).
+ */
+static uint32_t g_s2m_hw[256];                 /* the palette as last set (0x51664): what is shown */
+static uint8_t  g_s2m_base[768];               /* the game's palette as g_pal has it now */
+static SDL_Renderer *g_s2m_ren;
+static SDL_Texture  *g_s2m_tex;
+static int g_s2m_closed;
+static uint8_t g_s2m_key[128];                 /* the keys down, by the PC's scancode (0x4cc25's table) */
+static uint32_t g_s2m_ticks;
+static float g_s2m_hundredths;                 /* (0x4ce0a: the clock the blinking goes by) */
+
+static uint32_t s2m_rgb(const uint8_t *six) { return 0xFF000000u | (uint32_t)((six[0] << 2 | six[0] >> 4) & 255) << 16 | (uint32_t)((six[1] << 2 | six[1] >> 4) & 255) << 8 | (uint32_t)((six[2] << 2 | six[2] >> 4) & 255); }
+
+void s2m_base(const uint8_t *six)              /* the game's palette, 0x1338cc (768 of 0..63) */
+{
+    if (!memcmp(six, g_s2m_base, 768)) return;
+    memcpy(g_s2m_base, six, 768);
+    for (int i = 0; i < 256; i++) g_pal[i] = s2m_rgb(six + 3 * i);
+    g_s2_dark_ok = 0;                          /* (the darkening table is the palette's) */
+}
+void s2m_palette(const uint8_t *six)           /* 0x51664: the palette shown */
+{
+    for (int i = 0; i < 256; i++) g_s2m_hw[i] = s2m_rgb(six + 3 * i);
+}
+void s2m_fonts(void)                           /* 0x50dd3 / 0x50a9c: the menu's font and sprites */
+{
+    g_fnt_file = "build/dec/GRAF1/MENUL.FNT";
+    g_spr_file = "build/dec/GRAF1/MENUL.SPR";
+    hud_load();
+}
+void s2m_picture(int x, int y, int w, int h, const uint8_t *px)    /* 0x51b02 */
+{
+    for (int r = 0; r < h; r++)
+        for (int c = 0; c < w; c++) {
+            const int xx = x + c, yy = y + r;
+            if (xx < 0 || xx >= 320 || yy < 0 || yy >= 200) continue;
+            fb[yy * FB_W + xx] = g_pal[px[r * w + c]];
+            pxi[yy * FB_W + xx] = px[r * w + c];
+        }
+}
+/* the menu's two clip boxes (0x50d6c sprites, 0x50fb9 text; the game keeps them in its screen's
+   record and the drawers copy them in): x0 <= x < x1, y0 <= y < y1, in the 320 x 200 screen */
+static int g_s2m_clip[2][4] = { { 0, 0, 320, 200 }, { 0, 0, 320, 200 } };
+void s2m_clip(int text, int x0, int y0, int x1, int y1)
+{
+    int *c = g_s2m_clip[text != 0];
+    c[0] = x0; c[1] = y0; c[2] = x1; c[3] = y1;
+}
+static void s2m_clip_on(int text)
+{
+    const int *c = g_s2m_clip[text != 0];
+    g_clip[0] = c[0] * g_s; g_clip[1] = c[2] * g_s; g_clip[2] = c[1] * SY + g_oy; g_clip[3] = c[3] * SY + g_oy;
+    if (g_clip[0] < 0) g_clip[0] = 0;
+    if (g_clip[1] > FB_W) g_clip[1] = FB_W;
+    if (g_clip[2] < 0) g_clip[2] = 0;
+    if (g_clip[3] > FB_H) g_clip[3] = FB_H;
+}
+/* 0x504f2 in the menu (its rooms, the attract race's return): the see-through table from the
+   palette now set -- routine 208's texels 32..47, the rooms' shadows, darken to black */
+void s2m_blend(const int smoke[3], const int dust[3])
+{
+    s2_blend_make(smoke, dust); g_have_smg = 1;
+    if (getenv("OS_S2MLOG")) printf("menu: see-through table made (asmoke %d %d %d): colour 20 in the shadow's rows 32..47 -> %d .. %d\n", smoke[0], smoke[1], smoke[2], g_smg[32 * 256 + 20], g_smg[47 * 256 + 20]);
+}
+static void s2m_clip_off(void) { g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H; }
+int s2m_text(int x, int y, const char *str, int font, int colour, int space) { s2m_clip_on(1); const int w = s2_text(x, y, str, font, colour, space); s2m_clip_off(); return w; }
+int s2m_text_wide(const char *str, int font, int space) { return s2_text_wide(str, font, space); }
+void s2m_sprite(int x, int y, int n) { s2m_clip_on(0); hud_sprite_draw(x, y, n); s2m_clip_off(); }
+void s2m_dark(int x, int y, int w, int h)      /* 0x51698, on the colours' numbers */
+{
+    s2_dark_make();
+    x &= ~3; w &= ~3;
+    for (int yy = y; yy < y + h && yy < 200; yy++)
+        for (int xx = x; xx < x + w && xx < 320; xx++) {
+            if (yy < 0 || xx < 0) continue;
+            const int i = yy * FB_W + xx, idx = pxi[i] >= 0 ? pxi[i] : 0;
+            pxi[i] = g_s2_dark[0][idx]; fb[i] = g_pal[pxi[i]];
+        }
+}
+void s2m_clear(uint8_t idx) { for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = g_pal[idx]; pxi[i] = idx; } }
+
+/* the engine's objects in its draw list (0x753a0), as s2_menu_hooks.h finds them, drawn by the
+   port's renderer over what is on the screen.  Meshes by container and name, loaded once;
+   their materials are the library the container had when the object was loaded. */
+#define S2M_MESHES 160
+static struct { char key[64]; mesh m; int ok; } g_s2m_mesh[S2M_MESHES];
+static int g_s2m_nmesh;
+/* the material libraries, by "CONTAINER/NAME" (a car's container has one for every car:
+   AUTO1.MLB .. AUTO5.MLB); an object's is the one that was current when it was loaded */
+static struct { char lib[32]; int base; } g_s2m_mlb[48];
+static int g_s2m_nmlb;
+static char g_s2m_env[32];          /* "CONTAINER/NAME" of the reflections' map (0xae4e8), "" none */
+void s2m_materials(const char *cont, const char *name, int flags)   /* 0x4feb4 */
+{
+    char file[160], lib[32];
+    snprintf(lib, sizeof lib, "%s/%s", cont, name);
+    if (flags & 4) snprintf(g_s2m_env, sizeof g_s2m_env, "%s", lib);
+    for (int i = 0; i < g_s2m_nmlb; i++)
+        if (!strcmp(g_s2m_mlb[i].lib, lib)) { if (flags & 4) g_env_mat = g_s2m_mlb[i].base; return; }
+    if (g_s2m_nmlb >= 48) return;
+    snprintf(file, sizeof file, "build/dec/%s/%s.MLB", cont, name);
+    const int base = mlb_add(file);
+    snprintf(g_s2m_mlb[g_s2m_nmlb].lib, sizeof g_s2m_mlb[0].lib, "%s", lib);
+    g_s2m_mlb[g_s2m_nmlb++].base = base;
+    if (flags & 4) g_env_mat = base;
+}
+void s2m_materials_go(const char *cont, const char *name)
+{
+    char lib[32];
+    snprintf(lib, sizeof lib, "%s/%s", cont, name);
+    if (!strcmp(lib, g_s2m_env)) { g_s2m_env[0] = 0; g_env_mat = -1; }
+}
+void s2m_materials_all_go(void) { g_s2m_env[0] = 0; g_env_mat = -1; }
+static const mesh *s2m_mesh(const char *cont, const char *name, const char *lib)
+{
+    char key[64], file[160];
+    snprintf(key, sizeof key, "%s/%s@%s", cont, name, lib);
+    for (int i = 0; i < g_s2m_nmesh; i++) if (!strcmp(g_s2m_mesh[i].key, key)) return g_s2m_mesh[i].ok ? &g_s2m_mesh[i].m : NULL;
+    if (g_s2m_nmesh >= S2M_MESHES) return NULL;
+    const int k = g_s2m_nmesh++;
+    snprintf(g_s2m_mesh[k].key, sizeof g_s2m_mesh[k].key, "%s", key);
+    snprintf(file, sizeof file, "build/dec/%s/%s.3DX", cont, name);
+    for (char *c = file + 10; *c; c++) *c = (char)toupper((unsigned char)*c);
+    g_s2m_mesh[k].ok = mesh_load(&g_s2m_mesh[k].m, file) == 0;
+    if (!g_s2m_mesh[k].ok) { fprintf(stderr, "menu: no %s\n", file); return NULL; }
+    for (int i = 0; i < g_s2m_nmlb; i++) if (!strcmp(g_s2m_mlb[i].lib, lib) && g_s2m_mlb[i].base >= 0) { mesh_rebase(&g_s2m_mesh[k].m, g_s2m_mlb[i].base); break; }
+    return &g_s2m_mesh[k].m;
+}
+/* the engine's turn of three angles (2048ths), 0x759b8: rows of the matrix */
+static void s2m_turn(const int a[3], float m[3][3])
+{
+    const float k = 3.14159265f / 1024.0f;
+    const float s0 = sinf(a[0] * k), c0 = cosf(a[0] * k), s1 = sinf(a[1] * k), c1 = cosf(a[1] * k), s2 = sinf(a[2] * k), c2 = cosf(a[2] * k);
+    m[0][0] = c2 * c1 - s2 * s1 * s0; m[0][1] = s2 * c0; m[0][2] = s1 * c2 + s2 * c1 * s0;
+    m[1][0] = -(c2 * s1 * s0 + s2 * c1); m[1][1] = c2 * c0; m[1][2] = c2 * c1 * s0 - s1 * s2;
+    m[2][0] = -c0 * s1; m[2][1] = -s0; m[2][2] = c1 * c0;
+}
+/* A ROOM (0x4fca9 "map1" of the container: the options room, the car's garage ...): a scene
+   built like a track's (MAPn.MMP / .UNR / .MLB, its backdrop MAPn.BCK), loaded as the race
+   loads its track; its library is the materials' first (base 0), the objects' come after it */
+static scene g_s2m_scene;
+static sky   g_s2m_sky;
+static int   g_s2m_have_scene, g_s2m_have_sky;
+void s2m_scene_load(const char *cont, const char *name)
+{
+    char dir[64], file[160];
+    const int n = atoi(name + 3) > 0 ? atoi(name + 3) : 1;
+    snprintf(dir, sizeof dir, "build/dec/%s", cont);
+    snprintf(file, sizeof file, "%s/MAP%d.MLB", dir, n);
+    mlb_load(file);
+    g_s2m_nmesh = 0;                                         /* (the objects' meshes again, on their libraries) */
+    g_s2m_nmlb = 0;
+    snprintf(g_s2m_mlb[0].lib, sizeof g_s2m_mlb[0].lib, "%s/MAP%d", cont, n); g_s2m_mlb[0].base = 0; g_s2m_nmlb = 1;
+    if (g_s2m_env[0]) {                                      /* (the reflections' map stays what it was: again after the room's) */
+        char c2[32], *slash;
+        snprintf(c2, sizeof c2, "%s", g_s2m_env);
+        if ((slash = strchr(c2, '/')) != NULL) { *slash = 0; s2m_materials(c2, slash + 1, 4); }
+    }
+    if (getenv("OS_S2MLOG")) {                               /* (a test: which of the engine's routines the room's materials are) */
+        int count[256] = { 0 };
+        for (int i = 0; i < g_nmat; i++) count[g_mat[i].type & 255]++;
+        printf("menu: room's materials %d:", g_nmat);
+        for (int t = 0; t < 256; t++) if (count[t]) printf(" routine %d x%d", t, count[t]);
+        printf("\n");
+    }
+    g_s2m_have_scene = scene_load(&g_s2m_scene, dir, n) > 0;
+    snprintf(file, sizeof file, "%s/MAP%d.BCK", dir, n);
+    if (g_s2m_have_sky) { free(g_s2m_sky.pix); g_s2m_sky.pix = NULL; }
+    g_s2m_have_sky = sky_load(&g_s2m_sky, file) == 0;
+    if (getenv("OS_S2MLOG")) printf("menu: room %s/%s: %d objects, backdrop %s\n", cont, name, g_s2m_have_scene ? g_s2m_scene.count : 0, g_s2m_have_sky ? "yes" : "no");
+}
+void s2m_scene_free(void) { g_s2m_have_scene = 0; }
+
+void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room)
+{
+    static scene_object obj[S2M_MESHES];
+    static float mat[S2M_MESHES][9];
+    camera cam;
+    memset(&cam, 0, sizeof cam);
+    /* the camera as the race's (s2_camera_show): the engine's (x, y up, z) is the port's (x, z, y) */
+    const float k = 3.14159265f / 1024.0f, h = (float)cm->a[1] * k;
+    cam.x = (float)cm->x; cam.y = (float)cm->z; cam.z = (float)cm->y;
+    cam.yaw = atan2f(-cosf(h), sinf(h));
+    cam.pitch = s2_half_turn((float)cm->a[0] * k);
+    cam.roll = -s2_half_turn((float)cm->a[2] * k);
+    if (getenv("OS_S2MCAM")) { float d[3] = { 0 }; sscanf(getenv("OS_S2MCAM"), "%f,%f,%f", &d[0], &d[1], &d[2]); cam.yaw += d[0]; cam.pitch += d[1]; cam.roll += d[2]; }  /* a test */
+    /* the engine's matrix by its ROWS: with a heading alone an object's x goes to (cos h, sin h)
+       and its z to (-sin h, cos h) of the port's world, as the race turns its cars (o->yaw = the
+       heading); by its columns everything turned the other way and showed mirrored.
+       OS_S2MTRANS=1: the columns, a test */
+    const int tr = getenv("OS_S2MTRANS") == NULL;
+    int m = 0;
+    for (int i = 0; i < n && m < S2M_MESHES; i++) {
+        const mesh *me = s2m_mesh(it[i].cont, it[i].name, it[i].lib);
+        if (!me) continue;
+        float r[3][3];
+        s2m_turn(it[i].a, r);
+        scene_object *o = &obj[m];
+        memset(o, 0, sizeof *o);
+        o->m = me; o->phase = it[i].frame; o->radius = me->bound_r + 100.0f;
+        o->x = (float)it[i].x; o->y = (float)it[i].z; o->z = (float)it[i].y;
+        /* the world directions of the object's own x, y (up), z, each swapped as the places are */
+        for (int ax = 0; ax < 3; ax++) {
+            const float e[3] = { tr ? r[ax][0] : r[0][ax], tr ? r[ax][1] : r[1][ax], tr ? r[ax][2] : r[2][ax] };
+            mat[m][ax * 3 + 0] = e[0]; mat[m][ax * 3 + 1] = e[2]; mat[m][ax * 3 + 2] = e[1];
+        }
+        o->mat = mat[m];
+        m++;
+    }
+    /* drawn over the picture as it is: the depth cleared, the colours kept */
+    const float keep_cy = g_cy; const int keep_vh = g_vh;
+    g_cy = 100.0f; g_vh = 200;
+    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; }
+    g_lanes = 4; g_tie_rule = 1;
+    /* with the room (0x753e8): its backdrop, then it, then the objects */
+    const scene *keep_scene = g_scene;
+    if (room && g_s2m_have_sky) {
+        sky_paint(cam.yaw, cam.pitch, cam.roll, &g_s2m_sky, g_focal_x, g_focal_y);
+        for (int i = 0; i < FB_W * FB_H; i++) pxi[i] = -1;
+    }
+    view_setup(&cam);
+    g_tri_listing = 1;
+    if (room && g_s2m_have_scene) {
+        g_scene = &g_s2m_scene;
+        for (int pass = 0; pass < 2; pass++)
+            for (int o = 0; o < g_s2m_scene.count; o++) {
+                const scene_object *so = &g_s2m_scene.obj[o];
+                g_ground_now = (so->layer == 0);
+                if (so->m) draw_object(so, o, pass, &cam);
+                g_ground_now = 0;
+            }
+    }
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < m; i++) draw_object(&obj[i], (room && g_s2m_have_scene ? g_s2m_scene.count : 0) + i, pass, &cam);
+    g_scene = keep_scene;
+    raster_flush();
+    g_cy = keep_cy; g_vh = keep_vh;
+}
+
+/* 0x7f5a2: the picture shown -- through the palette last set -- and the keys and the clock read */
+int s2m_show(void)
+{
+    static uint32_t out[FB_MAXW * FB_MAXH];
+    for (int i = 0; i < FB_W * FB_H; i++) out[i] = pxi[i] >= 0 ? g_s2m_hw[pxi[i] & 255] : fb[i];
+    {   /* the frames a second (F5) over what is shown (the game draws its whole screen again each frame) */
+        memcpy(fb, out, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+        fps_draw();
+        memcpy(out, fb, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+    }
+    if (g_s2m_tex) {
+        SDL_UpdateTexture(g_s2m_tex, NULL, out, FB_W * (int)sizeof(uint32_t));
+        SDL_RenderClear(g_s2m_ren);
+        SDL_RenderCopy(g_s2m_ren, g_s2m_tex, NULL, NULL);
+        SDL_RenderPresent(g_s2m_ren);
+    }
+    if (getenv("OS_S2MSHOT")) {                       /* a test: OS_S2MSHOT=<frame>,<file>: that frame written, and the end */
+        static int f;
+        int at = 0; char name[256] = "menu.ppm";
+        sscanf(getenv("OS_S2MSHOT"), "%d,%255s", &at, name);
+        if (++f >= at) { memcpy(fb, out, sizeof(uint32_t) * (size_t)(FB_W * FB_H)); write_ppm(name); g_s2m_closed = 1; }
+    }
+    static const struct { SDL_Scancode sdl; uint8_t pc; } map[] = {
+        { SDL_SCANCODE_ESCAPE, 0x01 }, { SDL_SCANCODE_RETURN, 0x1c }, { SDL_SCANCODE_KP_ENTER, 0x1c }, { SDL_SCANCODE_SPACE, 0x39 },
+        { SDL_SCANCODE_BACKSPACE, 0x0e }, { SDL_SCANCODE_TAB, 0x0f }, { SDL_SCANCODE_UP, 0x48 }, { SDL_SCANCODE_DOWN, 0x50 },
+        { SDL_SCANCODE_LEFT, 0x4b }, { SDL_SCANCODE_RIGHT, 0x4d }, { SDL_SCANCODE_LSHIFT, 0x2a }, { SDL_SCANCODE_RSHIFT, 0x36 },
+        { SDL_SCANCODE_LCTRL, 0x1d }, { SDL_SCANCODE_RCTRL, 0x1d }, { SDL_SCANCODE_LALT, 0x38 },
+        { SDL_SCANCODE_F1, 0x3b }, { SDL_SCANCODE_F2, 0x3c }, { SDL_SCANCODE_F3, 0x3d }, { SDL_SCANCODE_F4, 0x3e }, { SDL_SCANCODE_F5, 0x3f },
+        { SDL_SCANCODE_F6, 0x40 }, { SDL_SCANCODE_F7, 0x41 }, { SDL_SCANCODE_F8, 0x42 }, { SDL_SCANCODE_F9, 0x43 }, { SDL_SCANCODE_F10, 0x44 },
+        { SDL_SCANCODE_F11, 0x57 }, { SDL_SCANCODE_F12, 0x58 },
+    };
+    static const char rows[3][11] = { "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM" };
+    static const uint8_t row_at[3] = { 0x10, 0x1e, 0x2c };
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_QUIT) { g_s2m_closed = 1; g_window_closed = 1; }
+        if (ev.type != SDL_KEYDOWN && ev.type != SDL_KEYUP) continue;
+        const int down = ev.type == SDL_KEYDOWN;
+        const SDL_Scancode sc = ev.key.keysym.scancode;
+        if (down && sc == SDL_SCANCODE_F12) { write_ppm("menu_shot.ppm"); printf("saved menu_shot.ppm\n"); }
+        for (unsigned k = 0; k < sizeof map / sizeof map[0]; k++) if (map[k].sdl == sc) g_s2m_key[map[k].pc] = (uint8_t)down;
+        if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) {
+            const char c = (char)('A' + (sc - SDL_SCANCODE_A));
+            for (int r = 0; r < 3; r++) { const char *p = strchr(rows[r], c); if (p) g_s2m_key[row_at[r] + (p - rows[r])] = (uint8_t)down; }
+        }
+        if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_0) g_s2m_key[2 + (sc - SDL_SCANCODE_1)] = (uint8_t)down;
+    }
+    if (getenv("OS_S2MKEYS")) {                       /* a test: OS_S2MKEYS="frame:key,frame:key..." -- a scancode pressed for a frame */
+        static int f; f++;
+        const char *p = getenv("OS_S2MKEYS");
+        memset(g_s2m_key, 0, sizeof g_s2m_key);
+        while (p && *p) { int at = 0, key = 0; if (sscanf(p, "%d:%x", &at, &key) == 2 && at == f && key > 0 && key < 128) g_s2m_key[key] = 1; p = strchr(p, ','); if (p) p++; }
+    }
+    return !g_s2m_closed;
+}
+const uint8_t *s2m_keys(void) { return g_s2m_key; }
+/* the frame's time (0x4adf8 reads the 1/100 s clock): seconds since the last asking; with
+   OS_S2MSHOT or OS_S2MKEYS a fixed 1/30 (the same pictures every time) */
+float s2m_elapsed(void)
+{
+    const uint32_t now = SDL_GetTicks();
+    float d = g_s2m_ticks ? (float)(now - g_s2m_ticks) / 1000.0f : 0.02f;
+    g_s2m_ticks = now;
+    if (getenv("OS_S2MSHOT") || getenv("OS_S2MKEYS")) d = getenv("OS_S2MSTEP") ? (float)atof(getenv("OS_S2MSTEP")) : 1.0f / 30.0f;
+    if (d > 0.25f) d = 0.25f;
+    g_s2m_hundredths += d * 100.0f;
+    return d;
+}
+int s2m_hundredths(void) { return (int)g_s2m_hundredths; }
+
+/* the menu's race (s2_menu_hooks.h s2m_race): the race part, as the plain menu starts it, and
+   back to the menu when it is left */
+void s2m_race_go(int track)
+{
+    char dir[64], num[16];
+    if (track < 1 || track > 7) track = 1;
+    snprintf(dir, sizeof dir, "build/dec/MAP%d", track);
+    snprintf(num, sizeof num, "%d", track);
+    setenv("OS_FROM_MENU", "1", 1);
+    os_go(3, dir, num);
+}
+
+/* the game's own menu, from its loop (0x38540) -- the port's first steps with it: OS_S2MENU3D=1 */
+static int s2_menu3d(void)
+{
+    setenv("OS_S2MENU3D", "1", 1);      /* (its races know they are its: their results go back to it) */
+    g_focal_x = GAME_FOCAL * (float)g_s; g_focal_y = GAME_FOCAL * (float)SY;
+    if (!fb) fb = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!zb) zb = malloc(sizeof(float) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!idb) idb = malloc(sizeof(int16_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!pxi) pxi = malloc(sizeof(int16_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!fb || !zb || !idb || !pxi) return 0;
+    static scene empty;                      /* (draw_object looks at the scene's count) */
+    g_scene = &empty;
+    SDL_Window *win = sys_window(&g_s2m_ren);
+    if (!win || !g_s2m_ren) return 0;
+    SDL_SetWindowTitle(win, "OpenScreamer");
+    g_s2m_tex = sys_texture(FB_W, FB_H);
+    g_s2m_closed = 0; g_s2m_ticks = 0; g_s2m_nmesh = 0; g_s2m_nmlb = 0;
+    if (getenv("OS_CULL")) g_cull = atoi(getenv("OS_CULL"));     /* (a test, as in a race) */
+    memset(g_s2m_base, 0xff, sizeof g_s2m_base);
+    for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xFF000000u; pxi[i] = 0; }
+    return s2_menu_run();
+}
+
+/*
+ * LEAGUE REPORT (0x43914), after every race of a league: the points for the race, the four
+ * by their points, how many races are done and to come; after the last, whether the league
+ * is won and what that opens.  The game's own screen is its menu's (other fonts, the
+ * teams' badges); this is the port's plain one with the same lines.
+ * 1 = on to the next race, 0 = the league is over, -1 = the window was closed.
+ */
+static int s2_champ_report(s2_champ_t *c, SDL_Renderer *ren, SDL_Texture *tex, char str[][40], int nstr)
+{
+    static const int points_of[4] = { 10, 6, 3, 0 };
+    int order[4] = { 0, 1, 2, 3 }, phase = 0, won = 0;
+    const char *t_report = "LEAGUE REPORT", *t_done = "RACES COMPLETED:", *t_togo = "RACES TO GO:", *team[4] = { "CONDOR", "ANGELS", "WASP", "ZEUS" };
+    const char *t_won[3] = { "CONGRATULATIONS !!!", "YOU'VE WON", "" }, *t_lost[2] = { "BETTER LUCK", "NEXT TIME !" }, *t_go = "ACCELERATE TO CONTINUE";
+    for (int i = 0; i < nstr; i++) {
+        if (!strcmp(str[i], "ACCELERATE TO CONTINUE")) t_go = str[i];
+        if (!strcmp(str[i], "CONDOR") && i + 3 < nstr) for (int k = 0; k < 4; k++) team[k] = str[i + k];
+        if (!strncmp(str[i], "CONGRATULATIONS", 15) && i + 5 < nstr) { t_won[0] = str[i]; t_won[1] = str[i + 1]; t_lost[0] = str[i + 4]; t_lost[1] = str[i + 5]; }
+    }
+    for (int p = 0; p < c->nres && p < 4; p++) if (c->res[p].car >= 0 && c->res[p].car < 4) c->points[c->res[p].car] += points_of[p];
+    c->race++; c->report = 0;
+    for (int a = 0; a < 4; a++)                                  /* by points, the most first */
+        for (int b = a + 1; b < 4; b++)
+            if (c->points[order[b]] > c->points[order[a]]) { const int k = order[a]; order[a] = order[b]; order[b] = k; }
+    const int races = s2_league[c->league][0];
+    pal_load("build/dec/MAP1H01/MAP1.COL");
+    for (;;) {
+        char line[80];
+        for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
+        LAY_TOP();
+        if (phase == 0) {
+            s2_text_centred(14, t_report, 0, 1, 2);
+            for (int k = 0; k < 4; k++) {               /* (0x43914: "n.", the team's badge, the name, the points) */
+                const int y = 44 + k * 22, colour = 1;
+                snprintf(line, sizeof line, "%d.", k + 1);
+                s2_text(70, y, line, 0, colour, 2);
+                hud_sprite_draw(104, y + 2, ((c->team + order[k]) & 3) + 4);
+                s2_text(126, y, order[k] == 0 ? s2_name : "CPU", 0, colour, 2);
+                snprintf(line, sizeof line, "%d", c->points[order[k]]);
+                s2_text(250 - s2_text_wide(line, 0, 2), y, line, 0, colour, 2);
+            }
+            if (c->race < races) {
+                snprintf(line, sizeof line, "%s %d", t_done, c->race); s2_text_centred(140, line, 3, 3, -1);
+                snprintf(line, sizeof line, "%s %d", t_togo, races - c->race); s2_text_centred(152, line, 3, 3, -1);
+            }
+        } else {
+            snprintf(line, sizeof line, "LEAGUE %d", c->league + 1);
+            if (won) { s2_text_centred(60, t_won[0], 0, 1, 2); s2_text_centred(90, t_won[1], 0, 1, 2); s2_text_centred(120, line, 0, 1, 2); }
+            else { s2_text_centred(70, t_lost[0], 0, 1, 2); s2_text_centred(100, t_lost[1], 0, 1, 2); }
+        }
+        s2_text_centred(178, t_go, 3, 1, -1);
+        if (getenv("OS_S2MENU_SHOT")) { write_ppm(getenv("OS_S2MENU_SHOT")); printf("saved %s\n", getenv("OS_S2MENU_SHOT")); return -1; }
+        s2_menu_show(ren, tex);
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) return -1;
+            if (ev.type != SDL_KEYDOWN) continue;
+            const SDL_Keycode k = ev.key.keysym.sym;
+            if (k != SDLK_RETURN && k != SDLK_KP_ENTER && k != SDLK_SPACE && k != SDLK_UP) continue;   /* (the accelerator too) */
+            if (phase == 0 && c->race < races) return 1;
+            if (phase == 1) { c->on = 0; return 0; }
+            /* the league is over (0x43914): won if the player is first in the list */
+            won = order[0] == 0;
+            if (won) {
+                const int *l = s2_league[c->league];
+                if (l[2]) c->fifth[c->team & 3] = 1;
+                if (l[3] > c->open_league) c->open_league = l[3];
+                if (l[1] == 0) { if (c->fifth[0] && c->fifth[1] && c->fifth[2] && c->fifth[3]) c->open_tracks = 4; }
+                else if (l[1] > c->open_tracks) c->open_tracks = l[1];
+                s2_champ_save(c);
+            }
+            phase = 1;
+        }
+        SDL_Delay(8);
+    }
+}
+
+/*
+ * A CAR'S SET-UPS (0x128aa4: for each team, each of its first four cars, four set-ups of six
+ * numbers; 0x32d53 starts them all as 2 2 0 2 2 2).  The car screen (0x3d234) offers
+ * Standard -- every car 2 2 -1 2 2 2, -1 = the track's own tyres -- or Custom 1-4 in the
+ * championship, time attack and its free run (not arcade, not the fifth car); CUSTOMIZE
+ * (0x3e161) sets one: HANDLING, BRAKES, TIRE TYPE (A - Dry, B - Wet, C - Snow), TIRE
+ * PRESSURE, FRONT and REAR SUSPENSIONS, five steps each but the tyres' three, then SAVE or
+ * EXIT.  The items are the numbers 0, 5, 2, 1, 3, 4 of the six.  The game keeps them in its
+ * settings file; the port in openscreamer.s2setup.  (The port's plain page, not the game's
+ * 3D one with the car turning.)
+ */
+static int g_s2_setup[4][4][4][6];
+/* (the race screen's font the plain pages use has capitals only: "Standard", "A - Dry") */
+static const char *s2_caps(const char *t)
+{
+    static char buf[4][40];
+    static int at;
+    char *o = buf[at++ & 3];
+    size_t i = 0;
+    for (; t[i] && i < sizeof buf[0] - 1; i++) o[i] = (char)toupper((unsigned char)t[i]);
+    o[i] = 0;
+    return o;
+}
+static void s2_setups_load(void)
+{
+    for (int t = 0; t < 4; t++) for (int c = 0; c < 4; c++) for (int u = 0; u < 4; u++) {
+        static const int first[6] = { 2, 2, 0, 2, 2, 2 };
+        memcpy(g_s2_setup[t][c][u], first, sizeof first);
+    }
+    FILE *f = os_fopen("openscreamer.s2setup", "r");
+    if (!f) return;
+    for (int t = 0; t < 4; t++) for (int c = 0; c < 4; c++) for (int u = 0; u < 4; u++) {
+        int six[6];
+        if (fscanf(f, "%d %d %d %d %d %d", &six[0], &six[1], &six[2], &six[3], &six[4], &six[5]) != 6) { fclose(f); return; }
+        for (int k = 0; k < 6; k++) if (six[k] < 0 || six[k] > (k == 2 ? 2 : 4)) six[k] = k == 2 ? 0 : 2;
+        memcpy(g_s2_setup[t][c][u], six, sizeof six);
+    }
+    fclose(f);
+}
+static void s2_setups_save(void)
+{
+    FILE *f = os_fopen("openscreamer.s2setup", "w");
+    if (!f) return;
+    for (int t = 0; t < 4; t++) for (int c = 0; c < 4; c++) for (int u = 0; u < 4; u++) {
+        const int *six = g_s2_setup[t][c][u];
+        fprintf(f, "%d %d %d %d %d %d\n", six[0], six[1], six[2], six[3], six[4], six[5]);
+    }
+    fclose(f);
+}
+/* CAR CUSTOMIZATION: 0 when left, -1 when the window is closed */
+static int s2_customize(SDL_Renderer *ren, SDL_Texture *tex, char (*str)[40], int nstr, int team, int car, int which)
+{
+    static const int item_of[6] = { 0, 5, 2, 1, 3, 4 };       /* (0x3e161's items -> the six numbers) */
+    const char *title = "CAR CUSTOMIZATION", *item[8] = { "HANDLING", "BRAKES", "TIRE TYPE", "TIRE PRESSURE", "FRONT SUSPENSIONS", "REAR SUSPENSIONS", "SAVE", "EXIT" };
+    const char *tyre[3] = { "A - Dry", "B - Wet", "C - Snow" };
+    for (int i = 0; i < nstr; i++) {
+        if (!strcmp(str[i], "CAR CUSTOMIZATION") && i + 9 < nstr) { title = str[i]; for (int k = 0; k < 8; k++) item[k] = str[i + 1 + k]; }
+        if (!strcmp(str[i], "A - Dry") && i + 2 < nstr) for (int k = 0; k < 3; k++) tyre[k] = str[i + k];
+    }
+    int six[6], sel = 0;
+    memcpy(six, g_s2_setup[team][car][which], sizeof six);
+    for (;;) {
+        char line[64];
+        for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
+        LAY_TOP();
+        s2_text_centred(10, title, 0, 1, 2);
+        snprintf(line, sizeof line, "CAR %d   CUSTOM %d", car + 1, which + 1);
+        s2_text_centred(32, line, 3, 3, -1);
+        for (int k = 0; k < 8; k++) {
+            const int y = 46 + k * 16 + (k >= 6 ? 6 : 0);
+            if (k < 6) {
+                const int v = six[item_of[k]];
+                if (k == 2) snprintf(line, sizeof line, "%s   %s", item[k], s2_caps(tyre[v]));
+                else snprintf(line, sizeof line, "%s   %c%c%c%c%c", item[k], v == 0 ? '1' : '-', v == 1 ? '2' : '-', v == 2 ? '3' : '-', v == 3 ? '4' : '-', v == 4 ? '5' : '-');
+            } else snprintf(line, sizeof line, "%s", item[k]);
+            s2_text_centred(y, line, 3, k == sel ? 1 : 3, -1);
+        }
+        if (getenv("OS_S2MENU_SHOT")) { write_ppm(getenv("OS_S2MENU_SHOT")); printf("saved %s\n", getenv("OS_S2MENU_SHOT")); return -1; }
+        s2_menu_show(ren, tex);
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) return -1;
+            if (ev.type != SDL_KEYDOWN) continue;
+            const SDL_Keycode k = ev.key.keysym.sym;
+            const int step = k == SDLK_LEFT ? -1 : k == SDLK_RIGHT ? 1 : 0;
+            if (k == SDLK_ESCAPE) return 0;
+            if (k == SDLK_UP && sel > 0) sel--;
+            if (k == SDLK_DOWN && sel < 7) sel++;
+            if (step && sel < 6) {
+                const int at = item_of[sel], top = sel == 2 ? 2 : 4;
+                six[at] += step;
+                if (six[at] < 0) six[at] = 0;
+                if (six[at] > top) six[at] = top;
+            }
+            if ((k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) && sel >= 6) {
+                if (sel == 6) { memcpy(g_s2_setup[team][car][which], six, sizeof six); s2_setups_save(); }
+                return 0;
+            }
+        }
+        SDL_Delay(8);
+    }
+}
+
 static int s2_menu(void)
 {
     static char str[260][40];
     static const int lap_of[4] = { 1, 3, 5, 10 };
     const int nstr = text_lines("build/dec/LOCAL/STRINGS.TXT", str, 260);
     int first_track = -1, first_laps = -1, rookie = -1;
+    const char *team_name[4] = { "CONDOR", "ANGELS", "WASP", "ZEUS" };
     for (int i = 0; i < nstr; i++) {
         if (first_track < 0 && !strcmp(str[i], "ENGLAND")) first_track = i;
         if (!strcmp(str[i], "1 LAP")) first_laps = i;
         if (rookie < 0 && !strcmp(str[i], ":ROOKIE")) rookie = i;
+        if (!strcmp(str[i], "CONDOR") && i + 3 < nstr) for (int k = 0; k < 4; k++) team_name[k] = str[i + k];
     }
-    int v[5] = { getenv("OS_TRACK") ? atoi(getenv("OS_TRACK")) - 1 : 0, getenv("OS_CAR") ? atoi(getenv("OS_CAR")) : 1,
-                 getenv("OS_COND") ? atoi(getenv("OS_COND")) : 0, getenv("OS_DIFF") ? 2 - atoi(getenv("OS_DIFF")) : 0, 1 };
-    static const int most[5] = { 7, 5, 3, 3, 4 };
-    if (getenv("OS_LAPS")) for (int k = 0; k < 4; k++) if (lap_of[k] == atoi(getenv("OS_LAPS"))) v[4] = k;
-    for (int k = 0; k < 5; k++) v[k] = ((v[k] % most[k]) + most[k]) % most[k];
+    s2_champ_t *champ = s2_champ();
+    /* the lines: the kind of game -- ARCADE, TIME ATTACK (three laps against the ghost of
+       the best race so far, by day: the ghost on or off takes the skill's line), TIME
+       ATTACK's FREE RUN, CHAMPIONSHIP (a league takes the track's line; its weather and the
+       others' skill are the league's) -- then track, car, by day / night / in fog, the
+       others' skill, the laps, the team */
+    enum { NLINE = 8, L_TRACK = 0, L_CAR, L_COND, L_SKILL, L_LAPS, L_GAME, L_TEAM, L_SETUP };
+    static const int game_of[4] = { 1, 4, 8, 2 };
+    static const int show[NLINE] = { L_GAME, L_TEAM, L_CAR, L_SETUP, L_TRACK, L_COND, L_SKILL, L_LAPS };
+    int v[NLINE] = { 0, getenv("OS_CAR") ? atoi(getenv("OS_CAR")) : 1, getenv("OS_COND") ? atoi(getenv("OS_COND")) : 0,
+                     getenv("OS_DIFF") ? 2 - atoi(getenv("OS_DIFF")) : 0, 1, 0, getenv("OS_TEAM") ? atoi(getenv("OS_TEAM")) : 0,
+                     getenv("OS_S2SETUPNO") ? atoi(getenv("OS_S2SETUPNO")) : 0 };
+    static const int most[NLINE] = { 7, 5, 3, 3, 4, 4, 4, 5 };
+    const char *setup_name[5] = { "Standard", "Custom 1", "Custom 2", "Custom 3", "Custom 4" }, *t_customize = "CUSTOMIZE";
+    for (int i = 0; i < nstr; i++) {
+        if (!strcmp(str[i], "Standard") && i + 4 < nstr) for (int k = 0; k < 5; k++) setup_name[k] = str[i + k];
+        if (!strcmp(str[i], "CUSTOMIZE")) t_customize = str[i];
+    }
+    s2_setups_load();
+    int ghost = getenv("OS_S2GHOST") ? atoi(getenv("OS_S2GHOST")) != 0 : 1;
+    int league = champ ? champ->league : 0;
+    if (getenv("OS_TRACK")) for (int k = 0; k < 7; k++) if (s2_track_order[k] == atoi(getenv("OS_TRACK")) - 1) v[L_TRACK] = k;   /* (the track's line counts in the menu's order) */
+    if (getenv("OS_LAPS")) for (int k = 0; k < 4; k++) if (lap_of[k] == atoi(getenv("OS_LAPS"))) v[L_LAPS] = k;
+    if (getenv("OS_S2GAME")) for (int k = 0; k < 4; k++) if (game_of[k] == atoi(getenv("OS_S2GAME"))) v[L_GAME] = k;
+    for (int k = 0; k < NLINE; k++) v[k] = ((v[k] % most[k]) + most[k]) % most[k];
     int sel = 0, pal_of = -1;
+    s2_splits_forget();                              /* (0x3f7a3: a free run's best lap is this visit's) */
 
     SDL_Renderer *ren = NULL;
     SDL_Window *win = sys_window(&ren);
@@ -9235,50 +10568,113 @@ static int s2_menu(void)
     g_fnt_file = "build/dec/GAME1/GAMEL.FNT";
     g_spr_file = "build/dec/GAME1/GAMEL.SPR";
     hud_load();
+    if (champ && getenv("OS_S2REPORTTEST")) {        /* a test: the report after race n of league 1 with the player second, or (n = 9) after its last */
+        const int n = atoi(getenv("OS_S2REPORTTEST"));
+        memset(champ->points, 0, sizeof champ->points);
+        champ->on = champ->report = 1; champ->league = 0; champ->race = n == 9 ? 3 : n - 1; champ->nres = 4;
+        for (int k = 0; k < 4; k++) { champ->res[k].car = n == 9 ? k : (k + 1) & 3; champ->res[k].done = 1; }
+    }
+    /* back from a league's race: its report, and on to the next */
+    if (champ && champ->on && champ->report) {
+        const int go = s2_champ_report(champ, ren, tex, str, nstr);
+        if (go < 0) return 0;
+        if (go > 0) return s2_champ_race(champ);
+        league = champ->league < champ->open_league ? champ->league + 1 : champ->league;
+    }
+    if (champ) champ->on = 0;
     for (;;) {
-        char line[5][64];
+        char line[NLINE][64];
+        static const char *game[4] = { "ARCADE", "TIME ATTACK", "TIME ATTACK   FREE RUN", "CHAMPIONSHIP" };
         static const char *cond[3] = { "DAY", "NIGHT", "FOG" };
         static const char *level[3] = { "ROOKIE", "NORMAL", "PRO" };
-        if (pal_of != v[0]) {                        /* the colours are the chosen track's */
+        const int open_tracks = s2_open_all() || !champ ? 7 : champ->open_tracks + 3;
+        const int open_league = s2_open_all() || !champ ? 3 : champ->open_league;
+        const int fifth = s2_open_all() || (champ && champ->fifth[v[L_TEAM]]);
+        const int g = v[L_GAME];
+        if (v[L_TRACK] >= open_tracks) v[L_TRACK] = 0;
+        if (v[L_CAR] == 4 && !fifth) v[L_CAR] = 0;
+        const int track = s2_track_order[v[L_TRACK]];
+        if (pal_of != track) {                       /* the colours are the chosen track's */
             char file[96];
-            snprintf(file, sizeof file, "build/dec/MAP%dH01/MAP%d.COL", v[0] + 1, v[0] + 1);
-            if (!os_exists(file)) snprintf(file, sizeof file, "build/dec/MAP%dL01/MAP%d.COL", v[0] + 1, v[0] + 1);
+            snprintf(file, sizeof file, "build/dec/MAP%dH01/MAP%d.COL", track + 1, track + 1);
+            if (!os_exists(file)) snprintf(file, sizeof file, "build/dec/MAP%dL01/MAP%d.COL", track + 1, track + 1);
             pal_load(file);
-            pal_of = v[0];
+            pal_of = track;
         }
-        snprintf(line[0], sizeof line[0], "TRACK   %s", first_track >= 0 && first_track + v[0] < nstr ? str[first_track + v[0]] : "?");
-        snprintf(line[1], sizeof line[1], "CAR   %d", v[1] + 1);
-        snprintf(line[2], sizeof line[2], "%s", cond[v[2]]);
-        snprintf(line[3], sizeof line[3], "OPPONENTS   %s", rookie >= 0 && rookie + v[3] < nstr ? str[rookie + v[3]] + 1 : level[v[3]]);
-        snprintf(line[4], sizeof line[4], "%s", first_laps >= 0 && first_laps + v[4] < nstr ? str[first_laps + v[4]] : "3 LAPS");
+        snprintf(line[L_GAME], sizeof line[0], "%s", game[g]);
+        snprintf(line[L_TEAM], sizeof line[0], "TEAM   %s", team_name[v[L_TEAM]]);
+        const int own_setup = g != 0 && v[L_CAR] < 4;          /* (0x3d234: not arcade, not the fifth car) */
+        if (own_setup) snprintf(line[L_SETUP], sizeof line[0], v[L_SETUP] && sel < NLINE && show[sel] == L_SETUP ? "%s   ENTER %s" : "%s", s2_caps(setup_name[v[L_SETUP]]), t_customize);
+        else snprintf(line[L_SETUP], sizeof line[0], "%s", s2_caps(setup_name[0]));
+        snprintf(line[L_CAR], sizeof line[0], "CAR   %d", v[L_CAR] + 1);
+        snprintf(line[L_TRACK], sizeof line[0], "TRACK   %s", first_track >= 0 && first_track + track < nstr ? str[first_track + track] : "?");
+        snprintf(line[L_COND], sizeof line[0], "%s", cond[g == 0 ? v[L_COND] : 0]);
+        snprintf(line[L_SKILL], sizeof line[0], "OPPONENTS   %s", rookie >= 0 && rookie + v[L_SKILL] < nstr ? str[rookie + v[L_SKILL]] + 1 : level[v[L_SKILL]]);
+        snprintf(line[L_LAPS], sizeof line[0], "%s", first_laps >= 0 && first_laps + v[L_LAPS] < nstr ? str[first_laps + v[L_LAPS]] : "3 LAPS");
+        if (g == 1) { snprintf(line[L_SKILL], sizeof line[0], "GHOST CAR   %s", ghost ? "ON" : "OFF"); snprintf(line[L_LAPS], sizeof line[0], "%s", first_laps >= 0 && first_laps + 1 < nstr ? str[first_laps + 1] : "3 LAPS"); }
+        if (g == 2) { snprintf(line[L_SKILL], sizeof line[0], "-"); snprintf(line[L_LAPS], sizeof line[0], "-"); }
+        if (g == 3) {
+            snprintf(line[L_TRACK], sizeof line[0], "LEAGUE %d   %d TRACKS", league + 1, s2_league[league][0]);
+            snprintf(line[L_COND], sizeof line[0], "-");
+            snprintf(line[L_SKILL], sizeof line[0], "OPPONENTS   %s", level[2 - s2_league[league][4]]);
+        }
         for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
         LAY_TOP();
-        s2_text_centred(14, "SCREAMER 2", 0, 1, 2);
-        for (int k = 0; k < 5; k++) s2_text_centred(52 + k * 20, line[k], 3, k == sel ? 1 : 3, -1);
-        s2_text_centred(52 + 5 * 20 + 6, "ENTER   START        ESC   QUIT", 3, 3, -1);
+        s2_text_centred(10, "SCREAMER 2", 0, 1, 2);
+        for (int k = 0; k < NLINE; k++) s2_text_centred(40 + k * 18, line[show[k]], 3, k == sel ? 1 : 3, -1);
+        s2_text_centred(40 + NLINE * 18 + 8, "ENTER   START        ESC   QUIT", 3, 3, -1);
         if (getenv("OS_S2MENU_SHOT")) { write_ppm(getenv("OS_S2MENU_SHOT")); printf("saved %s\n", getenv("OS_S2MENU_SHOT")); return 0; }
-        SDL_UpdateTexture(tex, NULL, fb, FB_W * (int)sizeof(uint32_t));
-        SDL_RenderClear(ren);
-        SDL_RenderCopy(ren, tex, NULL, NULL);
-        SDL_RenderPresent(ren);
+        s2_menu_show(ren, tex);
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) return 0;
             if (ev.type != SDL_KEYDOWN) continue;
             const SDL_Keycode k = ev.key.keysym.sym;
+            const int at = show[sel], step = k == SDLK_LEFT ? -1 : k == SDLK_RIGHT ? 1 : 0;
             if (k == SDLK_ESCAPE) return 0;
-            if (k == SDLK_UP) sel = (sel + 4) % 5;
-            if (k == SDLK_DOWN) sel = (sel + 1) % 5;
-            if (k == SDLK_LEFT) v[sel] = (v[sel] + most[sel] - 1) % most[sel];
-            if (k == SDLK_RIGHT) v[sel] = (v[sel] + 1) % most[sel];
+            if (k == SDLK_UP) sel = (sel + NLINE - 1) % NLINE;
+            if (k == SDLK_DOWN) sel = (sel + 1) % NLINE;
+            if (step) {
+                if (at == L_TRACK && g == 3) league = (league + step + open_league + 1) % (open_league + 1);
+                else if (at == L_TRACK) v[at] = (v[at] + step + open_tracks) % open_tracks;
+                else if (at == L_CAR) v[at] = (v[at] + step + (fifth ? 5 : 4)) % (fifth ? 5 : 4);
+                else if (at == L_SKILL && g == 1) ghost = !ghost;
+                else if ((at == L_COND && g != 0) || (at == L_SKILL && g >= 2) || (at == L_LAPS && (g == 1 || g == 2)) || (at == L_SETUP && !own_setup)) { }
+                else v[at] = (v[at] + step + most[at]) % most[at];
+            }
+            if ((k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) && at == L_SETUP && own_setup && v[L_SETUP]) {
+                if (s2_customize(ren, tex, str, nstr, v[L_TEAM], v[L_CAR], v[L_SETUP] - 1) < 0) return 0;
+                continue;
+            }
             if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
                 char num[16];
-                snprintf(num, sizeof num, "%d", v[0] + 1); setenv("OS_TRACK", num, 1);
-                snprintf(num, sizeof num, "%d", v[1]); setenv("OS_CAR", num, 1);
-                snprintf(num, sizeof num, "%d", v[2]); setenv("OS_COND", num, 1);
-                snprintf(num, sizeof num, "%d", 2 - v[3]); setenv("OS_DIFF", num, 1);
-                snprintf(num, sizeof num, "%d", lap_of[v[4]]); setenv("OS_LAPS", num, 1);
-                return v[0] + 1;
+                snprintf(num, sizeof num, "%d", v[L_SETUP]); setenv("OS_S2SETUPNO", num, 1);
+                if (own_setup && v[L_SETUP]) {
+                    const int *six = g_s2_setup[v[L_TEAM]][v[L_CAR]][v[L_SETUP] - 1];
+                    char sx[64];
+                    snprintf(sx, sizeof sx, "%d,%d,%d,%d,%d,%d", six[0], six[1], six[2], six[3], six[4], six[5]);
+                    setenv("OS_S2SETUP", sx, 1);
+                } else unsetenv("OS_S2SETUP");
+                snprintf(num, sizeof num, "%d", track + 1); setenv("OS_TRACK", num, 1);
+                snprintf(num, sizeof num, "%d", v[L_CAR]); setenv("OS_CAR", num, 1);
+                snprintf(num, sizeof num, "%d", v[L_TEAM]); setenv("OS_TEAM", num, 1);
+                snprintf(num, sizeof num, "%d", g == 0 ? v[L_COND] : 0); setenv("OS_COND", num, 1);
+                snprintf(num, sizeof num, "%d", game_of[g]); setenv("OS_S2GAME", num, 1);
+                snprintf(num, sizeof num, "%d", ghost); setenv("OS_S2GHOST", num, 1);
+                snprintf(num, sizeof num, "%d", 2 - v[L_SKILL]); setenv("OS_DIFF", num, 1);
+                snprintf(num, sizeof num, "%d", lap_of[v[L_LAPS]]); setenv("OS_LAPS", num, 1);
+                unsetenv("OS_S2SEED");
+                if (g == 3 && champ) {
+                    /* a league begins (0x431ca): no points, its races not in daylight, a
+                       number for the random draws */
+                    memset(champ->points, 0, sizeof champ->points);
+                    champ->on = 1; champ->league = league; champ->race = 0; champ->report = 0;
+                    champ->left = league < 2 ? league : 2;
+                    champ->number = (unsigned)SDL_GetTicks() | 1u;
+                    champ->team = v[L_TEAM]; champ->model = v[L_CAR];
+                    return s2_champ_race(champ);
+                }
+                return track + 1;
             }
         }
         SDL_Delay(8);
@@ -9297,14 +10693,22 @@ static int session(int argc, char **argv)
      * and the race comes back here the same way when it is left with ESC.
      */
     if (argc < 2 && os_game() == 2) {
-        /* SCREAMER 2: the port's own plain menu for now (s2_menu), and back to it when a
-           race is left; a test switch that picks the race (OS_S2PHYS, OS_S2ROBOT, OS_NOMENU
-           ...) goes straight to the track of OS_TRACK and leaves the program after it */
+        /* SCREAMER 2: the game's own menu (s2_menu3d, S2-5zq), which starts its races and has
+           them come back to it.  A test switch that picks the race (OS_S2PHYS, OS_S2ROBOT,
+           OS_NOMENU ...) goes straight to the track of OS_TRACK and leaves the program after it
+           -- unless OS_S2MENU3D=1 asks for the game's menu all the same (the menu's tests);
+           OS_S2PLAINMENU=1: the port's own plain menu (s2_menu), as before the game's was in */
+        if (!s2_available()) {
+            fprintf(stderr, "Screamer 2 is not in this build\n");
+            return 0;
+        }
         char dir[64], num[16];
         int track = getenv("OS_TRACK") ? atoi(getenv("OS_TRACK")) : 1;
         const int straight = getenv("OS_NOMENU") || getenv("OS_S2PHYS") || getenv("OS_S2ROBOT") || getenv("OS_S2SCRIPT") || getenv("OS_SNDWAV")
                           || getenv("OS_FRAMELOG") || getenv("OS_SNDLOG") || !strcmp(SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "", "dummy")
                           || (getenv("SDL_VIDEODRIVER") && !strcmp(getenv("SDL_VIDEODRIVER"), "dummy") && !getenv("OS_S2MENU_SHOT"));
+        const char *m3 = getenv("OS_S2MENU3D");
+        if ((m3 && atoi(m3) != 0) || (!straight && !getenv("OS_S2PLAINMENU") && !(m3 && atoi(m3) == 0))) { s2_menu3d(); return 0; }
         if (straight) { if (getenv("OS_FROM_RACE")) return 0; }
         else { track = s2_menu(); if (!track) return 0; setenv("OS_FROM_MENU", "1", 1); }
         if (track < 1 || track > 7) track = 1;
@@ -9432,8 +10836,10 @@ static int session(int argc, char **argv)
     {
         FILE *f = fopen(path_, "rb");
         size_t got = f ? fread(g_smg, 1, sizeof g_smg, f) : 0;
-        /* Screamer 2's table has 48 rows where Screamer's has 64 (what uses it there is not read yet) */
-        g_have_smg = got == sizeof g_smg || (os_game() == 2 && got == 48 * 256);
+        /* Screamer 2's table has 48 rows where Screamer's has 64.  (Not `sizeof g_smg`: the array
+           has 112 rows since Screamer 2's smoke, and Screamer's file was then taken for missing --
+           its smoke, shadows and glass drawn as a dark half-mix, track 4's beams too.) */
+        g_have_smg = got == 64 * 256 || (os_game() == 2 && got == 48 * 256);
         if (f) fclose(f);
         if (!g_have_smg && os_game() == 2) {
             /* SCREAMER 2's track 7 has no MAP7.SMG (and the program no name for such a file:
@@ -9567,7 +10973,7 @@ static int session(int argc, char **argv)
                 if (getenv("OS_S2ASKLOG")) s2_peek(0, 0x150, 5);
                 if (getenv("OS_S2CAMLOG")) { s2_camera_state v; s2_camera(&v); printf("C %d camera at %d %d %d angles %.4f %.4f %.4f\n", f, v.x, v.height, v.y, (double)v.angle[0], (double)v.angle[1], (double)v.angle[2]); }
                 printf("F %d", f++);
-                for (int k = 0; k < ncars; k++) { s2_car(k, &c); printf(" | %d %d %d %.4f %.2f", c.x, c.height, c.y, (double)c.angle[1], (double)c.speed); }
+                for (int k = 0; k < ncars; k++) { s2_car(k, &c); printf(" | %d %d %d %.4f %.2f %.5f %.5f", c.x, c.height, c.y, (double)c.angle[1], (double)c.speed, (double)c.angle[0], (double)c.angle[2]); }
                 printf("\n");
             }
             return 0;
@@ -9577,8 +10983,8 @@ static int session(int argc, char **argv)
             if (f % (getenv("OS_S2EVERY") ? atoi(getenv("OS_S2EVERY")) : 25) == 0) {
                 if (getenv("OS_S2STATE")) s2_state();
                 s2_car(0, &c);
-                printf("s2 %4d  at %7d %7d  height %6d  heading %6.3f  tilt %6.3f %6.3f  speed %8.2f  gear %d  rpm %6.0f  steer %5.2f\n",
-                       f, c.x, c.y, c.height, c.angle[1], c.angle[0], c.angle[2], c.speed, c.gear, c.rpm, c.steer);
+                printf("s2 %4d  at %7d %7d  height %6d  heading %6.3f  tilt %6.3f %6.3f  speed %8.2f  gear %d  rpm %6.0f  steer %5.2f  look %04x\n",
+                       f, c.x, c.y, c.height, c.angle[1], c.angle[0], c.angle[2], c.speed, c.gear, c.rpm, c.steer, c.look);
                 for (int k = 1; k < ncars; k++) {
                     s2_car(k, &c);
                     printf("   car %d  at %7d %7d  height %6d  heading %6.3f  speed %8.2f  gear %d\n", k, c.x, c.y, c.height, c.angle[1], c.speed, c.gear);
@@ -9700,6 +11106,40 @@ static int session(int argc, char **argv)
         }
     }
 
+    /* OS_MATDUMP=<routine>: every piece with a face of that material routine (160 = reflection) */
+    if (getenv("OS_MATDUMP") && g_scene) {
+        const int want = atoi(getenv("OS_MATDUMP"));
+        for (int o = 0; o < g_scene->count; o++) {
+            const scene_object *so = &g_scene->obj[o];
+            if (!so->m) continue;
+            int n = 0, mi = -1;
+            for (int f = 0; f < so->m->nface; f++) {
+                const int k = so->m->material[f] / 16;
+                if (k >= 0 && k < MAT_MAX && g_mat[k].type == want) { n++; mi = k; }
+            }
+            if (n) printf("matdump: V%d run %d pos (%.0f, %.0f) height %.0f heading %d: %d of %d faces, material %d (%dx%d), flags 0x%x, normals %d\n",
+                          so->v, so->layer, so->x, so->y, so->z, so->t, n, so->m->nface, mi, g_mat[mi].su, g_mat[mi].sv, so->m->nblock > 0 ? so->m->block[0].flags : 0, so->m->nblock > 0 ? so->m->block[0].has_vnormal : 0);
+        }
+    }
+    /* OS_FLATDUMP=1: every small flat piece (four faces at most, all its corners at one height) */
+    if (getenv("OS_FLATDUMP") && g_scene) {
+        for (int o = 0; o < g_scene->count; o++) {
+            const scene_object *so = &g_scene->obj[o];
+            const mesh *mm = so->m;
+            if (!mm || mm->nface > 4 || mm->nvert <= 0) continue;
+            float lo = 1e9f, hi = -1e9f, w0 = 1e9f, w1 = -1e9f, l0 = 1e9f, l1 = -1e9f;
+            for (int v = 0; v < mm->nvert; v++) {
+                if (mm->vert[v].y < lo) lo = mm->vert[v].y; if (mm->vert[v].y > hi) hi = mm->vert[v].y;
+                if (mm->vert[v].x < w0) w0 = mm->vert[v].x; if (mm->vert[v].x > w1) w1 = mm->vert[v].x;
+                if (mm->vert[v].z < l0) l0 = mm->vert[v].z; if (mm->vert[v].z > l1) l1 = mm->vert[v].z;
+            }
+            if (hi - lo > 4.0f) continue;
+            const int k = mm->material[0] / 16;
+            printf("flatdump: V%d run %d pos (%.0f, %.0f) height %.0f+%.0f heading %d: %d faces, %.0f x %.0f, material %d routine %d (%dx%d)\n",
+                   so->v, so->layer, so->x, so->y, so->z, lo, so->t, mm->nface, w1 - w0, l1 - l0, k,
+                   k >= 0 && k < MAT_MAX ? g_mat[k].type : -1, k >= 0 && k < MAT_MAX ? g_mat[k].su : 0, k >= 0 && k < MAT_MAX ? g_mat[k].sv : 0);
+        }
+    }
     /* OS_HOLES=1: walk the whole lap looking for HOLES in the drivable area --
        points that are off the track but have track on both sides of them
        across the road.  A hole is an invisible wall. */
@@ -9831,11 +11271,24 @@ static int session(int argc, char **argv)
                 if (sf) fclose(sf);
             }
             else
-            for (int f = atoi(getenv("OS_S2RUN")); f > 0; f--) {
+            for (int f = atoi(getenv("OS_S2RUN")), f0 = f; f > 0; f--) {
+                if (getenv("OS_S2PLAN")) {                   /* (as OS_S2PHYS takes it: "A:4,AR:2" -- keys for so many seconds) */
+                    static char now[16];
+                    const float tnow = (float)(f0 - f) * s2_step();
+                    float from = 0.0f;
+                    for (const char *p = getenv("OS_S2PLAN"); *p; ) {
+                        char k[16] = ""; float d = 0.0f; int n = 0;
+                        if (sscanf(p, "%15[^:]:%f%n", k, &d, &n) < 2) break;
+                        if (tnow >= from) snprintf(now, sizeof now, "%s", k);
+                        from += d; p += n; if (*p == ',') p++;
+                    }
+                    keys = now;
+                }
                 s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
                 s2_race_step();
             }
             s2_race_show(1.0f);
+            if (getenv("OS_S2GHOSTLOG")) s2_race_leave();        /* (a test of time attack's ghost) */
             s2_car(getenv("OS_S2LOOK") ? atoi(getenv("OS_S2LOOK")) % g_s2_on : 0, &c);
             s2_camera_show(&cam, 1.0f);
             if (getenv("OS_S2ORBIT") || getenv("OS_S2LOOK")) {
@@ -9843,6 +11296,17 @@ static int session(int argc, char **argv)
                 cam.x = (float)c.x - cosf(cam.yaw) * 1300.0f; cam.y = (float)c.y - sinf(cam.yaw) * 1300.0f;
                 cam.z = (float)c.height + 550.0f;
                 cam.pitch = -0.274f; cam.roll = 0.0f; g_hide = NULL;
+            }
+            if (getenv("OS_S2ANIMLOOK")) {       /* a test: OS_S2ANIMLOOK=<row>,<degrees>,<distance>,<height>: look at that animation's object */
+                int row = 0; float deg = 0.0f, far_ = 3000.0f, up = 300.0f;
+                sscanf(getenv("OS_S2ANIMLOOK"), "%d,%f,%f,%f", &row, &deg, &far_, &up);
+                if (row >= 0 && row < 40 && g_s2_anim_is[row].on) {
+                    const s2_anim *an = &g_s2_anim_is[row].s;
+                    cam.yaw = deg * (float)M_PI / 180.0f;
+                    cam.x = an->x - cosf(cam.yaw) * far_; cam.y = an->y - sinf(cam.yaw) * far_; cam.z = an->height + up;
+                    cam.pitch = -atanf(up / far_); cam.roll = 0.0f; g_hide = NULL;
+                    printf("animation %d \"%s\" at %.0f %.0f height %.0f, heading %.2f, climb %.3f\n", row, an->name, (double)an->x, (double)an->y, (double)an->height, (double)an->heading, (double)an->climb);
+                } else { printf("animation %d is not to be seen now; those that are:", row); for (int k = 0; k < 40; k++) if (g_s2_anim_is[k].on) printf(" %d %s", k, g_s2_anim_is[k].s.name); printf("\n"); }
             }
             if (getenv("OS_S2ORBIT")) {          /* OS_S2ORBIT=<degrees round the car>,<distance>,<height> */
                 float deg = 90.0f, far_ = 1500.0f, up = 200.0f;
@@ -9852,14 +11316,14 @@ static int session(int argc, char **argv)
                 cam.z = (float)c.height + up;
                 cam.pitch = -atan2f(up - 100.0f, far_);
             }
-            printf("s2: car at %d %d height %d, speed %.1f, gear %d, road kinds under the wheels %d %d %d %d\n", c.x, c.y, c.height, c.speed, c.gear,
-                   c.wheel_kind[0], c.wheel_kind[1], c.wheel_kind[2], c.wheel_kind[3]);
+            printf("s2: car at %d %d height %d, speed %.1f, gear %d, road kinds under the wheels %d %d %d %d, look %04x\n", c.x, c.y, c.height, c.speed, c.gear,
+                   c.wheel_kind[0], c.wheel_kind[1], c.wheel_kind[2], c.wheel_kind[3], c.look);
         }
         if (getenv("OS_HEADING"))
             cam.yaw = (float)atof(getenv("OS_HEADING")) * (float)M_PI / 180.0f;
         if (getenv("OS_YAW"))   cam.yaw   += (float)atof(getenv("OS_YAW")) * (float)M_PI / 180.0f;
         if (getenv("OS_PITCH")) cam.pitch  = (float)atof(getenv("OS_PITCH")) * (float)M_PI / 180.0f;
-        render_frame(&cam, &sk);
+        s2_render(&cam, &sk);
         if (g_s2_on && getenv("OS_S2RUN") && !getenv("OS_NOHUD") && !getenv("OS_S2ORBIT")) {
             if (getenv("OS_S2SPRITES")) {             /* a test: the sprites from number n on, each with its number */
                 int n = atoi(getenv("OS_S2SPRITES")), x = 4, y = 4, tall = 0;
@@ -9899,6 +11363,10 @@ static int session(int argc, char **argv)
                "  F5              FPS counter             F11 full screen    F12 screenshot\n\n",
                controls_key_name(0), controls_key_name(1), controls_key_name(2), controls_key_name(3),
                controls_key_name(4), controls_key_name(5));
+    if (os_game() == 2 && os_once(5))
+        printf("SCREAMER 2\n"
+               "  M (or R)        the mirror\n"
+               "  in a replay:    F9 the trackside cameras, F11 the next car, ESC its end\n\n");
     if (g_dev && os_once(4))
         printf("DEVELOPER KEYS (-d)\n"
                "  TAB           change mode:  DRIVE -> RIDE -> WALK -> FLY   (4 / 1 / 2 / 3)\n"
@@ -10007,11 +11475,29 @@ static int session(int argc, char **argv)
                 cam.pitch -= (float)ev.motion.yrel * sens;
             }
             if (ev.type != SDL_KEYDOWN) continue;
-            if (g_s2_on && g_s2_end_t >= 4.0f) {        /* SCREAMER 2, the race over: the two choices */
+            if (g_s2_pz.on) {                            /* the race's pause screen (0x49f8e) takes the keys */
                 const SDL_Keycode k = ev.key.keysym.sym;
-                if (k == SDLK_LEFT || k == SDLK_RIGHT) { g_s2_end_sel ^= 1; continue; }
+                if (k != SDLK_F12 && k != SDLK_F11 && k != SDLK_F5) { if (s2_pause_key(k)) running = 0; continue; }
+            }
+            if (g_s2_on && (s2_mode & 0x80)) {           /* the attract race: ENTER or ESC ends it (0x37ea9), nothing else is taken */
+                const SDL_Keycode k = ev.key.keysym.sym;
+                if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE || k == SDLK_ESCAPE) { if (!g_s2_att.end) g_s2_att.end = 1; continue; }
+                if (k != SDLK_F12 && k != SDLK_F11 && k != SDLK_F5) continue;      /* (the port's own: a picture, full screen, FPS) */
+            }
+            if (g_s2_on && g_s2_end_t >= 4.0f) {        /* SCREAMER 2, the race over: the choices */
+                const SDL_Keycode k = ev.key.keysym.sym;
+                const int replay = s2_replay_offered(), last = (s2_mode == 2 ? 0 : 1) + replay;
+                if (k == SDLK_LEFT && g_s2_end_sel > 0) { g_s2_end_sel--; continue; }
+                if (k == SDLK_RIGHT && g_s2_end_sel < last) { g_s2_end_sel++; continue; }
                 if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
-                    if (g_s2_end_sel == 0) s2_race_again();
+                    const int pick = g_s2_end_sel + !replay;        /* 0 REPLAY, 1 RACE AGAIN or CONTINUE, 2 EXIT */
+                    if (s2_mode == 2 && !s2_replaying() && s2_champ() && s2_champ()->on) {    /* (0x47e75: a league race's places taken as ENTER is, not from its replay) */
+                        s2_champ()->nres = s2_results(s2_champ()->res);
+                        s2_champ()->report = 1;
+                    }
+                    if (!s2_replaying() && getenv("OS_S2MENU3D") && getenv("OS_FROM_MENU")) s2_race_results_keep();   /* (the game's menu: the race's result as ENTER is, 0x47e75) */
+                    s2_replay_take(pick == 0);
+                    if (pick == 0 || (pick == 1 && s2_mode != 2)) s2_race_again();     /* (a league's race: CONTINUE, to the report) */
                     running = 0;
                     continue;
                 }
@@ -10037,6 +11523,8 @@ static int session(int argc, char **argv)
             case SDLK_ESCAPE:
                 if (mouse) { mouse = 0; SDL_SetRelativeMouseMode(SDL_FALSE); }
                 else if (g_replay) g_rpl_at = g_rpl_n;                /* skip the replay */
+                else if (g_s2_on && s2_replaying()) { if (!g_s2_end_t) s2_replay_stop(); }     /* (Screamer 2's: 0x2d7c0, the rest not run) */
+                else if (g_s2_on) { if (!s2_player_done() && !g_s2_end_t) s2_pause_open(); }  /* (0x2d7c0: the pause screen; nothing once the car has finished) */
                 /* 0x1fe86: leaving a race is answered with PLAY AGAIN? over the
                    darkened picture, in every mode but the network game -- the
                    championship too, when the race was left or lost on time.
@@ -10050,7 +11538,13 @@ static int session(int argc, char **argv)
             case SDLK_3:   new_mode = FLY;  break;
             case SDLK_4:   if (can_drive) new_mode = DRIVE; break;
             /* 0x211d0: the radar's key -- 24, 48, 72, off, and round again */
-            case SDLK_m:   g_radar_zoom = g_radar_zoom >= 72 ? 0 : g_radar_zoom + 24; break;
+            /* (Screamer 2's mirror: M, the game's 0x2d7c0 -- R as well, the port's first key for it) */
+            case SDLK_r:   if (g_s2_on) { g_s2_mirror_on = !g_s2_mirror_on; s2_mirror_set(g_s2_mirror_on); } break;
+            case SDLK_m:
+                if (g_s2_on) { g_s2_mirror_on = !g_s2_mirror_on; s2_mirror_set(g_s2_mirror_on); }
+                else g_radar_zoom = g_radar_zoom >= 72 ? 0 : g_radar_zoom + 24;
+                break;
+            case SDLK_F9:  if (g_s2_on && s2_replaying()) s2_view(1); break;          /* 0x132b4: a replay's trackside cameras */
             case SDLK_n:   if (mode == DRIVE) player_car(r, g_spec_now + 1); break;
             case SDLK_BACKSPACE:
                 if (mode == DRIVE && !g_replay) g_reset_key = 1;     /* done in the next step, so the replay has it */
@@ -10123,6 +11617,7 @@ static int session(int argc, char **argv)
                 fflush(stdout);
                 break;
             case SDLK_F11: {
+                if (g_s2_on && s2_replaying()) { s2_replay_next_car(); break; }     /* (in Screamer 2's replay the game's: the next car, 0x2d7c0) */
                 Uint32 fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
                 SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
                 break;
@@ -10131,6 +11626,7 @@ static int session(int argc, char **argv)
                 char name[64];
                 snprintf(name, sizeof name, "shot_%03d.ppm", shots++);
                 write_ppm(name);
+                shot_report(name, &cam);
                 printf("saved %s  (t=%d)\n", name, path_nearest(r, cam.x, cam.y));
                 fflush(stdout);
                 break;
@@ -10205,10 +11701,19 @@ static int session(int argc, char **argv)
             static float owed;
             controls_state ct;
             controls_read(&ct);
-            owed += paused ? 0.0f : dt;
+            owed += paused || g_s2_pz.on ? 0.0f : dt;
             if (owed > 0.25f) owed = 0.25f;
             while (owed >= s2_every()) {
-                s2_controls(ct.throttle > 0.3f, ct.brake > 0.3f, ct.steer > 0.3f, ct.steer < -0.3f, ct.shift > 0, ct.shift < 0);
+                if (getenv("OS_S2REPLAYTEST") && !s2_replaying()) {    /* a test: a pattern of controls, then the race kept and its replay started */
+                    static int f;
+                    const int part = f / 23 % 4;
+                    ct.throttle = 1.0f; ct.brake = (f / 61 % 5 == 4) ? 1.0f : 0.0f; ct.steer = part == 1 ? 1.0f : part == 3 ? -1.0f : 0.0f; ct.shift = 0; ct.up_held = ct.down_held = 0;
+                    if (++f == atoi(getenv("OS_S2REPLAYTEST"))) { s2_replay_keep(); s2_replay_take(1); if (getenv("OS_S2REPLAYFILE")) s2_replay_from_file(); printf("s2: replay\n"); fflush(stdout); s2_race_again(); }
+                }
+                /* (the gear controls as HELD: the game changes one gear a press itself -- 0x1f756 reads
+                   the key's word and waits for it to be let go, car +0x140 -- and a press handed on
+                   for one picture only was lost whenever that picture ran no race step) */
+                s2_controls(ct.throttle > 0.3f, ct.brake > 0.3f, ct.steer > 0.3f, ct.steer < -0.3f, ct.up_held, ct.down_held);
                 s2_race_step();
                 owed -= s2_every();
             }
@@ -10471,7 +11976,7 @@ static int session(int argc, char **argv)
         g_anim_clock = (int)(g_anim_time * 65535.0f);
         mesh_animate_all(g_anim_clock);
         smoke_dump();
-        render_frame(&view, &sk);
+        s2_render(&view, &sk);
         /* the trackside view has no instruments (overlay 0 in the view table) */
         /* 0x1ffec: the whole picture is turned over before the instruments go on */
         if (g_cheat & 0x10)
@@ -10500,8 +12005,11 @@ static int session(int argc, char **argv)
         }
         else if (mode == DRIVE && !overhead && !getenv("OS_NOHUD"))
             hud_draw(!g_swoop.on && !(g_finished || g_game_over));
+        else if (mode == RIDE && g_s2_on && (s2_mode & 0x80))
+            { s2_attract_draw(paused ? 0.0f : dt); if (g_s2_att.end == 2) running = 0; }   /* (the attract race: its own screen, 0x37ea9) */
         else if (mode == RIDE && g_s2_on && !overhead && !getenv("OS_NOHUD"))
-            s2_hud_draw(paused ? 0.0f : dt);
+            s2_hud_draw(paused || g_s2_pz.on ? 0.0f : dt);
+        if (g_s2_pz.on) s2_pause_draw(dt);
         if (g_dialog) { static int dtick; dialog_draw(dtick++); }
         if (getenv("OS_CDTEST") && !g_cd.on && g_race_clock > 7.0f) {      /* a test: open it, cursor on button n */
             cd_open(); g_cd.sel = atoi(getenv("OS_CDTEST")) % 7; g_cd.track = 3;
@@ -10604,6 +12112,13 @@ static int session(int argc, char **argv)
     mister_show_wait();
 #endif
 
+    if (g_s2_on) s2_race_leave();                /* (0x2b2a8: time attack's ghost) */
+    if (g_s2_on && getenv("OS_S2MENU3D") && getenv("OS_FROM_MENU") && !(s2_mode & 0x80)) s2_race_results_keep();   /* (for the game's menu: S2-5zq) */
+    if (g_s2_on && s2_mode == 2 && s2_champ() && s2_champ()->on && !s2_replaying()) {      /* a league's race: how it ended, for the report (a replay's is the race's) */
+        s2_champ_t *c = s2_champ();
+        c->nres = s2_results(c->res);
+        c->report = 1;
+    }
     if (records_ok) records_enter(track);        /* 0x2a1a8, 0x28f42 */
     if (!g_window_closed && !g_intro && !getenv("OS_DRIVE_DEMO") && !getenv("OS_DEMO") && !shot) {      /* 0x21d8c */
         Uint32 t0 = SDL_GetTicks();

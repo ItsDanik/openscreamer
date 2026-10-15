@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "s2_cpu.h"
+#include "s2_exe.h"
 
 uint8_t s2_flat[S2_FLAT];
 /* the image as read: what s2_exe_fresh() puts back.  (Not allocated: the port puts its

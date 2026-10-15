@@ -17,8 +17,8 @@ start=max(i for i in range(1,len(rows)) if rows[i][1] < rows[i-1][1]) if any(row
 race=rows[start:]
 ncars=(len(race[0])-10)//9
 with open(pre+'.script','w') as f:
-    for r in race[1:]: f.write("%.6f %.6f %d %d %d %d\n"%(r[2],r[3],r[4]>0,r[5]>0,r[6]>0,r[7]>0))
-env=dict(os.environ,OPENSCREAMER_HOME=S+'/home',SDL_VIDEODRIVER='dummy',OS_TRACK='1',OS_S2CARS=str(ncars),OS_S2HOLD='1',OS_S2PHYS='1',OS_S2SCRIPT=pre+'.script',OS_S2CLOCK="%.6f"%race[0][1])
+    for r in race[1:]: f.write("%.9g %.9g %d %d %d %d\n"%(r[2],r[3],r[4]>0,r[5]>0,r[6]>0,r[7]>0))
+env=dict(os.environ,OPENSCREAMER_HOME=S+'/home',SDL_VIDEODRIVER='dummy',OS_TRACK='1',OS_S2CARS=str(ncars),OS_S2HOLD='1',OS_S2PHYS='1',OS_S2SCRIPT=pre+'.script',OS_S2CLOCK="%.9g"%race[0][1])
 env.update(dict(a.split('=',1) for a in sys.argv[2:]))
 out=subprocess.run(['/home/danik/openscreamer/port/build/openscreamer','-game','2'],env=env,capture_output=True,text=True,cwd='/home/danik/openscreamer').stdout
 port=[[ [float(v) for v in part.split()] for part in l.split('|')[1:]] for l in out.splitlines() if l.startswith('F ')]

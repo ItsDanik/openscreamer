@@ -117,6 +117,34 @@ static void pad_find(void)
 
 void controls_menu_mode(int on) { g_menu = on; }
 
+static int axis_word(int raw);
+int controls_pad(int sw[6])
+{
+    /* OS_PADTEST6="n:bits,n:bits...": a controller that is not there -- from its n-th asking on,
+       the six controls held as the bits say (1 accelerate, 2 brake, 4 left, 8 right, 16 gear up,
+       32 gear down) */
+    if (getenv("OS_PADTEST6")) {
+        static int asked;
+        int bits = 0, n, b;
+        asked++;
+        for (const char *p = getenv("OS_PADTEST6"); p && sscanf(p, "%d:%d", &n, &b) == 2; p = strchr(p, ','), p = p ? p + 1 : NULL)
+            if (asked >= n) bits = b;
+        for (int k = 0; k < 6; k++) sw[k] = (bits >> k) & 1;
+        return 1;
+    }
+    if (!g_pad) pad_find();
+    if (!g_pad) return 0;
+    SDL_GameControllerUpdate();
+    const int x = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
+    sw[0] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_A) || axis_word(SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) > 0x1ff;
+    sw[1] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_B) || axis_word(SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) > 0x1ff;
+    sw[2] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || x < -16000;
+    sw[3] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || x > 16000;
+    sw[4] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    sw[5] = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    return 1;
+}
+
 /* the game controller's two motors, 0..1 each (the heavy one, the light one).
    Called every picture: the controller is only told when the strength has
    changed, or to keep it going. */
@@ -195,6 +223,7 @@ void controls_read(controls_state *out)
                                : (float)((sw[2] - sw[3]) * 0x3ff) * 0.0009765625f;
     /* 0x18e0a: one gear a press (the game's latch at +0x140) */
     out->shift = (sw[4] && !g_gear_was[0]) ? +1 : (sw[5] && !g_gear_was[1]) ? -1 : 0;
+    out->up_held = sw[4]; out->down_held = sw[5];
     g_gear_was[0] = sw[4]; g_gear_was[1] = sw[5];
 }
 
