@@ -256,7 +256,8 @@ static int FUN_0004fe21(uint32_t name, uint32_t to, uint32_t r2, uint32_t r3)
 static uint32_t FUN_00051b02(int x, int y, uint32_t head, uint32_t px)
 {
     s2m_base(MP(0x1338cc));
-    s2m_picture(x, y, I32(head + 8), I32(head + 0xc) > 200 ? 200 : I32(head + 0xc), MP(px));
+    const int rows = s2_screen_hi() ? 400 : 200;    /* (STARTH: 640 x 400) */
+    s2m_picture(x, y, I32(head + 8), I32(head + 0xc) > rows ? rows : I32(head + 0xc), MP(px));
     return 0;
 }
 #define HOOK_50f45                     /* text: the record, x, y, the text, font, colour, the space between letters */

@@ -3620,7 +3620,8 @@ static void s2_camera_show(camera *cam, float t)
     g_hide = (b->view == 2 || b->view == 6) ? g_s2_obj[s2_player()] : NULL;
     /* the scene's rows are the view's, the eye line 0.65 of them (0x12dff -> 0x4f6c4): view
        6 draws only down to the dashboard */
-    if (b->rows > 0 && b->rows <= 200) { g_vh = b->rows * SY + (b->rows == 200 ? g_tall : 0); g_cy = EYE_LINE * (float)g_vh; }
+    if (s2_screen_hi()) { if (b->rows > 0 && b->rows <= 400) { g_vh = b->rows; g_cy = EYE_LINE * (float)g_vh; } }   /* (STARTH: the rows are the screen's own) */
+    else if (b->rows > 0 && b->rows <= 200) { g_vh = b->rows * SY + (b->rows == 200 ? g_tall : 0); g_cy = EYE_LINE * (float)g_vh; }
 }
 
 /*
@@ -3649,7 +3650,7 @@ static void s2_render(const camera *cam, const sky *sk)
         mc.yaw = atan2f(-cosf(h), sinf(h));
         mc.pitch = s2_half_turn(s2_angle_between(a->angle[0], b->angle[0], t));
         mc.roll = -s2_half_turn(s2_angle_between(a->angle[2], b->angle[2], t));
-        g_vh = m.rows * SY; g_cy = EYE_LINE * (float)g_vh;
+        g_vh = s2_screen_hi() ? m.rows : m.rows * SY; g_cy = EYE_LINE * (float)g_vh;
         g_hide = g_s2_obj[s2_player()];                       /* (0x2b6b4: the car and its shadow are not in it) */
         if (g_s2_shadow[0]) { shadow_z = g_s2_shadow[0]->z; g_s2_shadow[0]->z = -1.0e6f; }
         render_frame(&mc, sk);
@@ -3667,7 +3668,7 @@ static void s2_render(const camera *cam, const sky *sk)
         for (int y = 0; y < g_s2_mirror_h && y0 + y < FB_H; y++)
             for (int x = 0; x < g_s2_mirror_w && x0 + x < FB_W; x++)
                 fb[(y0 + y) * FB_W + x0 + x] = g_s2_mirror_px[y * (FB_MAXW / 2) + x];
-        if (g_s2_mirror_frame_ok < 0) { g_s2_mirror_frame_ok = pkc_load("build/dec/GAME1/MIRROR_L.PKC", g_s2_mirror_frame); g_pkc_loads++; }
+        if (g_s2_mirror_frame_ok < 0) { g_s2_mirror_frame_ok = pkc_load(s2_screen_hi() ? "build/dec/GAME1/MIRROR_H.PKC" : "build/dec/GAME1/MIRROR_L.PKC", g_s2_mirror_frame); g_pkc_loads++; }
         if (g_s2_mirror_frame_ok > 0) { LAY_TOP(); pkc_draw(g_s2_mirror_frame); }
     }
 }
@@ -5979,24 +5980,29 @@ static void hud_put(int x, int y, int idx)
 #define NO_SPACE (-99)
 static int g_hud_space = NO_SPACE;
 
+/* Screamer 2's menu in high resolution: the game's routines give places, gaps and widths in the
+   screen's own pixels (STARTH doubles them itself, docs/NOTES2.md S2-9) -- hud_text then scales
+   nothing */
+static int g_hud_native;
 static int hud_text(int x, int y, const char *str, int font, int colour, int draw)
 {
     if (font < 0 || font >= g_nfont) return 0;
     const hud_font *ft = &g_font[font];
-    x *= g_s; y *= g_s;
+    const int s_ = g_hud_native ? 1 : g_s;
+    x *= s_; y *= s_;
     /* (figures in a column, after a byte 1: every one takes the widest letter's room and
        what is left between two -- in Screamer 2 the routine's own argument, which makes
        the clocks' figures 5 apart in the small font, as the original's picture has them) */
-    int cell = ft->widest + (g_hud_space != NO_SPACE ? g_hud_space * g_s : 2 * g_s), fixed = 0, gap = g_s, x0 = x;
+    int cell = ft->widest + (g_hud_space != NO_SPACE ? g_hud_space * s_ : 2 * s_), fixed = 0, gap = s_, x0 = x;
     for (const unsigned char *p = (const unsigned char *)str; *p; p++) {
         int ch = *p;
         if (ch < ft->first || ch >= ft->first + ft->count) {
             if (ch == 1) fixed = 1; else if (ch == 2) fixed = 0;
-            else if (ch == 3) gap = 0; else if (ch == 4) gap = g_s;
+            else if (ch == 3) gap = 0; else if (ch == 4) gap = s_;
             continue;
         }
         int w = ft->glyph[ch - ft->first][0];
-        int gx = x + (g_hud_space != NO_SPACE ? 0 : gap) + (fixed ? (cell - (w + g_s)) / 2 : 0);
+        int gx = x + (g_hud_space != NO_SPACE ? 0 : gap) + (fixed ? (cell - (w + s_)) / 2 : 0);
         if (draw) {
             const uint8_t *px = g_font_px + ft->glyph[ch - ft->first][1];
             int bw = (w + 1) / 2;
@@ -6016,9 +6022,9 @@ static int hud_text(int x, int y, const char *str, int font, int colour, int dra
                     hud_put(gx + c, y + r, colour * 16 + shade);
                 }
         }
-        x += fixed ? cell : g_hud_space != NO_SPACE ? w + g_hud_space * g_s : w + g_s + gap;
+        x += fixed ? cell : g_hud_space != NO_SPACE ? w + g_hud_space * s_ : w + s_ + gap;
     }
-    return (x - x0 + g_s - 1) / g_s;
+    return (x - x0 + s_ - 1) / s_;
 }
 
 /* 0x2e598: a string centred on the screen */
@@ -6458,6 +6464,16 @@ static void s2_dash_needle(const int32_t *r, float part)
     memcpy(&a0, r + 3, 4); memcpy(&a1, r + 4, 4);
     float a = a0 - part * (a0 - a1);
     if (fabsf(a) < 0.001f) a = 0.0f;
+    if (s2_screen_hi()) {                      /* (STARTH: the table's numbers whole, in the screen's own pixels) */
+        const int cx = r[0], cy = r[1];
+        const int tx = (int)(cosf(a) * (float)r[2] / 1.0f + (float)cx), ty = (int)((float)cy - sinf(a) * (float)r[2] / 1.0f);
+        const float b = a + 1.5707964f, c = b - 3.1415927f;
+        const uint32_t col = g_pal[12];
+        dash_line(cx, cy, tx, ty, col);
+        dash_line((int)(cosf(b) + (float)cx), (int)((float)cy - sinf(b)), tx, ty, col);
+        dash_line((int)(cosf(c) + (float)cx), (int)((float)cy - sinf(c)), tx, ty, col);
+        return;
+    }
     const int cx = r[0] / 2, cy = r[1] / 2;
     const int tx = (int)(cosf(a) * (float)r[2] * 0.5f + (float)cx), ty = (int)((float)cy - sinf(a) * (float)r[2] * 0.5f);
     const float b = a + 1.5707964f, c = b - 3.1415927f;
@@ -6472,7 +6488,7 @@ static void s2_dash_draw(const s2_hud_state *h)
     const int32_t *r = (const int32_t *)h->dash_rec;
     if (g_s2_cock_n != h->dash) {
         char file[64];
-        snprintf(file, sizeof file, "build/dec/GAME1/COCK%d_L.PKC", h->dash + 1);
+        snprintf(file, sizeof file, "build/dec/GAME1/COCK%d_%c.PKC", h->dash + 1, s2_screen_hi() ? 'H' : 'L');
         g_s2_cock_ok = pkc_load(file, g_s2_cock);
         g_s2_cock_n = h->dash;
         g_pkc_loads++;
@@ -6482,7 +6498,8 @@ static void s2_dash_draw(const s2_hud_state *h)
     for (int y = g_vh; y < FB_H; y++) for (int x = 0; x < FB_W; x++) fb[y * FB_W + x] = 0xff000000u;
     if (g_s2_cock_ok) pkc_draw(g_s2_cock);
     const int gear = h->gear < 0 ? 0 : h->gear > 4 ? 4 : h->gear;
-    hud_sprite_draw(r[12 + gear * 2] / 2, r[13 + gear * 2] / 2, h->dash * 5 + 0x46 + gear);
+    if (s2_screen_hi()) hud_sprite_px(r[12 + gear * 2], r[13 + gear * 2], h->dash * 5 + 0x46 + gear);
+    else hud_sprite_draw(r[12 + gear * 2] / 2, r[13 + gear * 2] / 2, h->dash * 5 + 0x46 + gear);
     s2_dash_needle(r + 1, r[6] ? g_s2_dial_speed / (float)r[6] : 0.0f);
     s2_dash_needle(r + 7, g_s2_dial_revs);
 }
@@ -6528,19 +6545,25 @@ static void s2_attract_draw(float dt)
     LAY_TOP();
     if (g_s2_att.stage == 0) {
         for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
-        g_s2_att.group = 2; g_s2_att.stage = 1; g_s2_att.x = 1000.0f; g_s2_att.pause = 0.0f;
+        g_s2_att.group = 2; g_s2_att.stage = 1; g_s2_att.x = s2_screen_hi() ? 2000.0f : 1000.0f; g_s2_att.pause = 0.0f;
     } else if (g_s2_att.stage < 3) {
         for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
         const int n = g_s2_att.stage + 0x6d;
         if (n < g_nspr) {
-            const float to = (float)((320 - (g_spr[n].w / g_s + g_spr[n].ox / g_s)) / 2 - g_spr[n].ox / g_s / 2);
+            /* (STARTH: the logo's place in the screen's own pixels -- from 2000, aimed at twice the
+               low set's middle worked out from the H sprite halved, again from 1280; its height
+               10 not doubled) */
+            const int ox = g_spr[n].ox, w = g_spr[n].w;
+            const float to = s2_screen_hi() ? (float)((((320 - (w + ox) / 2) >> 1) - ((ox - (ox >> 31)) >> 1) / 2) * 2)
+                                            : (float)((320 - (w / g_s + ox / g_s)) / 2 - ox / g_s / 2);
             g_s2_att.x = (g_s2_att.x - to) * powf(0.925f, 50.0f * dt) + to;
-            hud_sprite_draw((int)g_s2_att.x, 10, n);
+            if (s2_screen_hi()) hud_sprite_px((int)g_s2_att.x, 10, n);
+            else hud_sprite_draw((int)g_s2_att.x, 10, n);
             if (fabsf(g_s2_att.x - to) < 5.0f) {
                 if (g_s2_att.stage - 1 < g_s2_att_n) s2_text_centred(0xa5, g_s2_att_txt[g_s2_att.stage - 1], 0, 1, 2);
                 g_s2_att.shown += dt;
                 if (g_s2_att.shown > 3.0f) {
-                    g_s2_att.shown = 0.0f; g_s2_att.x = 640.0f;
+                    g_s2_att.shown = 0.0f; g_s2_att.x = s2_screen_hi() ? 1280.0f : 640.0f;
                     if (++g_s2_att.stage > 2) g_s2_att.shown = 1.0f;
                 }
             }
@@ -10018,18 +10041,22 @@ void s2m_palette(const uint8_t *six)           /* 0x51664: the palette shown */
 {
     for (int i = 0; i < 256; i++) g_s2m_hw[i] = s2m_rgb(six + 3 * i);
 }
+/* HIGH RESOLUTION (STARTH, docs/NOTES2.md S2-9): the menu at 640 x 400 with the H set; the game's
+   routines then give every place in the screen's own pixels, and these draw them as given */
+int s2_screen_hi(void) { return g_s == 2 && g_yd == 1; }
 void s2m_fonts(void)                           /* 0x50dd3 / 0x50a9c: the menu's font and sprites */
 {
-    g_fnt_file = "build/dec/GRAF1/MENUL.FNT";
-    g_spr_file = "build/dec/GRAF1/MENUL.SPR";
+    g_fnt_file = s2_screen_hi() ? "build/dec/GRAF1/MENUH.FNT" : "build/dec/GRAF1/MENUL.FNT";
+    g_spr_file = s2_screen_hi() ? "build/dec/GRAF1/MENUH.SPR" : "build/dec/GRAF1/MENUL.SPR";
     hud_load();
 }
 void s2m_picture(int x, int y, int w, int h, const uint8_t *px)    /* 0x51b02 */
 {
+    const int sw = s2_screen_hi() ? FB_W : 320, sh = s2_screen_hi() ? FB_H : 200;
     for (int r = 0; r < h; r++)
         for (int c = 0; c < w; c++) {
             const int xx = x + c, yy = y + r;
-            if (xx < 0 || xx >= 320 || yy < 0 || yy >= 200) continue;
+            if (xx < 0 || xx >= sw || yy < 0 || yy >= sh) continue;
             fb[yy * FB_W + xx] = g_pal[px[r * w + c]];
             pxi[yy * FB_W + xx] = px[r * w + c];
         }
@@ -10037,6 +10064,10 @@ void s2m_picture(int x, int y, int w, int h, const uint8_t *px)    /* 0x51b02 */
 /* the menu's two clip boxes (0x50d6c sprites, 0x50fb9 text; the game keeps them in its screen's
    record and the drawers copy them in): x0 <= x < x1, y0 <= y < y1, in the 320 x 200 screen */
 static int g_s2m_clip[2][4] = { { 0, 0, 320, 200 }, { 0, 0, 320, 200 } };
+static void s2m_clip_start(void)               /* (the whole screen, as the menu starts) */
+{
+    for (int k = 0; k < 2; k++) { g_s2m_clip[k][0] = g_s2m_clip[k][1] = 0; g_s2m_clip[k][2] = s2_screen_hi() ? FB_W : 320; g_s2m_clip[k][3] = s2_screen_hi() ? FB_H : 200; }
+}
 void s2m_clip(int text, int x0, int y0, int x1, int y1)
 {
     int *c = g_s2m_clip[text != 0];
@@ -10045,7 +10076,8 @@ void s2m_clip(int text, int x0, int y0, int x1, int y1)
 static void s2m_clip_on(int text)
 {
     const int *c = g_s2m_clip[text != 0];
-    g_clip[0] = c[0] * g_s; g_clip[1] = c[2] * g_s; g_clip[2] = c[1] * SY + g_oy; g_clip[3] = c[3] * SY + g_oy;
+    if (s2_screen_hi()) { g_clip[0] = c[0]; g_clip[1] = c[2]; g_clip[2] = c[1]; g_clip[3] = c[3]; }
+    else { g_clip[0] = c[0] * g_s; g_clip[1] = c[2] * g_s; g_clip[2] = c[1] * SY + g_oy; g_clip[3] = c[3] * SY + g_oy; }
     if (g_clip[0] < 0) g_clip[0] = 0;
     if (g_clip[1] > FB_W) g_clip[1] = FB_W;
     if (g_clip[2] < 0) g_clip[2] = 0;
@@ -10059,15 +10091,22 @@ void s2m_blend(const int smoke[3], const int dust[3])
     if (getenv("OS_S2MLOG")) printf("menu: see-through table made (asmoke %d %d %d): colour 20 in the shadow's rows 32..47 -> %d .. %d\n", smoke[0], smoke[1], smoke[2], g_smg[32 * 256 + 20], g_smg[47 * 256 + 20]);
 }
 static void s2m_clip_off(void) { g_clip[0] = 0; g_clip[1] = FB_W; g_clip[2] = 0; g_clip[3] = FB_H; }
-int s2m_text(int x, int y, const char *str, int font, int colour, int space) { s2m_clip_on(1); const int w = s2_text(x, y, str, font, colour, space); s2m_clip_off(); return w; }
-int s2m_text_wide(const char *str, int font, int space) { return s2_text_wide(str, font, space); }
-void s2m_sprite(int x, int y, int n) { s2m_clip_on(0); hud_sprite_draw(x, y, n); s2m_clip_off(); }
+int s2m_text(int x, int y, const char *str, int font, int colour, int space)
+{
+    s2m_clip_on(1); g_hud_native = s2_screen_hi();
+    const int w = s2_text(x, y, str, font, colour, space);
+    g_hud_native = 0; s2m_clip_off();
+    return w;
+}
+int s2m_text_wide(const char *str, int font, int space) { g_hud_native = s2_screen_hi(); const int w = s2_text_wide(str, font, space); g_hud_native = 0; return w; }
+void s2m_sprite(int x, int y, int n) { s2m_clip_on(0); if (s2_screen_hi()) hud_sprite_px(x, y, n); else hud_sprite_draw(x, y, n); s2m_clip_off(); }
 void s2m_dark(int x, int y, int w, int h)      /* 0x51698, on the colours' numbers */
 {
     s2_dark_make();
     x &= ~3; w &= ~3;
-    for (int yy = y; yy < y + h && yy < 200; yy++)
-        for (int xx = x; xx < x + w && xx < 320; xx++) {
+    const int sw = s2_screen_hi() ? FB_W : 320, sh = s2_screen_hi() ? FB_H : 200;
+    for (int yy = y; yy < y + h && yy < sh; yy++)
+        for (int xx = x; xx < x + w && xx < sw; xx++) {
             if (yy < 0 || xx < 0) continue;
             const int i = yy * FB_W + xx, idx = pxi[i] >= 0 ? pxi[i] : 0;
             pxi[i] = g_s2_dark[0][idx]; fb[i] = g_pal[pxi[i]];
@@ -10205,7 +10244,7 @@ void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room)
     }
     /* drawn over the picture as it is: the depth cleared, the colours kept */
     const float keep_cy = g_cy; const int keep_vh = g_vh;
-    g_cy = 100.0f; g_vh = 200;
+    g_cy = s2_screen_hi() ? 200.0f : 100.0f; g_vh = s2_screen_hi() ? 400 : 200;      /* (the eye line in the middle) */
     for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; }
     g_lanes = 4; g_tie_rule = 1;
     /* with the room (0x753e8): its backdrop, then it, then the objects */
@@ -10334,6 +10373,7 @@ static int s2_menu3d(void)
     g_s2m_closed = 0; g_s2m_ticks = 0; g_s2m_nmesh = 0; g_s2m_nmlb = 0;
     if (getenv("OS_CULL")) g_cull = atoi(getenv("OS_CULL"));     /* (a test, as in a race) */
     memset(g_s2m_base, 0xff, sizeof g_s2m_base);
+    s2m_clip_start();
     for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xFF000000u; pxi[i] = 0; }
     return s2_menu_run();
 }

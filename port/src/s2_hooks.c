@@ -787,7 +787,7 @@ int s2_menu_run(void)
     s2_heap = HEAP_AT; s2_sp = STACK_AT;
     s2_nobject = 0; s2m_cont[0] = 0;
     U8(0x11eff8) = 0; U8(0x11f060) = 0;
-    U32(0x134794) = s2_alloc(64000);                     /* the game's screen (the port draws into its own picture) */
+    U32(0x134794) = s2_alloc(s2_screen_hi() ? 256000u : 64000u);   /* the game's screen (the port draws into its own picture; STARTH's is 640 x 400) */
     s2_ease_tables();                                    /* (what the program makes as it starts, 0x2ddea) */
     s2_dtr("build/dec/GAME/CARS.DTR", "CAR_PARAMS", 0x11c600, 0x58, 0x58);     /* (and the tables it reads then) */
     s2_dtr("build/dec/GAME/CRUSC.DTR", "CRUSCOTTI", 0x1242b4, 0x58, 0x58);

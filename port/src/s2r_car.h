@@ -222,6 +222,12 @@ static void FUN_00013cbd(int camera);
  *     value = (value - target) x row[i] + target
  * the first for a float, the second for a whole number (cut, not rounded: 0x4ea12)
  */
+/* HIGH RESOLUTION: Screamer 2 at 640 x 400 runs STARTH.EXE's constants where they differ from
+   STARTL's (docs/NOTES2.md S2-9) */
+#define S2_HI (s2_screen_hi())
+#define S2_SET (S2_HI ? 0x48u : 0x4cu)             /* the file set's letter: H or L (every one of the menu's) */
+#define S2K (S2_HI ? 2 : 1)                        /* the layout's pixels to the screen's */
+
 #define HOOK_111d6
 static void FUN_000111d6(int at, float target, int i)
 {
@@ -373,7 +379,7 @@ static void FUN_000135b6(int camera)
         for (uint32_t i = 0; i < 3; i++) U32(camera + 0x48 + 4 * i) = U32(row + 0x60 + 4 * i);
     FUN_000338ed((uint32_t)camera + 0x54, obj, (uint32_t)camera + 0x48);
     F32(camera + 0x5c) = F32(row + 0x74);
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /* a camera of the fourth kind (0x138e8): circling the car 1100 out, rising and falling 440 +- 220
@@ -398,7 +404,7 @@ static void FUN_000138e8(int camera, uint32_t r1, uint32_t r2, uint32_t r3)
     }
     FUN_000338ed((uint32_t)camera + 0x54, obj, (uint32_t)camera + 0x48);
     I32(camera + 0x5c) = 0;
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /* A PATH SET READ (0x11c0c, the menu's moving pictures: SCENEn.PTH): a 100-byte head copied
@@ -626,7 +632,7 @@ static void FUN_00013f38(int camera)
     }
     I32(camera + 0x48) = (int32_t)truncl((long double)I32(obj) - sinl((long double)F32(camera + 0x58)) * F32(camera + 0x34) * cosl((long double)F32(camera + 0x54)));
     I32(camera + 0x50) = (int32_t)truncl(cosl((long double)F32(camera + 0x58)) * F32(camera + 0x34) * cosl((long double)F32(camera + 0x54)) + (long double)I32(obj + 8));
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /*
@@ -711,7 +717,7 @@ static void FUN_00014200(int camera)
     I32(camera + 0x48) = (int32_t)truncl((long double)I32(obj) + along[0] + up[0]);
     I32(camera + 0x50) = (int32_t)truncl((long double)I32(obj + 8) + along[2] + up[2]);
     I32(camera + 0x4c) = (int32_t)truncl((long double)(I32(obj + 4) + I32(obj + 0x1c) + I32(car + 0x218)) + along[1] + up[1]);
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /*
@@ -2582,12 +2588,15 @@ static void FUN_000333c1(int n, uint32_t y)
 {
     const uint32_t rec = U32(0x124210) + 0x14u * (uint32_t)n;
     const int32_t w = I32(rec + 8) + I32(rec), half = (I32(rec) - (I32(rec) >> 31)) >> 1, mid = (0x140 - w) >> 1;
-    FUN_00050c0a(0x12420c, mid - half, (int)y, n, 0);
+    if (S2_HI) FUN_00050c0a(0x12420c, (((0x140 - w) / 2 >> 1) - half / 2) * 2, (int)y * 2, n, 0);    /* (STARTH: the H sprite halved, the place doubled) */
+    else FUN_00050c0a(0x12420c, mid - half, (int)y, n, 0);
 }
 #define HOOK_3343d
 static void FUN_0003343d(int n, uint32_t y, int w, int x)
 {
-    FUN_00050c0a(0x12420c, x + ((w - I32(U32(0x124210) + 0x14u * (uint32_t)n + 8)) >> 1), (int)y, n, 0);
+    const int32_t sw = I32(U32(0x124210) + 0x14u * (uint32_t)n + 8);
+    if (S2_HI) FUN_00050c0a(0x12420c, (x + ((w - sw / 2) >> 1)) * 2, (int)y * 2, n, 0);
+    else FUN_00050c0a(0x12420c, x + ((w - sw) >> 1), (int)y, n, 0);
 }
 #define HOOK_33635
 static void FUN_00033635(int p, int to, int k)
@@ -2632,15 +2641,18 @@ static void FUN_0003327c(uint32_t text, uint32_t y, uint32_t font, uint32_t colo
 {
     const uint32_t sp0 = s2_sp, w = s2_push(8), h = w + 4;
     FUN_00051020(0x12420c, w, h, text, (int)font, (int)gap);
-    FUN_00050f45(0x12420c, (0x140 - I32(w)) >> 1, (int)y, text, (int)font, (int)colour, (int)gap);
+    if (S2_HI) { I32(w) = I32(w) / 2; FUN_00050f45(0x12420c, ((0x140 - I32(w)) >> 1) * 2, (int)y * 2, text, (int)font, (int)colour, (int)gap); }
+    else FUN_00050f45(0x12420c, (0x140 - I32(w)) >> 1, (int)y, text, (int)font, (int)colour, (int)gap);
     s2_sp = sp0;
 }
 #define HOOK_332dd
 static void FUN_000332dd(uint32_t text, uint32_t y, int box, int x, uint32_t font, uint32_t colour)
 {
     const uint32_t sp0 = s2_sp, w = s2_push(8), h = w + 4;
-    FUN_00051020(0x12420c, w, h, text, (int)font, 2);
-    FUN_00050f45(0x12420c, x + ((box - I32(w)) >> 1), (int)y, text, (int)font, (int)colour, 2);
+    const int gap = S2_HI ? 4 : 2;
+    FUN_00051020(0x12420c, w, h, text, (int)font, gap);
+    if (S2_HI) { I32(w) = I32(w) / 2; FUN_00050f45(0x12420c, (x + ((box - I32(w)) >> 1)) * 2, (int)y * 2, text, (int)font, (int)colour, gap); }
+    else FUN_00050f45(0x12420c, x + ((box - I32(w)) >> 1), (int)y, text, (int)font, (int)colour, gap);
     s2_sp = sp0;
 }
 #define HOOK_3348f
@@ -2649,7 +2661,7 @@ static int FUN_0003348f(int first, int n, uint32_t font)
     const uint32_t sp0 = s2_sp, w = s2_push(8), h = w + 4;
     int most = 0;
     for (int i = 0; i < n; i++) {
-        FUN_00051020(0x12420c, w, h, U32(0x127ed8u + 4u * (uint32_t)(first + i)), (int)font, 2);
+        FUN_00051020(0x12420c, w, h, U32(0x127ed8u + 4u * (uint32_t)(first + i)), (int)font, S2_HI ? 4 : 2);
         if (most < I32(w)) most = I32(w);
     }
     s2_sp = sp0;
@@ -2941,7 +2953,7 @@ static int s2r_grid_car(int car, uint32_t folder, int load, int n, uint32_t buf)
 #define HOOK_358b9
 static void FUN_000358b9(void)
 {
-    FUN_00051aa4(U32(0x134794), 64000u, 0);
+    FUN_00051aa4(U32(0x134794), S2_HI ? 256000u : 64000u, 0);
     FUN_000512f1(1.0f, 0, 0, 0);
     FUN_0007f5a2(0, 0);
 }
@@ -3596,7 +3608,7 @@ static void FUN_00011298(uint32_t room, uint32_t r1, uint32_t r2, uint32_t r3)
     FUN_0004fe21(buf, 0x1338ccu, 0, 0);
     FUN_00051664(0x1338ccu, 0);
     (void)FUN_0007f504(-0xab20, 0);
-    (void)FUN_0004f6c4(0x140, 200, 100);
+    (void)FUN_0004f6c4(0x140, 200 * S2K, 100 * S2K);
     FUN_00011906();
     int paths = 0, models = 0;
     FUN_0004ee3a(file, head, 4);
@@ -3679,7 +3691,7 @@ static void FUN_00034ec6(void)
     const uint32_t track = U32(0x130c4c), kind = U32(0x1324dc), bk = U32(0x1323c8);
     FUN_00044587(0x11343c);
     FUN_0004eaed(cont, 0x110feau, 0x31u);
-    FUN_0004eaed(entry, 0x110ff9u, track + 0x31u, 0x4cu);
+    FUN_0004eaed(entry, 0x110ff9u, track + 0x31u, S2_SET);
     FUN_00051532((int)bk, (int)cont, (int)entry);
     FUN_00051b02(0, 0, bk + 8, U32(bk));
     FUN_000ae6e3(0x1338ccu, U32(bk + 4), 0x300);
@@ -4027,7 +4039,7 @@ static int FUN_000368e2(int to_all, uint32_t message, uint32_t extra)
 static bool FUN_00036d22(uint32_t message, int whole, int page)
 {
     if (page != 0) {
-        FUN_00051aa4(U32(0x134794), 64000u, 0);
+        FUN_00051aa4(U32(0x134794), S2_HI ? 256000u : 64000u, 0);
         FUN_0003327c(U32(0x128070), 100, 1, 1, 2);
         FUN_0007f5a2(0, 0); FUN_0007f5a2(0, 0);
     }
@@ -4121,7 +4133,7 @@ static uint64_t FUN_000371fd(uint32_t r0, uint32_t r1)
         for (int k = 0; k < n; k++, y += 0x16) {
             FUN_0004eaed(text, 0x11114eu, (uint32_t)k + 0x31u, 0x132508u + 0xd8u * (uint32_t)k);
             FUN_0003327c(text, y, 1, 1, 2);
-            FUN_00050c0a(0x12420c, 0xbe, (int)y, I32(0x132500u + 0xd8u * (uint32_t)k) + 0x51, 0);
+            FUN_00050c0a(0x12420c, 0xbe * S2K, (int)y * S2K, I32(0x132500u + 0xd8u * (uint32_t)k) + 0x51, 0);
         }
         FUN_0003327c(U32(0x128064), 0xa8, 2, 1, 2);
         for (int k = 0; k < n; k++) ready |= U32(0x132514u + 0xd8u * (uint32_t)k);
@@ -4166,7 +4178,7 @@ static void FUN_0003770c(void)
     for (int k = 0; k < I32(0x131f2c); k++, y += 0x16) {
         FUN_0004eaed(text, 0x111178u, (uint32_t)k + 0x31u, 0x132bc0u + 0x74u * (uint32_t)k);
         FUN_0003327c(text, y, 1, 1, 2);
-        FUN_00050c0a(0x12420c, 0xbe, (int)y, I32(0x132bb8u + 0x74u * (uint32_t)k) + 0x51, 0);
+        FUN_00050c0a(0x12420c, 0xbe * S2K, (int)y * S2K, I32(0x132bb8u + 0x74u * (uint32_t)k) + 0x51, 0);
     }
     FUN_0003327c(U32(0x127f14), 0xb8, 3, 3, 2);
     s2_sp = sp0;
@@ -4208,7 +4220,7 @@ static uint32_t FUN_00037b41(int message, int word, int page, uint32_t r3)
 {
     (void)r3;
     if (page != 0) {
-        FUN_00051aa4(U32(0x134794), 64000u, 0);
+        FUN_00051aa4(U32(0x134794), S2_HI ? 256000u : 64000u, 0);
         FUN_0003327c(U32(0x128074), 100, 1, 1, 2);
         FUN_000ae6e3(0x1338ccu, 0x132c98u, 0x300);
         FUN_00051664(0x1338ccu, 0);
@@ -4300,7 +4312,7 @@ static uint32_t FUN_00038b2c(int player, int every, int enter)
 #define HOOK_41fcf
 static void FUN_00041fcf(void)
 {
-    FUN_0004eaed(0x130bc8u, 0x111542u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111542u, S2_SET);
     FUN_00044587(0x113374);
     for (;;) {
         if (FUN_0003162c(0, 0) == 0) goto end;
@@ -4376,7 +4388,7 @@ static void FUN_000394f5(void)
 {
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x11120au, U32(0x128a10) + 0x31u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x11120au, U32(0x128a10) + 0x31u, S2_SET);
     FUN_00044587(0x113410);
     for (uint32_t i = 0; i < 7; i++) {
         const uint32_t slot = 0x130fa8u + 8 * i, rec = 0x11da14u + 0x1cu * (U32(0x130fa8) + i);
@@ -4405,7 +4417,7 @@ static void FUN_000394f5(void)
         U32(0x131eac) = 0; U32(0x131ea8) = 0; U32(0x131ea4) = 0;
         FUN_0007e8b4(0x131ea4, 0);
         FUN_000753a0(0x11d6f4u, 0);
-        FUN_00051698(0, 0, 0x140, 0x2a);
+        FUN_00051698(0, 0, 0x140 * S2K, 0x2a * S2K);
         FUN_0003327c(U32(0x127f9c), 2, 1, 1, 2);
         FUN_0003327c(U32(0x127f3cu + 8u * U32(0x128a10)), 0x14, 1, 1, 2);
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((long double)F32(0x133350) * 2.0f + F32(0x13249c));
@@ -4496,12 +4508,12 @@ static void FUN_00038d8d(void)
         U32(0x131eac) = 0;
         FUN_0007e8b4(0x131ea4, 0);
         FUN_000753e8(0x11d6f4u, 0);
-        FUN_00051698(0, 0xaa, 0x140, 0x1e);
+        FUN_00051698(0, 0xaa * S2K, 0x140 * S2K, 0x1e * S2K);
         FUN_0003327c(U32(0x127eec), 4, 0, 1, 2);
         FUN_0003327c(U32(0x127ef4u + 4u * U32(0x132378)), 0xaf, 1, 1, 2);
         if ((U32(0x4ce0a) & 0x7f) < 0x40) {
-            if (I32(0x132378) != 0) FUN_00050c0a(0x12420c, 10, 0xac, 1, 0);
-            if (I32(0x132378) < 4) FUN_00050c0a(0x12420c, 0x12a, 0xac, 2, 0);
+            if (I32(0x132378) != 0) FUN_00050c0a(0x12420c, 10 * S2K, 0xac * S2K, 1, 0);
+            if (I32(0x132378) < 4) FUN_00050c0a(0x12420c, 0x12a * S2K, 0xac * S2K, 2, 0);
         }
         if (fabsf(F32(0x13249c)) != 0.0f) FUN_000512f1(F32(0x13249c), 0, 0, 0);
         if ((U32(0x132498) & 0x7fffffff) != 0) {
@@ -4633,7 +4645,7 @@ static void FUN_0003b674(void)
     const uint32_t look = fp - 0x74, cam = fp - 0x5c, target = fp - 0x50;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x111292u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111292u, S2_SET);
     FUN_00044587(0x113340);
     FUN_00011906();
     FUN_0003519f(4, 0x1112a0u, 0, 0);
@@ -4759,11 +4771,11 @@ static void FUN_0003bbc4(void)
     typedef long double ld;
     (void)FUN_0004d738(0, 0);
     (void)FUN_0007f504(-0xab20, 0);
-    (void)FUN_0004f6c4(0x140, 200, 100);
+    (void)FUN_0004f6c4(0x140, 200 * S2K, 100 * S2K);
     FUN_00051664(0x1338ccu, 0);
     (void)FUN_0005105e(0x12420cu, 0x1338cc);
-    FUN_00050d6c(0x12420c, 0, 0, 0x140, 200);
-    FUN_00050fb9(0x12420c, 0, 0, 0x140, 200);
+    FUN_00050d6c(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
+    FUN_00050fb9(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
     const int room = I32(0x128a10) == 3 ? 2 : I32(0x128a10) == 4 ? 3 : I32(0x128a10);
     FUN_00011298((uint32_t)room + 1, 0, 0, 0);
     float t = 0.0f, anim = 0.0f;
@@ -4849,7 +4861,7 @@ static void FUN_0003ff37(void)
     float blink = 1.0f, idle;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x111488u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111488u, S2_SET);
     FUN_00044587(0x113240);
     int letter = (int)U8(0x1289f4) - 0x41, was = letter;
     for (uint32_t k = 0; k < 4; k++) {
@@ -4958,7 +4970,7 @@ static void FUN_0003ff37(void)
             U8(0x1289f4u + (uint32_t)cursor) = (uint8_t)(letter + 'A');
             FUN_0004eaed(line, 0x1114afu, 0x1289f4u);
             FUN_0003327c(line, 0xb0, 1, 1, 2);
-            FUN_00050f45(0x12420c, cursor * 0x13 + 0x88, 0xba, 0x1114b3u, 1, 1, 2);
+            FUN_00050f45(0x12420c, (cursor * 0x13 + 0x88) * S2K, 0xba * S2K, 0x1114b3u, 1, 1, 2 * S2K);
         }
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 4.0f + F32(0x13249c));
         if (I32(0x13249c) >= 0x3f800000) { F32(0x13249c) = 1.0f; U32(0x1324a0) = 0x3f800000u; }
@@ -4997,7 +5009,7 @@ static void FUN_000431b3(void)
     U32(0x1324dc) = 0;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x1115d8u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x1115d8u, S2_SET);
     FUN_00044587(0x113374);
     if (U32(0x1324e4) == 1) {
         if (FUN_00037b41(0x2468, 0x4287, 0, 0) != 0) { FUN_00037167(); FUN_00044f72(0x113374, 0); return; }
@@ -5050,9 +5062,9 @@ static void FUN_000431b3(void)
         while (I32(0x128a10) - first > 1) first++;
         while (I32(0x128a10) - first < 0) first--;
         const int at = I32(0x128a10) - first;
-        FUN_00050c0a(0x12420c, 0x13, 0x27, first + 0x2c, 0);
-        FUN_00050c0a(0x12420c, 0xb0, 0x27, first + 0x2d, 0);
-        if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, at * 0x9d + 0xc, 0x20, 0x30, 0);
+        FUN_00050c0a(0x12420c, 0x13 * S2K, 0x27 * S2K, first + 0x2c, 0);
+        FUN_00050c0a(0x12420c, 0xb0 * S2K, 0x27 * S2K, first + 0x2d, 0);
+        if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, (at * 0x9d + 0xc) * S2K, 0x20 * S2K, 0x30, 0);
         for (int i = 0; i < 2; i++) {
             if (open < first + i) {
                 FUN_000332dd(U32(0x127f34), 100, 0xa0, (uint32_t)(i * 0xa0), 2, 1);
@@ -5061,14 +5073,14 @@ static void FUN_000431b3(void)
             FUN_000332dd(U32(0x127f3cu + 8u * (uint32_t)(first + i)), 0xa0, 0xa0, (uint32_t)(i * 0xa0), 2, 1);
             FUN_000332dd(U32(0x127f40u + 8u * (uint32_t)(first + i)), 0xac, 0xa0, (uint32_t)(i * 0xa0), 2, 1);
         }
-        FUN_00051698((int)FUN_000b73c7((uint32_t)(at - 1)) * 0x9d + 0x12, 0x23, 0x86, 0x9c);
+        FUN_00051698(((int)FUN_000b73c7((uint32_t)(at - 1)) * 0x9d + 0x12) * S2K, 0x23 * S2K, 0x86 * S2K, 0x9c * S2K);
         if ((U32(0x4ce0a) & 0x7f) < 0x40) {
-            if (first != 0) FUN_00050c0a(0x12420c, 10, 0xac, 3, 0);
-            if (first < 2) FUN_00050c0a(0x12420c, 0x12a, 0xac, 4, 0);
+            if (first != 0) FUN_00050c0a(0x12420c, 10 * S2K, 0xac * S2K, 3, 0);
+            if (first < 2) FUN_00050c0a(0x12420c, 0x12a * S2K, 0xac * S2K, 4, 0);
         }
         FUN_0003327c(U32(0x127f30), 2, 0, 1, 2);
         if ((U32(0x1324e4) & 3) != 0 && I32(0x131f28) != 0) {
-            FUN_00051698(0, 0, 0x140, 200);
+            FUN_00051698(0, 0, 0x140 * S2K, 200 * S2K);
             if (U32(0x4ce0a) & 0x40) FUN_00037686();
         }
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 2.0f + F32(0x13249c));
@@ -5109,7 +5121,7 @@ static void FUN_0004189f(void)
     if (I32(0x128a14) + 2 < I32(0x128a0c)) I32(0x128a0c) = 0;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x11151eu, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x11151eu, S2_SET);
     FUN_00044587(0x113374);
     do {
         FUN_00038d48();
@@ -5138,7 +5150,7 @@ static void FUN_0004189f(void)
                 else { U32(0x1324a0) = 0x3f800000u; U32(0x132498) = 0x3f800000u; I32(0x132494) = 0x38d8d; }
             }
         }
-        FUN_00050c0a(0x12420c, 0x1c, 0xf, 0x69, 0);
+        FUN_00050c0a(0x12420c, 0x1c * S2K, 0xf * S2K, 0x69, 0);
         const int last = open + 2, sel = I32(0x128a0c);
         if (sel == 0) first = 0;
         else if (last - sel < 1) { if (last == sel) first = sel - 2; }
@@ -5147,18 +5159,18 @@ static void FUN_0004189f(void)
         else FUN_000111d6((int)strip, (float)(first * -0x69 + 8), 0x32);
         if (!(fabsl((ld)F32(strip) - (ld)(first * -0x69 + 8)) > (double)0.5)) F32(strip) = (float)(first * -0x69 + 8);
         for (int i = 0; i < open + 3; i++)
-            FUN_00050c0a(0x12420c, (int32_t)truncl((ld)(i * 0x69) + F32(strip)), 0x40, I32(0x113224u + 4u * (uint32_t)i) + 5 + (i == I32(0x128a0c) ? 0 : 7), 0);
+            FUN_00050c0a(0x12420c, S2_HI ? (int32_t)truncl(((ld)(i * 0x69) + F32(strip)) * 2.0f) : (int32_t)truncl((ld)(i * 0x69) + F32(strip)), 0x40 * S2K, I32(0x113224u + 4u * (uint32_t)i) + 5 + (i == I32(0x128a0c) ? 0 : 7), 0);
         if ((U32(0x4ce0a) & 0x7f) < 0x40) {
-            if (first != 0) FUN_00050c0a(0x12420c, 10, 0xaa, 1, 0);
-            if (first + 2 < last) FUN_00050c0a(0x12420c, 0x12a, 0xaa, 2, 0);
+            if (first != 0) FUN_00050c0a(0x12420c, 10 * S2K, 0xaa * S2K, 1, 0);
+            if (first + 2 < last) FUN_00050c0a(0x12420c, 0x12a * S2K, 0xaa * S2K, 2, 0);
         }
         first = I32(0x128a0c) == 0 ? 0 : I32(0x128a0c) == last ? 2 : 1;
         if (fabsf(F32(frame)) == 0.0f) F32(frame) = (float)(first * 0x69 + 2);
         else FUN_000111d6((int)frame, (float)(first * 0x69 + 2), 0x32);
         if (fabsl((ld)F32(frame) - (ld)(first * 0x69 + 2)) < (double)0.5) F32(frame) = (float)(first * 0x69 + 2);
-        if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, (int32_t)truncl((ld)F32(frame)), 0x3c, 0, 0);
+        if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, S2_HI ? (int32_t)truncl((ld)F32(frame) * 2.0f) : (int32_t)truncl((ld)F32(frame)), 0x3c * S2K, 0, 0);
         if (I32(0x1324e4) != 0 && I32(0x131f28) != 0) {
-            FUN_00051698(0, 0, 0x140, 200);
+            FUN_00051698(0, 0, 0x140 * S2K, 200 * S2K);
             if (U32(0x4ce0a) & 0x40) FUN_00037686();
         }
         if (fabsf(spin) != 0.0f) spin = (float)((ld)F32(0x133350) * 4.0f + spin);
@@ -5187,7 +5199,7 @@ static void FUN_000420c0(void)
     int row = 0;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x11154eu, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x11154eu, S2_SET);
     FUN_00044587(0x113374);
     do {
         FUN_00038d48();
@@ -5217,14 +5229,15 @@ static void FUN_000420c0(void)
         for (int i = 0; i < 9; i++) {
             names += I32(0x1131c0u + 4u * (uint32_t)i);
             const int lit = (U32(0x4ce0a) & 0x20) == 0 && row == i;
-            if (i == 8) FUN_00050f45(0x12420c, 10, y, U32(0x1280b8), lit ? 3 : 2, lit ? 3 : 1, 2);
+            if (i == 8) FUN_00050f45(0x12420c, 10 * S2K, y * S2K, U32(0x1280b8), lit ? 3 : 2, lit ? 3 : 1, 2 * S2K);
             else {
                 const uint32_t value = U32(0x127ed8u + 4u * ((uint32_t)names + U32(0x128a28u + 4u * (uint32_t)i)));
-                FUN_00050f45(0x12420c, 10, y, U32(0x128098u + 4u * (uint32_t)i), 2, 1, 2);
-                if (lit) { FUN_00050f45(0x12420c, 200, y, value, 3, 3, 2); FUN_00050f45(0x12420c, 200, y, 0x11155au, 2, 1, 2); }
-                else FUN_00050f45(0x12420c, 200, y, value, 2, 1, 2);
+                FUN_00050f45(0x12420c, 10 * S2K, y * S2K, U32(0x128098u + 4u * (uint32_t)i), 2, 1, 2 * S2K);
+                if (lit) { FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 3, 3, 2 * S2K); FUN_00050f45(0x12420c, 200 * S2K, y * S2K, 0x11155au, 2, 1, 2 * S2K); }
+                else FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 2, 1, 2 * S2K);
             }
-            y = (int32_t)truncl((double)((ld)I32(U32(0x124250) + 0x60) * (double)1.2 / 1.0L + (double)y));
+            y = S2_HI ? (int32_t)truncl((double)((ld)I32(U32(0x124250) + 0x60) * (double)1.2 * (double)0.5 + (double)y))     /* (STARTH: the H font is twice as tall) */
+                       : (int32_t)truncl((double)((ld)I32(U32(0x124250) + 0x60) * (double)1.2 / 1.0L + (double)y));
         }
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 2.0f + F32(0x13249c));
         if (I32(0x13249c) >= 0x3f800000) { F32(0x13249c) = 1.0f; U32(0x1324a0) = 0x3f800000u; }
@@ -5359,12 +5372,12 @@ static void FUN_00044587(int list)
         switch (k) {
         case 1:
             FUN_0004eaed(buf, 0x11161fu, 0x11eff8u, 0x31u);
-            FUN_0004eaed(entry, 0x111631u, 0x4cu);
+            FUN_0004eaed(entry, 0x111631u, S2_SET);
             FUN_00050dd3(0x12420c, (int)buf, (int)entry);
             break;
         case 2:
             FUN_0004eaed(buf, 0x11164fu, 0x11eff8u, 0x31u);
-            FUN_0004eaed(entry, 0x111661u, 0x4cu);
+            FUN_0004eaed(entry, 0x111661u, S2_SET);
             FUN_00050a9c(0x12420c, (int)buf, (int)entry);
             break;
         case 3: FUN_0003248f(0x11166cu, 0x127ed8); break;
@@ -5411,9 +5424,9 @@ static void FUN_00044587(int list)
             break;
         case 8:
             (void)FUN_0007f504(-0xab20, 0);
-            (void)FUN_0004f6c4(0x140, 200, 100);
-            FUN_00050d6c(0x12420c, 0, 0, 0x140, 200);
-            FUN_00050fb9(0x12420c, 0, 0, 0x140, 200);
+            (void)FUN_0004f6c4(0x140, 200 * S2K, 100 * S2K);
+            FUN_00050d6c(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
+            FUN_00050fb9(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
             break;
         case 9:
             FUN_0004eaed(buf, 0x111761u, 0x11eff8u, 0x31u);
@@ -5483,7 +5496,7 @@ static void FUN_0004254f(void)
     I32(chosen) = 0;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x111568u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111568u, S2_SET);
     FUN_00044587(0x113374);
     do {
         FUN_00038d48();
@@ -5524,8 +5537,8 @@ static void FUN_0004254f(void)
         FUN_000332dd(U32(0x128110u + 4u * (uint32_t)(I32(0x113224u + 4u * U32(0x128a54)) + names)), 0x41, 0xa0, 0xa0, dim || item != 3 ? 2 : 3, dim || item != 3 ? 1 : 3);
         names += I32(0x1131f8);
         FUN_0003327c(U32(0x128110u + 4u * (uint32_t)names), 0x55, dim || item != 4 ? 2 : 3, dim || item != 4 ? 1 : 3, 2);
-        FUN_00050fb9(0x12420c, 0, 0x79, 0x140, 0xb4);
-        FUN_00050d6c(0x12420c, 0, 0x77, 0x140, 0xb4);
+        FUN_00050fb9(0x12420c, 0, 0x79 * S2K, 0x140 * S2K, 0xb4 * S2K);
+        FUN_00050d6c(0x12420c, 0, 0x77 * S2K, 0x140 * S2K, 0xb4 * S2K);
         int y = (int32_t)truncl((double)120.0 - (ld)scroll * (double)12.0);
         const int top = row < 0xc ? (row < 3 ? 0 : row - 2) : 10;
         const uint32_t track = U32(0x113224u + 4u * U32(0x128a54));
@@ -5537,8 +5550,8 @@ static void FUN_0004254f(void)
                 (void)FUN_000b743d((uint32_t)i + 1, place, 10);
                 FUN_00037e06(time, t, 0, 0, F32(0x1290bcu + 4u * (uint32_t)i + t));
                 FUN_0004eaed(line, i < 9 ? 0x111592u : 0x1115a3u, place, t + 0x1290f8u + 4u * (uint32_t)i, time);
-                FUN_00050f45(0x12420c, 0x32, y, line, i == row ? 3 : 2, i == row ? 3 : 1, 2);
-                FUN_00050c0a(0x12420c, 0x86, y - 1, I32(0x129170u + 4u * (uint32_t)i + t) * 5 + 0x55 + I32(0x1291acu + 4u * (uint32_t)i + t), 0);
+                FUN_00050f45(0x12420c, 0x32 * S2K, y * S2K, line, i == row ? 3 : 2, i == row ? 3 : 1, 2 * S2K);
+                FUN_00050c0a(0x12420c, 0x86 * S2K, (y - 1) * S2K, I32(0x129170u + 4u * (uint32_t)i + t) * 5 + 0x55 + I32(0x1291acu + 4u * (uint32_t)i + t), 0);
             }
         } else {
             const uint32_t t = (uint32_t)level * 0x834u + track * 300u;
@@ -5547,13 +5560,13 @@ static void FUN_0004254f(void)
                 (void)FUN_000b743d((uint32_t)i + 1, place, 10);
                 FUN_00037e06(time, t, 0, 0, F32(0x12f32cu + 4u * (uint32_t)i + t));
                 FUN_0004eaed(line, i < 9 ? 0x1115b3u : 0x1115c4u, place, t + 0x12f368u + 4u * (uint32_t)i, time);
-                FUN_00050f45(0x12420c, 0x32, y, line, i == row ? 3 : 2, i == row ? 3 : 1, 2);
-                FUN_00050c0a(0x12420c, 0x86, y - 1, I32(0x12f3e0u + t + 4u * (uint32_t)i) * 5 + 0x55 + I32(0x12f41cu + 4u * (uint32_t)i + t), 0);
+                FUN_00050f45(0x12420c, 0x32 * S2K, y * S2K, line, i == row ? 3 : 2, i == row ? 3 : 1, 2 * S2K);
+                FUN_00050c0a(0x12420c, 0x86 * S2K, (y - 1) * S2K, I32(0x12f3e0u + t + 4u * (uint32_t)i) * 5 + 0x55 + I32(0x12f41cu + 4u * (uint32_t)i + t), 0);
             }
         }
-        if (I32(I32(chosen)) == 0) { FUN_00051698(0x21, 0x51, 0x102, 0x12); FUN_00051698(0x21, 0x51, 0x102, 0x12); FUN_00051698(0x21, 0x51, 0x102, 0x12); }
-        FUN_00050fb9(0x12420c, 0, 0, 0x140, 200);
-        FUN_00050d6c(0x12420c, 0, 0, 0x140, 200);
+        if (I32(I32(chosen)) == 0) { FUN_00051698(0x21 * S2K, 0x51 * S2K, 0x102 * S2K, 0x12 * S2K); FUN_00051698(0x21 * S2K, 0x51 * S2K, 0x102 * S2K, 0x12 * S2K); FUN_00051698(0x21 * S2K, 0x51 * S2K, 0x102 * S2K, 0x12 * S2K); }
+        FUN_00050fb9(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
+        FUN_00050d6c(0x12420c, 0, 0, 0x140 * S2K, 200 * S2K);
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 2.0f + F32(0x13249c));
         if (I32(0x13249c) >= 0x3f800000) { F32(0x13249c) = 1.0f; U32(0x1324a0) = 0x3f800000u; }
         if (fabsf(F32(0x13249c)) != 0.0f) FUN_000512f1(F32(0x13249c), 0, 0, 0);
@@ -5642,7 +5655,7 @@ static void FUN_00043914(void)
     } else if (I32(0x1324e4) == 2 && (!(U8(0x11934cu + 0xcc0u * U32(0x130d08)) & 2) || !(U8(0x11934cu + 0xcc0u * (1u - U32(0x130d08))) & 2))) {
         FUN_000370ed(); I32(0x132494) = 0x3bf06; s2_sp = sp0; return;
     }
-    FUN_0004eaed(0x130bc8u, 0x1115e8u, league + 0x31u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x1115e8u, league + 0x31u, S2_SET);
     FUN_00044587(0x113374);
     for (int i = 0; i < I32(0x130c48); i++) { I32(table + 8u * (uint32_t)i) = I32(0x128a74u + 0xcu * (uint32_t)i); I32(table + 8u * (uint32_t)i + 4) = i; }
     FUN_00035916(I32(0x130c48), (int)table, 0, 'l', 8, -1);
@@ -5681,7 +5694,7 @@ static void FUN_00043914(void)
             for (int i = 0; i < I32(0x130c48); i++, y += 0x18) {
                 const uint32_t pts = U32(table + 8u * (uint32_t)i), car = U32(table + 8u * (uint32_t)i + 4);
                 FUN_0004eaed(line, (int32_t)pts < 10 ? 0x1115f6u : 0x111603u, (uint32_t)i + 0x31u, 0x128a70u + 0xcu * car, pts);
-                FUN_00050c0a(0x12420c, 0x68, y, I32(0x128a6cu + 0xcu * car) + 0x51, 0);
+                FUN_00050c0a(0x12420c, 0x68 * S2K, y * S2K, I32(0x128a6cu + 0xcu * car) + 0x51, 0);
                 FUN_0003327c(line, (uint32_t)y, 1, 1, 2);
             }
             if (I32(races) != I32(0x128a1c)) {
@@ -5732,7 +5745,7 @@ static void FUN_0003edb4(void)
     const uint32_t track = U32(0x113224u + 4u * U32(0x128a1c));
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x11144au, track + 0x31u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x11144au, track + 0x31u, S2_SET);
     FUN_00044587(0x113308);
     for (uint32_t i = 0; i < 7; i++) { FUN_0004be04(0x11da14, 0x11d6f4, (int)(0x131058u + 8 * i)); FUN_0004c01c(0x11da14, 0x11d6f4, (int)(0x131058u + 8 * i)); }
     {
@@ -5767,12 +5780,12 @@ static void FUN_0003edb4(void)
         FUN_000753a0(0x11d6f4u, 0);
         FUN_0003327c(U32(0x127f3cu + 8u * U32(0x128a10)), 4, 0, 1, 2);
         FUN_0003343d((int)track + 0x13, 0x2c, 0xa0, 0xa0);
-        FUN_00051698(0xa8, 0x5e, 0x92, 0x56);
-        FUN_00050f45(0x12420c, 0xad, 0x60, U32(0x127fb0), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x6c, U32(0x127fb8u + 0xcu * track), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x78, U32(0x127fbcu + 0xcu * track), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xad, 0x90, U32(0x127fb4), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x9c, U32(0x127fc0u + 0xcu * track), 2, 1, 2);
+        FUN_00051698(0xa8 * S2K, 0x5e * S2K, 0x92 * S2K, 0x56 * S2K);
+        FUN_00050f45(0x12420c, 0xad * S2K, 0x60 * S2K, U32(0x127fb0), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x6c * S2K, U32(0x127fb8u + 0xcu * track), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x78 * S2K, U32(0x127fbcu + 0xcu * track), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xad * S2K, 0x90 * S2K, U32(0x127fb4), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x9c * S2K, U32(0x127fc0u + 0xcu * track), 2, 1, 2 * S2K);
         I32(0x131f1c) = (int)FUN_00038996(1, 0);
         const int fading = (U32(0x132498) & 0x7fffffff) != 0;
         if (U32(0x1324e4) == 1 && !fading) {
@@ -5807,7 +5820,7 @@ static void FUN_0003edb4(void)
         if (I32(0x1324c4) == 0) {
             if ((U32(0x4ce0a) & 0x7f) < 0x40 && (U32(0x1324e4) == 0 || I32(0x131f28) == 0)) FUN_0003327c(U32(0x127f14), 0xb8, 2, 1, 2);
         } else {
-            FUN_00051698(0, 0, 0x140, 200);
+            FUN_00051698(0, 0, 0x140 * S2K, 200 * S2K);
             FUN_000332dd(U32(0x127fa0), 0x50, 0xa0, 0, 2, 1);
             FUN_000332dd(U32(0x127fa4), 0x5f, 0xa0, 0, 2, 1);
             const int lit_yes = no == 0 && (U32(0x4ce0a) & 0x3f) < 0x21, lit_no = !(no == 0 || (U32(0x4ce0a) & 0x3f) > 0x20);
@@ -5815,7 +5828,7 @@ static void FUN_0003edb4(void)
             FUN_000332dd(U32(0x127fac), 0x73, 0x50, 0x50, lit_no ? 3 : 2, lit_no ? 3 : 1);
         }
         if ((U32(0x1324e4) & 3) != 0 && I32(0x131f28) != 0) {
-            FUN_00051698(0, 0, 0x140, 200);
+            FUN_00051698(0, 0, 0x140 * S2K, 200 * S2K);
             if (U32(0x4ce0a) & 0x40) FUN_00037686();
         }
         FUN_0007f5a2(0, 0);
@@ -5840,7 +5853,7 @@ static void FUN_0003f72a(void)
     float slide = 1.0f;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x111467u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111467u, S2_SET);
     FUN_00044587(0x113308);
     U32(0x1324d4) = 0;
     for (uint32_t i = 0; i < 5; i++) U32(0x130d1cu + 4 * i) = 0x4560fffcu;
@@ -5904,15 +5917,15 @@ static void FUN_0003f72a(void)
         FUN_0003327c(U32(0x127f10), 4, 0, 1, 2);
         const uint32_t track = U32(0x113224u + 4u * (uint32_t)(slide == 1.0f ? I32(0x128a0c) : was));
         FUN_0003343d((int)track + 0x13, 0x2c, 0xa0, 0xa0);
-        FUN_00051698(0xa8, 0x5e, 0x92, 0x56);
-        FUN_00050f45(0x12420c, 0xad, 0x60, U32(0x127fb0), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x6c, U32(0x127fb8u + 0xcu * track), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x78, U32(0x127fbcu + 0xcu * track), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xad, 0x90, U32(0x127fb4), 2, 1, 2);
-        FUN_00050f45(0x12420c, 0xb9, 0x9c, U32(0x127fc0u + 0xcu * track), 2, 1, 2);
+        FUN_00051698(0xa8 * S2K, 0x5e * S2K, 0x92 * S2K, 0x56 * S2K);
+        FUN_00050f45(0x12420c, 0xad * S2K, 0x60 * S2K, U32(0x127fb0), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x6c * S2K, U32(0x127fb8u + 0xcu * track), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x78 * S2K, U32(0x127fbcu + 0xcu * track), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xad * S2K, 0x90 * S2K, U32(0x127fb4), 2, 1, 2 * S2K);
+        FUN_00050f45(0x12420c, 0xb9 * S2K, 0x9c * S2K, U32(0x127fc0u + 0xcu * track), 2, 1, 2 * S2K);
         if ((U32(0x4ce0a) & 0x7f) < 0x40) {
-            if (I32(0x128a0c) != 0) FUN_00050c0a(0x12420c, 10, 0xac, 1, 0);
-            if (I32(0x128a0c) < I32(0x128a14) + 2) FUN_00050c0a(0x12420c, 0x12a, 0xac, 2, 0);
+            if (I32(0x128a0c) != 0) FUN_00050c0a(0x12420c, 10 * S2K, 0xac * S2K, 1, 0);
+            if (I32(0x128a0c) < I32(0x128a14) + 2) FUN_00050c0a(0x12420c, 0x12a * S2K, 0xac * S2K, 2, 0);
         }
         slide = (float)((ld)F32(0x133350) * 4.0f + slide);
         if (s2_bits(slide) > 0x3f800000) slide = 1.0f;
@@ -5944,7 +5957,7 @@ static void FUN_0003bf06(void)
     float shown = 0.0f;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x1112e2u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x1112e2u, S2_SET);
     FUN_00044587(0x113374);
     U32(0x131f30) = 0;
     do {
@@ -6048,7 +6061,7 @@ static void FUN_0003bf06(void)
             FUN_0003327c(U32(0x128048), 4, 0, 1, 2);
             if ((U32(0x4ce0a) & 0x20) != 0 || kind != 0) FUN_0003327c(U32(0x127ef4), 0x46, 1, 1, 2);
             if ((U32(0x4ce0a) & 0x20) != 0 || kind == 0) FUN_0003327c(U32(0x127ef8), 0x5a, 1, 1, 2);
-            if (I32(0x131f28) != 0) { FUN_00051698(0, 0, 0x140, 200); if (U32(0x4ce0a) & 0x40) FUN_00037686(); }
+            if (I32(0x131f28) != 0) { FUN_00051698(0, 0, 0x140 * S2K, 200 * S2K); if (U32(0x4ce0a) & 0x40) FUN_00037686(); }
         }
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 2.0f + F32(0x13249c));
         if (I32(0x13249c) >= 0x3f800000) { F32(0x13249c) = 1.0f; U32(0x1324a0) = 0x3f800000u; }
@@ -6079,7 +6092,7 @@ static void FUN_0003988d(void)
     U32(0x1324dc) = 3;
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x11121cu, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x11121cu, S2_SET);
     FUN_00044587(0x113240);
     prev[0] = (int)U8(0x1289f4) - 0x41; prev[1] = (int)U8(0x1289f8) - 0x41;
     letter[0] = prev[0]; letter[1] = prev[1];
@@ -6158,7 +6171,7 @@ static void FUN_0003988d(void)
                 }
             }
             const int base = p == 0 ? 0 : 100000;
-            (void)FUN_0004f6c4(0x140, 0x60, 0x31);
+            (void)FUN_0004f6c4(0x140, 0x60 * S2K, 0x31 * S2K);
             I32(0x131eb0) = base; I32(0x131eb4) = base + 500; I32(0x131eb8) = (int32_t)truncl((double)base + 5520.0);
             U32(0x131eac) = 0; U32(0x131ea8) = 0; U32(0x131ea4) = 0;
             FUN_0007e8b4(0x131ea4, 0);
@@ -6181,9 +6194,9 @@ static void FUN_0003988d(void)
                 for (uint32_t k = p * 0x1a; k < p * 0x1a + 0x1a; k++) FUN_00036245((int)(0x1314a4u + 0x28u * k), letter[p], prev[p], k * 0x28u, blink[p], base + 1);
             }
             if (ready[p] == 0) {
-                if (p != 0) I32(0x134794) += 0x7f80;
+                if (p != 0) I32(0x134794) += (S2_HI ? 0x1fe00 : 0x7f80);
                 FUN_000753a0(0x11d6f4u, 0);
-                if (p != 0) I32(0x134794) -= 0x7f80;
+                if (p != 0) I32(0x134794) -= (S2_HI ? 0x1fe00 : 0x7f80);
                 if (stage[p] == 0) {
                     FUN_0003327c(U32(0x127ed8), p * 0x66, 1, 1, 2);
                     FUN_0003327c(U32(0x127edcu + 4u * U32(team)), p * 0x66 + 0x56, 2, 1, 2);
@@ -6192,12 +6205,12 @@ static void FUN_0003988d(void)
                     U8(0x1289f4u + 4 * p + (uint32_t)cursor[p]) = (uint8_t)(letter[p] + 'A');
                     FUN_0004eaed(line, 0x111252u, p == 0 ? 0x1289f4u : 0x1289f8u);
                     FUN_0003327c(line, p * 0x66 + 0x55, 2, 1, 2);
-                    FUN_00050f45(0x12420c, cursor[p] * 0xc + 0x91, (int)p * 0x66 + 0x5b, 0x111256u, 2, 1, 2);
+                    FUN_00050f45(0x12420c, (cursor[p] * 0xc + 0x91) * S2K, ((int)p * 0x66 + 0x5b) * S2K, 0x111256u, 2, 1, 2 * S2K);
                 }
             } else {
-                if (p != 0) I32(0x134794) += 0x7f80;
-                FUN_00051aa4(U32(0x134794), 0x7a80, 0);
-                if (p != 0) I32(0x134794) -= 0x7f80;
+                if (p != 0) I32(0x134794) += (S2_HI ? 0x1fe00 : 0x7f80);
+                FUN_00051aa4(U32(0x134794), S2_HI ? 0x1ea00u : 0x7a80u, 0);
+                if (p != 0) I32(0x134794) -= (S2_HI ? 0x1fe00 : 0x7f80);
                 FUN_0004eaed(line, 0x11124cu, U32(0x12805c), (uint32_t)(p == 0) + 0x31u);
                 FUN_0003327c(line, p * 0x66 + 0x32, 1, 1, 2);
             }
@@ -6236,7 +6249,7 @@ static void FUN_0003a870(void)
     int moving[2] = { 0, 0 }, gear[2] = { 0, 0 }, n[2], ready[2] = { 0, 0 };
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x111260u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x111260u, S2_SET);
     FUN_00044587(0x1133d4);
     FUN_000ae6e3(0x1338ccu, U32(U32(0x1323c8) + 4), 0x300);
     FUN_00051664(U32(U32(0x1323c8) + 4), 0);
@@ -6322,15 +6335,15 @@ static void FUN_0003a870(void)
                 }
                 moving[p] = !(fabs((double)(I32(m + 8) - I32(e))) <= 150.0);
             }
-            (void)FUN_0004f6c4(0x140, 0x60, 0x31);
+            (void)FUN_0004f6c4(0x140, 0x60 * S2K, 0x31 * S2K);
             const uint32_t e = 0x130ef0u + 0xcu * (p * 5 + U32(chosen));
             U32(0x131eb0) = U32(e); I32(0x131eb4) = I32(e + 4) + 600; I32(0x131eb8) = I32(e + 8) + 0x4b0;
             U32(0x131ea4) = 0x780; U32(0x131ea8) = 0; U32(0x131eac) = 0;
             FUN_0007e8b4(0x131ea4, 0);
             if (ready[p] == 0) {
-                if (p != 0) I32(0x134794) += 0x7f80;
+                if (p != 0) I32(0x134794) += (S2_HI ? 0x1fe00 : 0x7f80);
                 FUN_000753a0(0x11d6f4u, 0);
-                if (p != 0) I32(0x134794) -= 0x7f80;
+                if (p != 0) I32(0x134794) -= (S2_HI ? 0x1fe00 : 0x7f80);
                 if (gear[p] == 0) {
                     FUN_0003327c(U32(0x127f08), p * 0x66, 1, 1, 2);
                     if (U32(chosen) == 4) FUN_0003327c(U32(0x12801cu + 4u * U32(0x1289ecu + 4 * p)), p * 0x66 + 0x52, 2, 1, 2);
@@ -6341,9 +6354,9 @@ static void FUN_0003a870(void)
                     if ((U32(0x4ce0a) & 0x3f) < 0x20 || U32(box) == 0) FUN_000332dd(U32(0x127f20), p * 0x66 + 0x49, 0xa0, 0xa0, 1, 1);
                 }
             } else {
-                if (p != 0) I32(0x134794) += 0x7f80;
-                FUN_00051aa4(U32(0x134794), 0x7a80, 0);
-                if (p != 0) I32(0x134794) -= 0x7f80;
+                if (p != 0) I32(0x134794) += (S2_HI ? 0x1fe00 : 0x7f80);
+                FUN_00051aa4(U32(0x134794), S2_HI ? 0x1ea00u : 0x7a80u, 0);
+                if (p != 0) I32(0x134794) -= (S2_HI ? 0x1fe00 : 0x7f80);
                 FUN_0004eaed(line, 0x111280u, U32(0x12805c), (uint32_t)(p == 0) + 0x31u);
                 FUN_0003327c(line, p * 0x66 + 0x32, 1, 1, 2);
             }
@@ -6376,7 +6389,7 @@ static void FUN_00040a67(void)
     const uint32_t chosen = 0x128a9cu + 0x188u * U32(0x1289ec);
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
-    FUN_0004eaed(0x130bc8u, 0x1114c6u, 0x4cu);
+    FUN_0004eaed(0x130bc8u, 0x1114c6u, S2_SET);
     FUN_00044587(0x1133a4);
     FUN_00011906();
     U32(0x1324dc) = 1;
@@ -6473,20 +6486,20 @@ static void FUN_00040a67(void)
         FUN_0007e8b4(0x131ea4, 0);
         FUN_000753a0(0x11d6f4u, 0);
         if (I32(0x1324c4) == 0) {
-            FUN_00050c0a(0x12420c, 0x1c, 0xf, 0x22, 0);
-            FUN_00050c0a(0x12420c, 0xe2, 1, I32(0x1289ec) + 0x23, 0);
-            FUN_00050c0a(0x12420c, 0x12, 0x9b, I32(chosen) == 4 ? I32(0x1289ec) + 0x1e : I32(chosen) + 0x1a, 0);
-            FUN_00050c0a(0x12420c, 0xa6, 0xaa, 0x6a, 0);
-            FUN_00050c0a(0x12420c, 0xe7, 0xab, 0x6e, 0);
-            FUN_00050c0a(0x12420c, 0xfb, 0xa3, F32(0x119394) > (double)0.8 ? 0x6c : F32(0x119390) > (double)0.8 ? 0x6b : 0x6d, 0);
+            FUN_00050c0a(0x12420c, 0x1c * S2K, 0xf * S2K, 0x22, 0);
+            FUN_00050c0a(0x12420c, 0xe2 * S2K, 1 * S2K, I32(0x1289ec) + 0x23, 0);
+            FUN_00050c0a(0x12420c, 0x12 * S2K, 0x9b * S2K, I32(chosen) == 4 ? I32(0x1289ec) + 0x1e : I32(chosen) + 0x1a, 0);
+            FUN_00050c0a(0x12420c, 0xa6 * S2K, 0xaa * S2K, 0x6a, 0);
+            FUN_00050c0a(0x12420c, 0xe7 * S2K, 0xab * S2K, 0x6e, 0);
+            FUN_00050c0a(0x12420c, 0xfb * S2K, 0xa3 * S2K, F32(0x119394) > (double)0.8 ? 0x6c : F32(0x119390) > (double)0.8 ? 0x6b : 0x6d, 0);
             if (I32(0x124654) == 0) FUN_0004eaed(line, 0x11150cu, (uint32_t)(int32_t)truncl((ld)F32(0x11935c) * (double)1.188));
             else FUN_0004eaed(line, 0x1114f6u, (uint32_t)(int32_t)truncl((ld)F32(0x11935c) * (double)1.188 / (double)1.6));
-            FUN_00050f45(0x12420c, 0xd5, 0xa9, line, 5, 5, 1);
+            FUN_00050f45(0x12420c, 0xd5 * S2K, 0xa9 * S2K, line, 5, 5, 1);
         } else {
-            FUN_00050c0a(0x12420c, 0x1c, 0xf, 0x27, 0);
-            FUN_00050c0a(0x12420c, 0xe2, 1, I32(0x1289ec) + 0x23, 0);
-            FUN_00050c0a(0x12420c, 0x12, 0x9b, (U32(0x4ce0a) & 0x20) == 0 && I32(0x1289fc) == 0 ? 0x29 : 0x28, 0);
-            FUN_00050c0a(0x12420c, 0x9f, 0x9b, (U32(0x4ce0a) & 0x20) == 0 && I32(0x1289fc) != 0 ? 0x2b : 0x2a, 0);
+            FUN_00050c0a(0x12420c, 0x1c * S2K, 0xf * S2K, 0x27, 0);
+            FUN_00050c0a(0x12420c, 0xe2 * S2K, 1 * S2K, I32(0x1289ec) + 0x23, 0);
+            FUN_00050c0a(0x12420c, 0x12 * S2K, 0x9b * S2K, (U32(0x4ce0a) & 0x20) == 0 && I32(0x1289fc) == 0 ? 0x29 : 0x28, 0);
+            FUN_00050c0a(0x12420c, 0x9f * S2K, 0x9b * S2K, (U32(0x4ce0a) & 0x20) == 0 && I32(0x1289fc) != 0 ? 0x2b : 0x2a, 0);
         }
         if ((U32(0x132498) & 0x7fffffff) != 0) F32(0x13249c) = (float)((ld)F32(0x133350) * 2.0f + F32(0x13249c));
         if (I32(0x13249c) >= 0x3f800000) { F32(0x13249c) = 1.0f; U32(0x1324a0) = 0x3f800000u; }
@@ -6607,27 +6620,32 @@ static void FUN_0003e161(void)
         U32(0x131eac) = 0;
         FUN_0007e8b4(0x131ea4, 0);
         FUN_000753e8(0x11d6f4u, 0);
-        FUN_00050c0a(0x12420c, 0xfa, 0x1e, 0x31, 0);
-        FUN_00050c0a(0x12420c, 0xfa, 0x80, 0x32, 0);
+        FUN_00050c0a(0x12420c, 0xfa * S2K, 0x1e * S2K, 0x31, 0);
+        FUN_00050c0a(0x12420c, 0xfa * S2K, 0x80 * S2K, 0x32, 0);
         FUN_0003327c(U32(0x127f78), 0, 0, 1, 2);
-        FUN_00050c0a(0x12420c, I32(0x113120u + 0xcu * (uint32_t)row), I32(0x113124u + 0xcu * (uint32_t)row), I32(0x113128u + 0xcu * (uint32_t)row), 0);
+        FUN_00050c0a(0x12420c, I32(0x113120u + 0xcu * (uint32_t)row) * S2K, I32(0x113124u + 0xcu * (uint32_t)row) * S2K, I32(0x113128u + 0xcu * (uint32_t)row), 0);
         if (I32(0x1324c4) == 0) { slide = (float)((ld)slide - (ld)F32(0x133350) * 8.0f); if (0.0f > slide) slide = 0.0f; }
         else { slide = (float)((ld)F32(0x133350) * 8.0f + slide); if (s2_bits(slide) > 0x3f800000) slide = 1.0f; }
-        const int y = (int32_t)truncl(200.0f - (ld)slide * 50.0f);
+        /* (STARTH: each sliding place times 2.0 before it is cut, not after) */
+#define SLID(c, m) (S2_HI ? (int32_t)truncl(((ld)(c) - (ld)slide * (m)) * 2.0f) : (int32_t)truncl((ld)(c) - (ld)slide * (m)))
+#define SLIDX(m) (S2_HI ? (int32_t)truncl(((ld)slide * (double)(m) + (double)-45.0) * (double)2.0) : (int32_t)truncl((ld)slide * (double)(m) + (double)-45.0))
+        const int y = SLID(200.0f, 50.0f);
         if (row == 2) {
-            FUN_00050c0a(0x12420c, (int32_t)truncl((ld)slide * (double)107.0 + (double)-45.0), 0x5a, 0x3f, 0);
-            FUN_00050c0a(0x12420c, 8, y, 0x43, 0);
-            FUN_00050c0a(0x12420c, 0x3c, y, 0x44, 0);
-            FUN_00050c0a(0x12420c, 0x70, y, 0x45, 0);
-            FUN_00050f45(0x12420c, 0xaa, (int32_t)truncl(200.0f - (ld)slide * 42.0f), U32(0x128030u + 4u * (uint32_t)value), 2, 1, 2);
-            if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, value * 0x34 + 8, y, 0x46, 0);
+            FUN_00050c0a(0x12420c, SLIDX(107.0), 0x5a * S2K, 0x3f, 0);
+            FUN_00050c0a(0x12420c, 8 * S2K, y, 0x43, 0);
+            FUN_00050c0a(0x12420c, 0x3c * S2K, y, 0x44, 0);
+            FUN_00050c0a(0x12420c, 0x70 * S2K, y, 0x45, 0);
+            FUN_00050f45(0x12420c, 0xaa * S2K, SLID(200.0f, 42.0f), U32(0x128030u + 4u * (uint32_t)value), 2, 1, 2 * S2K);
+            if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, (value * 0x34 + 8) * S2K, y, 0x46, 0);
         } else {
-            FUN_00050c0a(0x12420c, (int32_t)truncl((ld)slide * (double)87.0 + (double)-45.0), 0x5a, (row < 6 ? row : 5) + 0x3d, 0);
-            FUN_00050c0a(0x12420c, 0x11, y, 0x35, 0);
-            FUN_00050c0a(0x12420c, 5, (int32_t)truncl(210.0f - (ld)slide * 50.0f), fabsf(left) == 0.0f ? 0x48 : 0x3c, 0);
-            FUN_00050c0a(0x12420c, 0x68, (int32_t)truncl(206.0f - (ld)slide * 50.0f), fabsf(right) == 0.0f ? 0x47 : 0x3b, 0);
-            if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, value * 0x10 + 0x11, y, value + 0x36, 0);
+            FUN_00050c0a(0x12420c, SLIDX(87.0), 0x5a * S2K, (row < 6 ? row : 5) + 0x3d, 0);
+            FUN_00050c0a(0x12420c, 0x11 * S2K, y, 0x35, 0);
+            FUN_00050c0a(0x12420c, 5 * S2K, SLID(210.0f, 50.0f), fabsf(left) == 0.0f ? 0x48 : 0x3c, 0);
+            FUN_00050c0a(0x12420c, 0x68 * S2K, SLID(206.0f, 50.0f), fabsf(right) == 0.0f ? 0x47 : 0x3b, 0);
+            if ((U32(0x4ce0a) & 0x3f) < 0x20) FUN_00050c0a(0x12420c, (value * 0x10 + 0x11) * S2K, y, value + 0x36, 0);
         }
+#undef SLID
+#undef SLIDX
         left = (float)((ld)left - (ld)F32(0x133350) * 15.0f); if (0.0f > left) left = 0.0f;
         right = (float)((ld)right - (ld)F32(0x133350) * 15.0f); if (0.0f > right) right = 0.0f;
         FUN_0003327c(U32(0x127f7cu + 4u * (uint32_t)row), 0xb4, 1, 1, 2);
@@ -6807,30 +6825,30 @@ static void FUN_0003cbb8(void)
         FUN_0007e8b4(0x131ea4, 0);
         FUN_000753e8(0x11d6f4u, 0);
         FUN_0003327c(U32(0x127f08), 4, 0, 1, 2);
-        FUN_00050c0a(0x12420c, 0x12, 0xa5, I32(chosen) == 4 ? I32(0x1289ec) + 0x1e : I32(chosen) + 0x1a, 0);
-        FUN_00050c0a(0x12420c, 0xa6, 0xb4, 0x6a, 0);
-        FUN_00050c0a(0x12420c, 0xe7, 0xb5, 0x6e, 0);
-        FUN_00050c0a(0x12420c, 0xfb, 0xad, F32(0x119394) > (double)0.8 ? 0x6c : F32(0x119390) > (double)0.8 ? 0x6b : 0x6d, 0);
+        FUN_00050c0a(0x12420c, 0x12 * S2K, 0xa5 * S2K, I32(chosen) == 4 ? I32(0x1289ec) + 0x1e : I32(chosen) + 0x1a, 0);
+        FUN_00050c0a(0x12420c, 0xa6 * S2K, 0xb4 * S2K, 0x6a, 0);
+        FUN_00050c0a(0x12420c, 0xe7 * S2K, 0xb5 * S2K, 0x6e, 0);
+        FUN_00050c0a(0x12420c, 0xfb * S2K, 0xad * S2K, F32(0x119394) > (double)0.8 ? 0x6c : F32(0x119390) > (double)0.8 ? 0x6b : 0x6d, 0);
         if (I32(0x124654) == 0) FUN_0004eaed(line, 0x1113acu, (uint32_t)(int32_t)truncl((ld)F32(0x11935c) * (double)1.188));
         else FUN_0004eaed(line, 0x111396u, (uint32_t)(int32_t)truncl((ld)F32(0x11935c) * (double)1.188 / (double)1.6));
-        FUN_00050f45(0x12420c, 0xd5, 0xb3, line, 5, 5, 1);
+        FUN_00050f45(0x12420c, 0xd5 * S2K, 0xb3 * S2K, line, 5, 5, 1);
         if (U32(0x1324d4) != 0) {
             if (I32(chosen) < 4) {
-                FUN_00051698(100, 0x54, 0x78, 0x44);
+                FUN_00051698(100 * S2K, 0x54 * S2K, 0x78 * S2K, 0x44 * S2K);
                 int y = 0x58;
-                for (uint32_t i = 0; i < 5; i++, y += I32(U32(0x124250) + 0x60)) {
+                for (uint32_t i = 0; i < 5; i++, y += S2_HI ? I32(U32(0x124250) + 0x60) / 2 : I32(U32(0x124250) + 0x60)) {
                     const int lit = i == U32(0x13237c) && ((U32(0x4ce0a) & 0x3f) < 0x20 || U32(0x1324d4) == 2);
                     FUN_0003327c(U32(0x127f5cu + 4 * i), (uint32_t)y, lit ? 3 : 2, lit ? 3 : 1, 2);
                 }
                 if (U32(0x13237c) != 0) {
                     const uint32_t s = 0x128aa4u + 0x18u * (U32(0x13237c) - 1) + 0x60u * U32(chosen) + 0x188u * team;
-                    FUN_00050c0a(0x12420c, 0xff, 0x35, 0x31, 0);
-                    FUN_00050c0a(0x12420c, 0x111, 0x4c, I32(s) + 0x49, 0);
-                    FUN_00050c0a(0x12420c, 0x12d, 0x4c, I32(s + 0x14) + 0x49, 0);
-                    FUN_00050c0a(0x12420c, 0x111, 0x6c, I32(s + 8) + 0x4e, 0);
-                    FUN_00050c0a(0x12420c, 0x12d, 0x6c, I32(s + 4) + 0x49, 0);
-                    FUN_00050c0a(0x12420c, 0x111, 0x8c, I32(s + 0xc) + 0x49, 0);
-                    FUN_00050c0a(0x12420c, 0x12d, 0x8c, I32(s + 0x10) + 0x49, 0);
+                    FUN_00050c0a(0x12420c, 0xff * S2K, 0x35 * S2K, 0x31, 0);
+                    FUN_00050c0a(0x12420c, 0x111 * S2K, 0x4c * S2K, I32(s) + 0x49, 0);
+                    FUN_00050c0a(0x12420c, 0x12d * S2K, 0x4c * S2K, I32(s + 0x14) + 0x49, 0);
+                    FUN_00050c0a(0x12420c, 0x111 * S2K, 0x6c * S2K, I32(s + 8) + 0x4e, 0);
+                    FUN_00050c0a(0x12420c, 0x12d * S2K, 0x6c * S2K, I32(s + 4) + 0x49, 0);
+                    FUN_00050c0a(0x12420c, 0x111 * S2K, 0x8c * S2K, I32(s + 0xc) + 0x49, 0);
+                    FUN_00050c0a(0x12420c, 0x12d * S2K, 0x8c * S2K, I32(s + 0x10) + 0x49, 0);
                 }
             }
             if (U32(0x1324d4) == 2) {
@@ -7512,7 +7530,7 @@ static void FUN_00013514(int camera)
 {
     const uint32_t row = (uint32_t)camera + (uint32_t)I32(camera + 0x24) * 0x20u;
     for (uint32_t k = 0; k < 6; k++) U32(camera + 0x48 + 4 * k) = U32(row + 0x60 + 4 * k);
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /* how fast a path's curve goes at t of a piece (0x108f5): its slope from the three handles h0,
@@ -7683,7 +7701,7 @@ static void s2r_camera_in_car(int camera, int back)
     I32(camera + 0x48) = I32(obj) + I32(car + 0xc00);
     I32(camera + 0x4c) = I32(obj + 4) + I32(obj + 0x1c) + I32(car + 0x218) + 400;
     I32(camera + 0x50) = I32(obj + 8);
-    I32(camera + 0x1c) = back ? 35 : 200;
+    I32(camera + 0x1c) = back ? (S2_HI ? 0x46 : 35) : (S2_HI ? 400 : 200);
 }
 #define HOOK_13bab
 static void FUN_00013bab(int camera) { s2r_camera_in_car(camera, 0); }
@@ -7697,7 +7715,7 @@ static void FUN_00013cbd(int camera)
     const uint32_t car = U32(camera + 0xadc), obj = U32(car + 0x990);
     I32(camera + 0x4c) = I32(obj + 4) + I32(obj + 0x1c) + I32(car + 0x218) + 300;
     const uint32_t model = (U8(0x130d10) & 4) ? U32(0x124574) : U32(0x124574 + 4u * U32(car));
-    I32(camera + 0x1c) = I32(0x1242b4 + model * 0x58u) / 2;
+    I32(camera + 0x1c) = S2_HI ? I32(0x1242b4 + model * 0x58u) : I32(0x1242b4 + model * 0x58u) / 2;   /* (CRUSC.DTR is in 640 units: STARTH takes it whole) */
 }
 #define HOOK_13e1a
 static void FUN_00013e1a(int camera) { s2r_camera_in_car(camera, 1); }
@@ -7715,7 +7733,7 @@ static void FUN_00013768(int camera)
     }
     FUN_000338ed((uint32_t)camera + 0x54, obj, (uint32_t)camera + 0x48);
     F32(camera + 0x5c) = F32(row + 0x74);
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /* a camera of the fifth kind (0x13a8e): 1320 + 500 s along and 550 + 200 s up (s the row's
@@ -7735,7 +7753,7 @@ static void FUN_00013a8e(int camera, uint32_t r1, uint32_t r2, uint32_t r3)
     s2_sp = sp;
     FUN_000338ed((uint32_t)camera + 0x54, obj, (uint32_t)camera + 0x48);
     I32(camera + 0x5c) = 0;
-    I32(camera + 0x1c) = 200;
+    I32(camera + 0x1c) = S2_HI ? 400 : 200;
 }
 
 /* the angle from b to a, brought into -pi .. pi (0x14dc0; "over pi" is tested on the float's bits

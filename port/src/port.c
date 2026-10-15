@@ -425,8 +425,10 @@ static void os_help(const char *me)
 "  -data DIR      your copy of the game: the folder that holds its DATA and GFX folders\n"
 "                 default: $OPENSCREAMER_DATA, ./screamer, <program>/screamer\n"
 "                 (a folder of files already unpacked with tools/extract.sh works too)\n"
-"  -game N        1 = Screamer, 2 = Screamer 2 (in work: tracks only).  Default: the one whose\n"
-"                 files are found (./screamer, ./screamer2); -data DIR names either game's folder\n"
+"  -game N        1 = Screamer, 2 = Screamer 2.  Default: the one whose files are found\n"
+"                 (./screamer, ./screamer2); -data DIR names either game's folder\n"
+"  -res low|high  320 x 200 or 640 x 400 for this run (Screamer 2's high is STARTH.EXE's);\n"
+"                 the one kept is OPTIONS' RESOLUTION in Screamer, in openscreamer.cfg\n"
 "  -home DIR      where settings and saves are kept\n"
 "                 default: $OPENSCREAMER_HOME, this directory if it already holds them,\n"
 "                 else ~/.config/openscreamer\n"
@@ -552,6 +554,7 @@ void os_init(int argc, char **argv)
         else if (!strcmp(argv[i], "-data") && i + 1 < argc) data = argv[++i];
         else if (!strcmp(argv[i], "-home") && i + 1 < argc) home = argv[++i];
         else if (!strcmp(argv[i], "-game") && i + 1 < argc) game = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-res") && i + 1 < argc) { i++; if (!strcmp(argv[i], "high") || !strcmp(argv[i], "low")) setenv("OS_RES", argv[i], 1); }
         else K->argv[K->argc++] = argv[i];
     }
     char exe[600] = "";

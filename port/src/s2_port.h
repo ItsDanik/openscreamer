@@ -146,6 +146,7 @@ typedef struct { int x, y, z, a[3]; } s2m_cam;                                  
 int  s2_menu_run(void);                                  /* the menu's loop (0x38540): 0 when the program is to end */
 void s2m_base(const uint8_t *six);
 void s2m_palette(const uint8_t *six);
+int  s2_screen_hi(void);                                  /* Screamer 2 at 640 x 400: STARTH's constants (docs/NOTES2.md S2-9) */
 void s2m_fonts(void);
 void s2m_picture(int x, int y, int w, int h, const uint8_t *px);
 int  s2m_text(int x, int y, const char *str, int font, int colour, int space);

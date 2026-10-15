@@ -2538,6 +2538,81 @@ The old copies were then dropped from the repository (`refs/original`, the reflo
 `build/w/gitbak/` (ignored; never to be published). The work in progress was set aside and put back
 the same, byte for byte.
 
+## S2-9. HIGH RESOLUTION: what STARTH.EXE changes — 2026-10-16
+
+Danik: "start on hi-res". `S2.BAT` (the original's own launcher) runs `STARTH.EXE`, so that is the
+version Danik plays.
+
+**It is 640 x 400, not 640 x 480.** DOSBox's picture of it (Ctrl+F5) is 1920 x 1440 with 400 distinct
+rows (320 of them 3 tall, 80 of them 6) and 640 columns of 3: a 640 x 400 screen shown 4:3. (The
+launcher's comment "640x480" is wrong.) The port's high resolution is already 640 x 400.
+
+**The same program with other constants.** `tools/unle.py --fixups screamer2/STARTH.EXE` ->
+`build/screamer2h_flat.bin`, Ghidra project `build/ghidra2h` (as S2-3, entry 0xB3EF0, the same 792
+seeds: `build/w/ghidra_h.sh`), `tools/ExportFuncs.java` lists both programs' routines (entry, size). The
+routines paired in link order (`build/w/hi_pair.py`: 1277 pairs), compared with relocated addresses and
+call distances left out: **88 routines differ**, every one in what is drawn and loaded:
+- the picture's size: rows 200 -> 400 (`0x13514`..`0x14200` the cameras' record `+0x1c`, `0x2b873`
+  the mirror's box 0x63 / 0xc7 -> 0xc6 / 0x18e, `0x4f6c4` the width x 2), the screen 64000 -> 256000
+  bytes (`0x2b2a8`, `0x358b9`, `0x36d22`, `0x37b41`), a row 320 -> 640 (`0x4fbe0` shl 6 -> 7, `0x51698`,
+  `0x51b02`, `0x51774`, `0x753a0`);
+- the file set's letter 'L' -> 'H' (`0x34ec6`, `0x41fcf`, `0x44587` twice, `0x2e1f3`, `0x2ef4e`);
+- every position on the race's screens doubled (`0x45882`, `0x456fb`, `0x46b76`, `0x4746a`,
+  `0x47e75`, `0x48980`, `0x49aaf`, `0x49f8e`, `0x463c0`, `0x498d8`, `0x499d2`, `0x4962c`, `0x47128`,
+  `0x37ea9` whose easing constant is 1000 -> 2000) -- what the port's `g_s` already does;
+- the menu's text helpers (`0x3327c`, `0x332dd`, `0x333c1`) keep their sums in the 320 x 200 layout:
+  the H font's widths are halved, the spacing 2 -> 4, the place doubled as it is drawn;
+- the dashboard table (`CRUSC.DTR`, 640 units) is used whole, not halved (`0x13cbd`, `0x49071`);
+- the lens: the engine's `(x << 7) / z` (0xc925b and three more) is doubled after (0xc946b in H)
+  unless a flag is set -- the same view across twice the pixels, as the port draws it;
+- the rest are jump tables inside the code that moved (`0x14e20`, `0x19aaa`, `0x245a3`, `0x339e7`,
+  `0x38540`, `0x38b2c`, `0x4b1a4`), the engine's own drawing and the frame's copy to the card.
+**None in the driving, the collisions, the computers' cars or the rules.** Both programs decompiled
+side by side: `build/w/decl`, `build/decomp2h`, the differences `build/w/hl_cdiff.txt`.
+
+**Pictures of the original at 640 x 400:** `build/w/dos/hishots.py <dir> high "Return:3,...,SHOT:1"`
+(DOSBox on the hidden display, its own capture). The race screen of the port's `OS_RES=high` against
+the original's: the same layout and artwork. **The game's menu is not done in high**: it draws in
+the top left quarter (the plain menu too).
+
+**The routines first paired were not all of them.** Ghidra's lists of the two programs differ where
+it cut routines differently, so a second pass (`build/w/hi_pair2.py`) takes every routine start known
+-- both Ghidra projects and every hand-written routine -- finds each in STARTH by its own bytes, and
+compares each stretch to the next: 84 stretches differ below the engine, among them some thirty
+menu pages the first pass missed (`0x3343d`, `0x3988d`, `0x3edb4`, `0x3ff37`, ...). Every file
+letter of the menu, all 18 `sprintf(..., 'L')` of it, is 'H' in STARTH.
+`build/w/show_a.py <addr>` lists a stretch's changed constants; `build/w/hi_odd.txt` those that
+are not a plain doubling.
+
+**In the port (2026-10-16):** `s2_screen_hi()` (main.c: `g_s == 2`, not the MiSTer's wide) and in
+`s2r_car.h` `S2_HI`, `S2K` (1 / 2) and `S2_SET` ('L' / 'H'):
+- the menu's primitives draw what they are given in the screen's own pixels (`s2m_sprite`,
+  `s2m_text` with `hud_text`'s `g_hud_native`, `s2m_picture` and `s2m_dark` to 640 x 400, the
+  clip boxes, `MENUH.FNT` / `MENUH.SPR`, the 3D's eye line 200);
+- the hand-written routines take STARTH's numbers where it has others: every place handed to
+  a sprite, a text, a box or a clip doubled (`build/w/scale_calls.py <addr>`, used only where
+  the program's list shows nothing but doubling, its count checked against the list); a text's
+  gap 2 -> 4; the text helpers halve the H font's widths and double the place
+  (`0x3327c`, `0x332dd`, `0x333c1`, `0x3343d`, `0x3348f`); the screen 64000 -> 256000 bytes
+  (also the block `s2_alloc`s for it: at 64000 the clear ran over the next block); the two
+  players' halves 0x7f80 / 0x7a80 -> 0x1fe00 / 0x1ea00 (rows twice, each twice as long);
+  a place worked out in floating point is multiplied by 2.0 BEFORE it is cut, not after
+  (`0x3e161` CUSTOMIZE's sliding items, `0x4189f`'s strip); `0x420c0`'s line step is the H
+  font's height x 1.2 x 0.5; the cameras' rows 200 -> 400 (the mirror's 35 -> 70, the dashboard
+  view's the table's number whole);
+- the port's own race screens already doubled the low set; now also in high: the attract's
+  logo in the screen's pixels (from 2000, 1280; aimed at the H sprite's middle; its height 10
+  NOT doubled, as STARTH has it), the dashboard from CRUSC.DTR's numbers whole and
+  `COCKn_H.PKC`, the mirror's frame `MIRROR_H.PKC`, a camera's rows taken as given (doubling
+  them again overran the mirror's 100-row strip: noise under the mirror);
+- the picture hook (`0x51b02`) lets a picture have 400 rows.
+**Checked:** the track page is the original's to the pixel (DOSBox's picture of it, its runs of
+rows taken one each: `build/w/dos/unscale.py`; 0 of 256000 differ); the name page's title,
+background, name and cursor the same, its turning 3D at another moment; the race screen's
+labels and figures at the same places; Screamer 1's high resolution (two tracks, the menu)
+unchanged; low resolution unchanged (the quick check and the 13 menu pages). `-res low|high`
+chooses it for one run; the one kept is still Screamer's OPTIONS (`openscreamer.cfg`).
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).
