@@ -36,7 +36,7 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e OS_VERSION_IS="$V" -v "$R
     cmake --build $W/sdl -j\$(nproc) > /dev/null
     cmake --install $W/sdl > /dev/null
   fi
-  PKG_CONFIG_PATH=$ROOT/$W/prefix/lib/pkgconfig cmake -S port -B $W/game -DCMAKE_BUILD_TYPE=Release -DCMAKE_SKIP_RPATH=ON > /dev/null
+  PKG_CONFIG_PATH=$ROOT/$W/prefix/lib/pkgconfig cmake -S port -B $W/game -DCMAKE_BUILD_TYPE=Release -DCMAKE_SKIP_RPATH=ON -DOS_GLIBC_227=ON > /dev/null
   cmake --build $W/game -j\$(nproc) 2>&1 | grep -E ' error|Built target openscreamer'
   strip $W/game/openscreamer"
 
