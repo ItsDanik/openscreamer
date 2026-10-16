@@ -52,6 +52,7 @@ void os_init(int argc, char **argv);    /* reads -d, -data, -home; the rest are 
 int  os_dev(void);                      /* -d: the developer's keys are on */
 int  os_game(void);                     /* 1 = Screamer, 2 = Screamer 2 (-game N, or by the files found) */
 int  os_both_games(void);               /* both games' files were found and -game was not given */
+void os_select_game(int g);             /* both found: from now on game g (its folders, its check) */
 int  os_argc(void);
 char **os_argv(void);
 void os_state_save(void);

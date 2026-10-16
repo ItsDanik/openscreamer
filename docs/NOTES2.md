@@ -2646,6 +2646,21 @@ restart handed `os_go` the very buffers `os_next` writes into (they came out emp
 display, started as Danik starts it: two starts in high in a row stay high; a start with the mark
 left on falls back cleanly and its race runs.
 
+## S2-10. Choosing the game — 2026-10-16
+
+Danik's decision of 2026-10-13 ("with no option and both games' data found, a menu offers Screamer 1
+/ Screamer 2"), now built: "do the game chooser. -game 1 starts screamer 1". With both folders found
+and no `-game` (`os_both_games()`), Screamer's menu starts on a page of its own (`PAGE_GAME`, 9) of two
+lines, SCREAMER and SCREAMER 2 (texts 66, 67, the port's), its lettered cubes as every page of that
+menu; the line lit at first is the game chosen last (`game=2` in openscreamer.cfg). ENTER: the choice
+kept, `OS_GAME_CHOSEN`, and the program begun again (`os_go`) -- SCREAMER with its intro and menu as
+ever, SCREAMER 2 after `os_select_game(2)` (port.c: the data folder becomes the other one found, its
+DATA / GFX / ANIMS folders found again, every container read so far let go -- the two games share
+names such as GEN, LOCAL, MAP1 -- and its start-up check) with its own menu. ESC on the page leaves the
+program; ESC on Screamer's main page comes back to it. `-game N` or `-data DIR` never shows it.
+`OS_MENU_PAGE=9 OS_MENU_SHOT=0,0,f.ppm` takes its picture. Checked on the hidden X display: SCREAMER 2
+-> its check and its menu, `game=2` kept and lit on the next start; SCREAMER -> its intro race.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

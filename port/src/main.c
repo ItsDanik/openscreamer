@@ -357,7 +357,7 @@ static void os_go(int argc, const char *a1, const char *a2)
     longjmp(*g_next_part, 1);
 }
 
-static struct { int res, diff, laps, speech, music, starting, vol_cd, vol_fx, vol_mu, detail; } g_cfg = { 0, 1, 0, 1, 1, 0, 0x6000, 0x6000, 0x6000, 2 };
+static struct { int res, diff, laps, speech, music, starting, vol_cd, vol_fx, vol_mu, detail, game; } g_cfg = { 0, 1, 0, 1, 1, 0, 0x6000, 0x6000, 0x6000, 2, 1 };
 /* key_accelerate= ... lines: a key's name in the place of the one in the game's CONTROLS.CFG (controls.c) */
 static char g_cfg_key[6][40];
 static const char *const g_cfg_key_word[6] = { "key_accelerate", "key_brake", "key_left", "key_right", "key_gear_up", "key_gear_down" };
@@ -378,6 +378,7 @@ static void cfg_load(void)
         if (sscanf(line, "speech=%d", &n) == 1) g_cfg.speech = n != 0;
         if (sscanf(line, "music=%d", &n) == 1) g_cfg.music = n != 0;
         if (sscanf(line, "starting_high=%d", &n) == 1) g_cfg.starting = n != 0;
+        if (sscanf(line, "game=%d", &n) == 1) g_cfg.game = n == 2 ? 2 : 1;
         if (sscanf(line, "detail=%63s", val) == 1)
             for (int k = 0; k < 4; k++) if (!strcmp(val, g_detail_word[k])) g_cfg.detail = k;
         if (sscanf(line, "volume_cd=%d", &n) == 1) g_cfg.vol_cd = n < 0 ? 0 : n > 0x7fff ? 0x7fff : n;
@@ -402,6 +403,7 @@ static void cfg_save(void)
     fprintf(f, "volume_cd=%d\nvolume_fx=%d\nvolume_mu=%d\n", g_cfg.vol_cd, g_cfg.vol_fx, g_cfg.vol_mu);
     for (int k = 0; k < 6; k++) if (g_cfg_key[k][0]) fprintf(f, "%s=%s\n", g_cfg_key_word[k], g_cfg_key[k]);
     if (g_cfg.starting) fprintf(f, "starting_high=1\n");
+    if (g_cfg.game == 2) fprintf(f, "game=2\n");
     fclose(f);
 }
 
@@ -8339,6 +8341,11 @@ static void menu_frame(int screen, int pick, float turn, const uint8_t *bg, mesh
  */
 typedef struct { int line, works, *value, max; } menu_item;
 static int g_opt_detail = 2, g_opt_res = 0, g_opt_diff = 1, g_opt_laps = 0, g_opt_speech = 1, g_opt_music = 1;
+/* THE PORT'S OWN: with both games found and no -game, the menu starts on a page of two lines that
+   chooses the game -- SCREAMER goes on to its intro and menu, SCREAMER 2 to its own (os_select_game);
+   the line lit at first is the game chosen last (openscreamer.cfg game=) */
+static const menu_item g_page_game[] = { { 66, 1, NULL, 0 }, { 67, 1, NULL, 0 } };
+#define PAGE_GAME 9
 static const menu_item g_page_main[] = {
     { 0, 1, NULL, 0 }, { 1, 1, NULL, 0 }, { 2, 1, NULL, 0 }, { 3, 0, NULL, 0 }, { 4, 1, NULL, 0 },
 };
@@ -8995,6 +9002,8 @@ static int menu_run(int *track, int *car)
     strcpy(g_menu_text[61], "HIGH RESOLUTION");
     for (int k = 0; k < 3; k++) strcpy(g_menu_text[62 + k], g_menu_text[5 + k]);     /* LOW / MID / HI DETAIL */
     strcpy(g_menu_text[65], "ULTRA DETAIL");
+    strcpy(g_menu_text[66], "SCREAMER");         /* (the port's: the page that chooses the game, both being there) */
+    strcpy(g_menu_text[67], "SCREAMER 2");
     car_spec specs[CAR_SPECS_MAX];
     int nspec = cars_dtr_load(specs, CAR_SPECS_MAX, "build/dec/GEN/CARS.DTR");
     if (g_nmenu_car > nspec) g_nmenu_car = nspec;
@@ -9029,7 +9038,8 @@ static int menu_run(int *track, int *car)
     Uint32 last_t = 0;
     int screen = 0, pick[2] = { 0, 0 }, loaded_screen = -1, loaded_pick = -1;
     /* pages 5 and 6 are the championship: NEW / RESUME, and its stage screens */
-    int page = 0, sel[9] = { 0 }, mode = 1, resume = 0, tick = 0;
+    int page = 0, sel[10] = { 0 }, mode = 1, resume = 0, tick = 0;
+    if (os_both_games() && !getenv("OS_GAME_CHOSEN")) { page = PAGE_GAME; sel[PAGE_GAME] = g_cfg.game == 2; }
     static uint8_t bg_champ[FB_MAXW * FB_MAXH];
     static uint32_t pal_champ[256];
     int champ_pic = -1;
@@ -9071,7 +9081,7 @@ static int menu_run(int *track, int *car)
     g_opt_speech = getenv("OS_FROM_RACE_OPTS") ? (getenv("OS_NOSPEECH") ? 0 : 1) : g_cfg.speech;
     g_opt_music = getenv("OS_FROM_RACE_OPTS") ? (getenv("OS_NOMUSIC") ? 0 : 1) : g_cfg.music;
     if (getenv("OS_NOMUSIC") && !getenv("OS_FROM_RACE_OPTS")) g_opt_music = 0;      /* asked for on the command line */
-    if (getenv("OS_MENU_PAGE")) { page = atoi(getenv("OS_MENU_PAGE")); if (page > 8) page = 8; }
+    if (getenv("OS_MENU_PAGE")) { page = atoi(getenv("OS_MENU_PAGE")); if (page > PAGE_GAME) page = PAGE_GAME; }
     if (getenv("OS_REC_TRACK")) rec_track = atoi(getenv("OS_REC_TRACK")) % 6;
     if (getenv("OS_CHAMP_STAGE")) { champ_new(); g_ch.stage = atoi(getenv("OS_CHAMP_STAGE")); g_ch.pos[0] = 2; g_ch.pts[0] = 7; g_ch.time[0] = 151.37f; }
     float turn = 0.0f;
@@ -9363,8 +9373,8 @@ static int menu_run(int *track, int *car)
         }
         if (page >= 0) {
             const menu_item *items = page == 0 ? g_page_main : page == 1 ? g_page_options
-                                   : page == 2 ? g_page_special : page == 7 ? g_page_records : g_page_attack;
-            int n = page == 0 ? 5 : page == 1 ? OPT_LINES : page == 2 ? 3 : page == 7 ? 6 : 2;      /* 3 and 5: NEW / RESUME */
+                                   : page == 2 ? g_page_special : page == 7 ? g_page_records : page == PAGE_GAME ? g_page_game : g_page_attack;
+            int n = page == 0 ? 5 : page == 1 ? OPT_LINES : page == 2 ? 3 : page == 7 ? 6 : 2;      /* 3 and 5: NEW / RESUME; the game's two */
             memcpy(g_pal, pal_main, sizeof g_pal);
             {
                 /* a page, or a line of it, that is not what the cubes spell: they
@@ -9423,6 +9433,15 @@ static int menu_run(int *track, int *car)
                     snd_play(it->value ? 2 : (page == 0 && (it->line == 1 || it->line == 2 || it->line == 4)) || page == 1
                                              || (page == 2 && it->line == 28) || page == 7 ? 0 : 3);
                     if (it->value) *it->value = (*it->value + 1) % (it->max + 1);   /* 0x297d4 */
+                    else if (page == PAGE_GAME) {                     /* the port's: the game chosen, kept, and begun */
+                        g_cfg.game = it->line == 67 ? 2 : 1;
+                        cfg_save();
+                        setenv("OS_GAME_CHOSEN", "1", 1);
+                        unsetenv("OS_INTRO_DONE");
+                        os_select_game(g_cfg.game);
+                        res_started();
+                        os_go(1, NULL, NULL);
+                    }
                     else if (page == 1 && it->line == 21) page = 7;                 /* VIEW RECORDS */
                     else if (page == 7) { rec_track = it->line - 31; rec_sel = 0; page = 8; }   /* 0x2c844 */
                     /* every game starts with ENTER YOUR NAME, which then goes on
@@ -9440,7 +9459,8 @@ static int menu_run(int *track, int *car)
                     else if (page == 2) { mode = it->line == 29 ? MODE_CONES : MODE_SLALOM; page = -2; next_page = -1; next_screen = 0; }
                     else if (page == 3) { mode = MODE_ATTACK; resume = it->line == 25; page = -2; next_page = -1; next_screen = 0; }
                     break;
-                case SDLK_ESCAPE: snd_play(0); if (page == 3) page = 2; else if (page == 7) page = 1; else if (page != 0) page = 0; else result = 0; break;
+                case SDLK_ESCAPE: snd_play(0); if (page == 3) page = 2; else if (page == 7) page = 1; else if (page == PAGE_GAME) result = 0;
+                                  else if (page != 0) page = 0; else if (os_both_games()) page = PAGE_GAME; else result = 0; break;
                 case SDLK_F11:
                     SDL_SetWindowFullscreen(win, (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP)
                                                  ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -10793,7 +10813,8 @@ static int session(int argc, char **argv)
             setenv("OS_CYCLE_AT", v, 1);
         }
         if (!getenv("OS_INTRO_DONE") && !getenv("OS_NOINTRO") && !getenv("OS_MENU_SHOT")
-            && !getenv("OS_MENU_KEYS") && !getenv("OS_CHAMP") && !getenv("OS_FROM_RACE"))
+            && !getenv("OS_MENU_KEYS") && !getenv("OS_CHAMP") && !getenv("OS_FROM_RACE")
+            && !(os_both_games() && !getenv("OS_GAME_CHOSEN")))      /* (both games: the page that chooses comes first) */
             what = 2;                            /* 0x10092: the intro comes before the menu */
         else what = menu_run(&track, &car);
         if (!what) return 0;

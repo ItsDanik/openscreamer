@@ -56,6 +56,7 @@ typedef struct {
     int    packed;                      /* the data directory is a copy of the GAME, with its DATA and GFX folders */
     int    game;                        /* 1 = Screamer, 2 = Screamer 2 */
     int    both;                        /* both games were found and none was asked for */
+    char   other[800];                  /* (then the other game's folder: os_select_game) */
     char   dir_data[800], dir_gfx[800], dir_anims[800];
     struct pack { char name[16]; unsigned char *bytes; long len, dir; int nent; unsigned stamp; } pack[PACKS];
     unsigned pack_clock;
@@ -339,6 +340,16 @@ static int pack_whole(const char *path, int *files)
     return ok;
 }
 
+/* the game itself (its DATA and GFX folders, whatever their letters' case), or files unpacked
+   from it? */
+static void game_dirs(void)
+{
+    K->packed = ci_find(K->data, "DATA", K->dir_data, sizeof K->dir_data)
+             && ci_find(K->data, "GFX", K->dir_gfx, sizeof K->dir_gfx)
+             && is_dir(K->dir_data) && is_dir(K->dir_gfx);
+    if (!K->packed || !ci_find(K->data, "ANIMS", K->dir_anims, sizeof K->dir_anims) || !is_dir(K->dir_anims)) K->dir_anims[0] = 0;
+}
+
 static void game_check(void)
 {
     static const char *const data1[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
@@ -426,7 +437,8 @@ static void os_help(const char *me)
 "                 default: $OPENSCREAMER_DATA, ./screamer, <program>/screamer\n"
 "                 (a folder of files already unpacked with tools/extract.sh works too)\n"
 "  -game N        1 = Screamer, 2 = Screamer 2.  Default: the one whose files are found\n"
-"                 (./screamer, ./screamer2); -data DIR names either game's folder\n"
+"                 (./screamer, ./screamer2); both found: a first page chooses (the last\n"
+"                 choice lit); -data DIR names either game's folder\n"
 "  -res low|high  320 x 200 or 640 x 400 for this run (Screamer 2's high is STARTH.EXE's);\n"
 "                 the one kept is RESOLUTION in Screamer's OPTIONS or Screamer 2's GAME\n"
 "                 SETTINGS, in openscreamer.cfg\n"
@@ -588,14 +600,10 @@ void os_init(int argc, char **argv)
         /* no -game: the one that is there; both there: Screamer (the choice between them is the menu's) */
         if (!game) { K->both = found[1][0] && found[2][0]; game = found[1][0] || !found[2][0] ? 1 : 2; }
         snprintf(K->data, sizeof K->data, "%.700s", found[game][0] ? found[game] : game == 2 ? "screamer2" : "screamer");
+        if (K->both) snprintf(K->other, sizeof K->other, "%.700s", found[3 - game]);
     }
     K->game = game ? game : 1;
-    /* the game itself (its DATA and GFX folders, whatever their letters' case),
-       or files unpacked from it? */
-    K->packed = ci_find(K->data, "DATA", K->dir_data, sizeof K->dir_data)
-             && ci_find(K->data, "GFX", K->dir_gfx, sizeof K->dir_gfx)
-             && is_dir(K->dir_data) && is_dir(K->dir_gfx);
-    if (!K->packed || !ci_find(K->data, "ANIMS", K->dir_anims, sizeof K->dir_anims) || !is_dir(K->dir_anims)) K->dir_anims[0] = 0;
+    game_dirs();
     if (home) snprintf(K->home, sizeof K->home, "%s", home);
     else if (is_file(".", "openscreamer.cfg") || is_file(".", "openscreamer.records") || is_file(".", "openscreamer.champ"))
         strcpy(K->home, ".");
@@ -643,6 +651,20 @@ void os_init(int argc, char **argv)
 int   os_dev(void)  { return K && K->dev; }
 int   os_game(void) { return K ? K->game : 1; }
 int   os_both_games(void) { return K && K->both; }
+/* BOTH GAMES FOUND (the chooser, main.c): from now on the other one -- its folders, its check,
+   and none of the first one's containers kept */
+void  os_select_game(int g)
+{
+    if (!K || !K->both || (g != 1 && g != 2) || g == K->game) return;
+    char was[800];
+    snprintf(was, sizeof was, "%s", K->data);
+    snprintf(K->data, sizeof K->data, "%s", K->other);
+    snprintf(K->other, sizeof K->other, "%s", was);
+    K->game = g;
+    game_dirs();
+    for (int i = 0; i < PACKS; i++) { free(K->pack[i].bytes); memset(&K->pack[i], 0, sizeof K->pack[i]); }
+    game_check();
+}
 int   os_argc(void) { return K->has_next ? K->next_argc : K->argc; }
 char **os_argv(void) { return K->has_next ? K->next_argv : K->argv; }
 const char *os_data_dir(void) { return K ? K->data : "build/dec"; }
