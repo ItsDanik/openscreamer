@@ -434,8 +434,13 @@ static void res_fail(const char *why)
     g_cfg.res = 0; g_cfg.starting = 0;
     cfg_save();
     setenv("OS_RES", "low", 1);
-    if (g_argv && g_next_part)               /* the same part again, in low */
-        os_go(g_argc, g_argc > 1 ? g_argv[1] : NULL, g_argc > 2 ? g_argv[2] : NULL);
+    if (g_argv && g_next_part) {             /* the same part again, in low (its arguments copied first: they may be the
+                                                very buffers os_next writes the next part's into) */
+        char a1[768] = "", a2[768] = "";
+        if (g_argc > 1 && g_argv[1]) snprintf(a1, sizeof a1, "%s", g_argv[1]);
+        if (g_argc > 2 && g_argv[2]) snprintf(a2, sizeof a2, "%s", g_argv[2]);
+        os_go(g_argc, g_argc > 1 ? a1 : NULL, g_argc > 2 ? a2 : NULL);
+    }
     exit(1);
 }
 
@@ -10290,6 +10295,7 @@ int s2m_show(void)
         SDL_RenderClear(g_s2m_ren);
         SDL_RenderCopy(g_s2m_ren, g_s2m_tex, NULL, NULL);
         SDL_RenderPresent(g_s2m_ren);
+        res_started();                       /* (a picture shown: this size starts -- the mark for the next start goes) */
     }
     if (getenv("OS_S2MSHOT")) {                       /* a test: OS_S2MSHOT=<frame>,<file>: that frame written, and the end */
         static int f;

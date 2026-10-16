@@ -2637,6 +2637,14 @@ Both now as the skipped pages leave them. (3) "note: no picture at .../IMPLET_L.
 IMPRES_L) on every exit: Screamer's race-screen pictures, asked for by the shared `hud_load`;
 Screamer 2 no longer asks. Tests: `OS_S2MKEYSAFTER` = the keys after the restart; `OS_SNDWAV`
 now records the menu's sound too, a frame's worth a frame; `OS_SNDLOG` prints the CD's volume.
+Danik again: a start with high saved fell back to low ("the last start in it did not get as far as
+a picture") and then "cannot open /MAP0OPP.SPL". The start-up mark (`starting_high=1` in
+openscreamer.cfg, cleared by the first picture shown: `res_started`) was never cleared by Screamer
+2's menu, so the hand-over to the attract race found it and took high for broken; and `res_fail`'s
+restart handed `os_go` the very buffers `os_next` writes into (they came out empty). Now
+`s2m_show` clears the mark, and `res_fail` copies its arguments first. Checked on the hidden X
+display, started as Danik starts it: two starts in high in a row stay high; a start with the mark
+left on falls back cleanly and its race runs.
 
 ## S2-6. Plan
 
