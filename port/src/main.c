@@ -3454,6 +3454,8 @@ static void s2_race_read(void)
     g_s2_mir_is_ok = s2_mirror(&g_s2_mir_is);
 }
 
+static void s2_rumble_step(float dt);
+
 /* one frame of the game's race */
 static void s2_race_step(void)
 {
@@ -3466,6 +3468,7 @@ static void s2_race_step(void)
     s2_frame_times(s2_every());                          /* (the race's clock goes by the time itself, the routines by the eased step) */
     s2_frame(s2_step());
     s2_race_read();
+    s2_rumble_step(s2_every());
     snd_render(s2_every());                              /* (only for OS_SNDWAV: the mix written to a file) */
     if (getenv("OS_S2LOG")) {                            /* a test: every frame, every car's place and speed */
         static int f;
@@ -4375,6 +4378,7 @@ static float g_race_clock;                       /* (defined with the race's clo
 #define RUMBLE_STRONG 1.75f                      /* the MiSTer core's "Strong": everything this much more, up to the motors' most */
 static struct { float low, high, hold; } g_kick;
 static float g_rumble_low, g_rumble_high;
+static int g_s2_feel_finished;                   /* (Screamer 2: the player's car has finished -- s2_rumble_step) */
 
 static void rumble_kick(float low, float high, float seconds)
 {
@@ -4432,6 +4436,48 @@ static void rumble_show(int driving)
     if (getenv("OS_RUMBLELOG") && (g_rumble_low > 0.0f || g_rumble_high > 0.0f))
         printf("rumble %.2fs  heavy %.2f  light %.2f\n", g_race_clock, g_rumble_low, g_rumble_high);
 }
+/*
+ * RUMBLE IN SCREAMER 2 (the port's own, as Screamer's above: rumble_kick, rumble_show): the game had
+ * none.  After every frame of the race, from the player's car (s2_feel_read):
+ *   a knock  (walls, other cars: the game's one knock routine 0x19aaa, its force -- 2000 is what the
+ *            game counts as a hard one) a thump by its force, as Screamer's wall
+ *   grass    the heavy motor, by the wheels on it and the speed, shuddering with the place
+ *   a skid   the light motor, while the game's slip is under 0.93 (when its tyres smoke): more the
+ *            further under -- wheelspin off the line is one too
+ * Nothing in a replay, the attract race, the pause, or once the car has finished.
+ */
+static void s2_rumble_step(float dt)
+{
+    s2_feel f;
+    s2_feel_read(&f);
+    float low = 0.0f, high = 0.0f;
+    if (g_kick.hold > 0.0f) g_kick.hold -= dt;
+    else {
+        g_kick.low -= dt * 5.0f;  if (g_kick.low < 0.0f) g_kick.low = 0.0f;
+        g_kick.high -= dt * 5.0f; if (g_kick.high < 0.0f) g_kick.high = 0.0f;
+    }
+    if (f.knock > 50.0f) {
+        const float k = f.knock / 3000.0f > 1.0f ? 1.0f : f.knock / 3000.0f;
+        rumble_kick(0.2f + 0.8f * k, 0.2f + 0.5f * k, 0.05f + 0.15f * k);
+    }
+    float v = f.speed / 120.0f;
+    if (v > 1.0f) v = 1.0f;
+    if (f.grass && v > 0.02f) {
+        const float jolt = (float)(((f.x + f.y) >> 6) & 15) / 15.0f;
+        low += (float)f.grass * 0.25f * v * (0.3f + 0.5f * jolt);
+        high += (float)f.grass * 0.25f * v * 0.15f;
+    }
+    if (f.down && f.slip < 0.93f) {
+        const float s = (0.93f - f.slip) * 4.0f;
+        high += 0.25f + 0.3f * (s > 1.0f ? 1.0f : s);
+    }
+    low += g_kick.low; high += g_kick.high;
+    g_rumble_low = low > 1.0f ? 1.0f : low;
+    g_rumble_high = high > 1.0f ? 1.0f : high;
+    g_s2_feel_finished = f.finished;
+    if (getenv("OS_S2FEELLOG")) printf("feel knock %.0f slip %.3f speed %.1f down %d grass %d\n", (double)f.knock, (double)f.slip, (double)f.speed, f.down, f.grass);   /* a test */
+}
+
 static int g_snd_engine = -1, g_snd_skid = -1, g_snd_wall = -1;
 static void view_change(int to);
 static int  g_view;
@@ -12107,7 +12153,8 @@ static int session(int argc, char **argv)
             }
             volumes_apply(g_fade_in);
         }
-        rumble_show(!g_replay && !g_intro && !g_finished && !g_game_over && !g_dialog && !g_cd.on);
+        if (g_s2_on) rumble_show(!s2_replaying() && !(s2_mode & 0x80) && !g_s2_feel_finished && !g_s2_pz.on);   /* (Screamer 2's: s2_rumble_step) */
+        else rumble_show(!g_replay && !g_intro && !g_finished && !g_game_over && !g_dialog && !g_cd.on);
         fps_draw();
         if (ddemo) {
             static int df = 0;

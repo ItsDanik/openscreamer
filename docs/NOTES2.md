@@ -2661,6 +2661,26 @@ program; ESC on Screamer's main page comes back to it. `-game N` or `-data DIR` 
 `OS_MENU_PAGE=9 OS_MENU_SHOT=0,0,f.ppm` takes its picture. Checked on the hidden X display: SCREAMER 2
 -> its check and its menu, `game=2` kept and lit on the next start; SCREAMER -> its intro race.
 
+## S2-11. The controller's rumble — 2026-10-16
+
+Danik: "implement controller vibration (rumble) in screamer2, the same way we did in screamer1". The
+port's own in both games (the originals had none); Screamer's machinery (main.c `rumble_kick`,
+`rumble_show`, the heavy and the light motor, a knock held a moment then dying away in a fifth of a
+second) fed by `s2_rumble_step` after every frame of the race, from the player's car
+(`s2_feel_read`, s2_hooks.c):
+- **a knock**: the game's one knock routine (`0x19aaa`, walls and other cars) notes the hardest force
+  the player's car takes (`s2_knock_note`, the routine's only port line); a thump by it, 3000 = full
+  (the game counts 2000 as a hard one);
+- **grass**: the wheels on the ground whose road kind's flags & 3 are 2 (the green blades,
+  `0x11ce00` + 0x24 a kind) -- the heavy motor by them and the speed (+0x500, ~120 at the top),
+  shuddering with the place;
+- **a skid**: the game's slip (car +0xc34) under 0.93 -- when its tyres smoke (`0x204af`) -- the light
+  motor, more the further under; the start's wheelspin is one.
+Nothing in a replay, the attract race, the pause screen, or once the player has finished. Measured
+with the game's driver at the wheel: slip under 0.93 in 9 % of the frames (the start, real slides),
+grass where it cuts across. Switches as Screamer's: `OS_NORUMBLE`, `OS_RUMBLE_GAIN`, `OS_RUMBLELOG`;
+`OS_S2FEELLOG` prints what is read each frame. Not felt here (no controller on this machine): Danik's.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).

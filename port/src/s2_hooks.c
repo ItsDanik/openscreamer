@@ -606,6 +606,13 @@ static int FUN_0004bc03(uint32_t name, uint32_t to, uint32_t list)
 
 #ifdef S2_CONVERTED
 #include "s2_menu_hooks.h"
+/* THE CONTROLLER'S RUMBLE (the port's own, as Screamer's: main.c s2_rumble_step): the hardest knock
+   the player's car has taken since it was last asked, from the game's one knock routine (0x19aaa) */
+static float s2_knock_most;
+static void s2_knock_note(int car, float force)
+{
+    if ((uint32_t)car == 0x119300u + (uint32_t)I32(0x11f0d0) * 0xcc0u && force > s2_knock_most) s2_knock_most = force;
+}
 #include "s2r_car.h"                   /* (the game's routines, written by hand: docs/NOTES2.md S2-8) */
 #ifdef S2_REFERENCE
 #include "s2_gen.inc"                  /* (the developer's reference: the routines converted from the game's program) */
@@ -2161,6 +2168,26 @@ void s2_car(int i, s2_car_state *c)
 }
 
 int s2_player(void) { return I32(0x11f0d0); }
+/* what the player's car goes through, for the controller's rumble (main.c s2_rumble_step): the hardest
+   knock since the last asking (0x19aaa's force: 2000 is a hard one), the game's slip (car +0xc34: under
+   0.93 it smokes, 0x204af), the wheels on the ground on grass (their road kind's flags & 3 == 2, the
+   green blades -- 0x11ce00 + 0x24 a kind), the speed (+0x500), the place, whether it has finished */
+void s2_feel_read(s2_feel *f)
+{
+    const uint32_t car = CAR(s2_player());
+    memset(f, 0, sizeof *f);
+    f->knock = s2_knock_most; s2_knock_most = 0.0f;
+    f->slip = F32(car + 0xc34);
+    f->speed = F32(car + 0x500);
+    f->x = I32(car + 0x4d8); f->y = I32(car + 0x4e0);
+    f->finished = (U8(car + 0x4c) & 3) != 0;
+    for (int w = 0; w < 4; w++) {
+        if (!I32(car + 0x57c + (uint32_t)w * 0x70)) continue;
+        f->down++;
+        const int kind = I32(car + 0x5d0 + (uint32_t)w * 0x70);
+        if (kind >= 0 && kind < 64 && (U32(0x11ce00u + (uint32_t)kind * 0x24u) & 3) == 2) f->grass++;
+    }
+}
 /* the engine's constant in its code (0xb04a8; 0.008 in the program): 0x1f1ef writes 0.002, or 0.03
    in a tunnel, for the car the camera follows */
 float s2_env_rate(void) { return F32(0xb04a8); }

@@ -122,6 +122,8 @@ int  s2_attack_plan(int track, int *team, int *model);   /* before the cars are 
 void s2_race_leave(void);                                /* as the race is left: the ghost kept, if it is to be */
 int  s2_replay_offered(void);                             /* the end's screen has REPLAY (an arcade or league race, written down) */
 void s2_replay_take(int on);                             /* REPLAY taken (1): the next start of this race is its replay */
+typedef struct { float knock, slip, speed; int x, y, down, grass, finished; } s2_feel;
+void s2_feel_read(s2_feel *f);                           /* the player's car, for the controller's rumble (main.c) */
 int  s2_replaying(void);                                 /* this race is a replay (the mode's 0x100) */
 void s2_replay_stop(void);                               /* ESC in a replay: its end */
 void s2_replay_next_car(void);                           /* F11 in a replay: the cameras follow the next car */

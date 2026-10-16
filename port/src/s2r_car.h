@@ -316,6 +316,7 @@ static void FUN_00019aaa(int car, int side, int corner, uint32_t r3, float share
 {
     (void)r3;
     if (U8(0x130d10) & 0x80) return;
+    s2_knock_note(car, force);                   /* (the port's own: the controller's rumble, s2_feel_read) */
     const uint32_t count = (uint32_t)car + 0x1c + 4u * (uint32_t)side;
     F32(count) = (float)((1.0L - share) * force / 20000.0f + F32(count));
     if (I32(count) >= 0x3f800000) {
