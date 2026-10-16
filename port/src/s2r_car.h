@@ -227,6 +227,9 @@ static void FUN_00013cbd(int camera);
 #define S2_HI (s2_screen_hi())
 #define S2_SET (S2_HI ? 0x48u : 0x4cu)             /* the file set's letter: H or L (every one of the menu's) */
 #define S2K (S2_HI ? 2 : 1)                        /* the layout's pixels to the screen's */
+/* the options page's RESOLUTION line (the port's own, 0x420c0) */
+static int s2m_res_change;                     /* 1 low, 2 high: asked for on the options page */
+static int s2m_opt_row;                        /* (the row the page starts on: RESOLUTION after the change) */
 
 #define HOOK_111d6
 static void FUN_000111d6(int at, float target, int i)
@@ -4551,6 +4554,11 @@ static void FUN_00038540(void)
     if (s2m_resume) { s2m_resume = 0; r = 0; goto after_race; }
     I32(0x1324d8) = 1;
     I32(0x132494) = 0x3c9ac;
+    int to_options = 0;
+    if (getenv("OS_S2MGOTO") && !strcmp(getenv("OS_S2MGOTO"), "options")) {  /* (the port's: back on the options page in the other size) */
+        unsetenv("OS_S2MGOTO");
+        to_options = 1;
+    }
     for (uint32_t k = 0; k < 3; k++) U32(0x132378 + 4 * k) = 0;
     U32(0x1324e8) = 0; I32(0x1324e0) = 0; U32(0x1324dc) = 0;
     I32(fade + 8) *= 3; I32(fade + 0xc) *= 3;
@@ -4563,6 +4571,22 @@ static void FUN_00038540(void)
         }
         for (uint32_t k = 0; k < 0x32; k++) U32(0x1323cc + 4 * k) = 0;
         FUN_00032d53();
+        if (to_options) {                        /* (the port's: after the settings are read, the options page at once, with what
+                                                    the pages skipped leave behind -- the team's camera paths for the rooms, as the
+                                                    name page reads them as it ends (0x3ff37), the room's choice on OPTIONS, the
+                                                    music as the first page starts it (0x3c9ac)) */
+            to_options = 0;
+            I32(0x132494) = 0x420c0; s2m_opt_row = 1;
+            const uint32_t sp1 = s2_sp, name = s2_push(0x40);
+            FUN_0004eaed(name, 0x1114bdu, U32(0x1289ec) + 0x31u);
+            FUN_00032c48(3, (int)name);
+            s2_sp = sp1;
+            U32(0x132378) = 4;
+            I32(0x130d5c) = I32(0x128a5c); U32(0x130d60) = U32(0x128a60); U32(0x130d58) = U32(0x128a64);   /* (the volumes from the settings, as 0x3c9ac sets them) */
+            (void)FUN_0004d064(0, 0); (void)FUN_0004d064(0, 0);
+            FUN_0004d7c0(I32(0x130d5c) >> 7, I32(0x130d5c) >> 7);
+            if (I32(0x128a44) == 0) { (void)FUN_0004d738(0, 0); FUN_0004d5b4(2, 1); }
+        }
         if (I32(0x132494) == 0x3c9ac) FUN_00041fcf();
 after_attract:
         while (I32(0x132494) != 0) s2_dispatch(U32(0x132494));
@@ -5191,12 +5215,18 @@ static void FUN_0004189f(void)
  * under the other (1.2 lines of the font apart), the chosen one blinking.  Up / down choose (a
  * sound); ENTER steps the setting round (the eighth -- the CD's music -- restarts it or stops it)
  * or, on "done", goes to the controls' page (0x4254f); ESC back to the main menu.  The fade.
+ * THE PORT'S OWN: a RESOLUTION line under TRANSMISSION, above DETAIL LEVEL (the original chose it
+ * by which program was started, STARTL or STARTH): ENTER saves the settings and the menu begins
+ * again in the other one, on this page (s2m_res_change; main.c s2_menu3d).
  */
 #define HOOK_420c0
 static void FUN_000420c0(void)
 {
     typedef long double ld;
-    int row = 0;
+    int row = s2m_opt_row;
+    s2m_opt_row = 0;
+    const uint32_t sp0 = s2_sp, txt = s2_push(64);          /* (the port's line's words, in the game's memory) */
+    strcpy((char *)MP(txt), "RESOLUTION"); strcpy((char *)MP(txt + 16), ":320X200"); strcpy((char *)MP(txt + 32), ":640X400");
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
     FUN_0004eaed(0x130bc8u, 0x11154eu, S2_SET);
@@ -5207,16 +5237,25 @@ static void FUN_000420c0(void)
         I32(0x131f1c) = (int)FUN_00038996(0, 0);
         if (I32(0x131f1c) != 0 && (U32(0x132498) & 0x7fffffff) == 0) {
             const uint32_t key = U32(0x131f20);
+            /* (rows: 0 the game's first, 1 the port's RESOLUTION, 2..8 the game's 1..7, 9 "done") */
             if (key == 1 && row != 0) { row--; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
-            else if (key == 2 && row < 8) { row++; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
+            else if (key == 2 && row < 9) { row++; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
             else if (key == 0x10) {
-                if (row == 8) { U32(0x132498) = 0x3f800000u; I32(0x132494) = 0x4254f; FUN_000aea54(U32(0x124274), 0xd, 0, 0, 0, 0); }
+                const int g = row > 1 ? row - 1 : row;
+                if (row == 9) { U32(0x132498) = 0x3f800000u; I32(0x132494) = 0x4254f; FUN_000aea54(U32(0x124274), 0xd, 0, 0, 0, 0); }
+                else if (row == 1) {                   /* the port's: saved, and the menu again in the other size */
+                    FUN_000aea54(U32(0x124274), 0xc, 0, 0, 0, 0);
+                    FUN_000331dc();
+                    s2m_res_change = S2_HI ? 1 : 2;
+                    s2_sp = sp0;
+                    FUN_000ae662(0);
+                }
                 else {
-                    const uint32_t s = 0x128a28u + 4u * (uint32_t)row;
+                    const uint32_t s = 0x128a28u + 4u * (uint32_t)g;
                     FUN_000aea54(U32(0x124274), 0xc, 0, 0, 0, 0);
                     I32(s) += 1;
-                    if (I32(0x1131c4u + 4u * (uint32_t)row) <= I32(s)) I32(s) = 0;
-                    if (row == 7) {
+                    if (I32(0x1131c4u + 4u * (uint32_t)g) <= I32(s)) I32(s) = 0;
+                    if (g == 7) {
                         (void)FUN_0004d064(0, 0x1c); (void)FUN_0004d064(0, 0);
                         if (I32(0x128a44) == 0) FUN_0004d5b4(2, 1);
                         else (void)FUN_0004d738(0x1c, 0);
@@ -5226,15 +5265,24 @@ static void FUN_000420c0(void)
         }
         FUN_0003327c(U32(0x127f04), 4, 0, 1, 2);
         int y = 0x30, names = 0x79;
-        for (int i = 0; i < 9; i++) {
+        for (int r = 0; r < 10; r++) {
+            const int i = r > 1 ? r - 1 : r;
+            const int lit = (U32(0x4ce0a) & 0x20) == 0 && row == r;
+            if (r == 1) {                              /* (the port's line, drawn as the game's) */
+                const uint32_t value = txt + (S2_HI ? 32u : 16u);
+                FUN_00050f45(0x12420c, 10 * S2K, y * S2K, txt, 2, 1, 2 * S2K);
+                if (lit) { FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 3, 3, 2 * S2K); FUN_00050f45(0x12420c, 200 * S2K, y * S2K, 0x11155au, 2, 1, 2 * S2K); }
+                else FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 2, 1, 2 * S2K);
+            }
+            else {
             names += I32(0x1131c0u + 4u * (uint32_t)i);
-            const int lit = (U32(0x4ce0a) & 0x20) == 0 && row == i;
             if (i == 8) FUN_00050f45(0x12420c, 10 * S2K, y * S2K, U32(0x1280b8), lit ? 3 : 2, lit ? 3 : 1, 2 * S2K);
             else {
                 const uint32_t value = U32(0x127ed8u + 4u * ((uint32_t)names + U32(0x128a28u + 4u * (uint32_t)i)));
                 FUN_00050f45(0x12420c, 10 * S2K, y * S2K, U32(0x128098u + 4u * (uint32_t)i), 2, 1, 2 * S2K);
                 if (lit) { FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 3, 3, 2 * S2K); FUN_00050f45(0x12420c, 200 * S2K, y * S2K, 0x11155au, 2, 1, 2 * S2K); }
                 else FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 2, 1, 2 * S2K);
+            }
             }
             y = S2_HI ? (int32_t)truncl((double)((ld)I32(U32(0x124250) + 0x60) * (double)1.2 * (double)0.5 + (double)y))     /* (STARTH: the H font is twice as tall) */
                        : (int32_t)truncl((double)((ld)I32(U32(0x124250) + 0x60) * (double)1.2 / 1.0L + (double)y));
@@ -5246,6 +5294,7 @@ static void FUN_000420c0(void)
     } while ((U32(0x1324a0) & 0x7fffffff) == 0);
     FUN_000358b9();
     FUN_00044f72(0x113374, 0);
+    s2_sp = sp0;
 }
 
 /*

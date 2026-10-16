@@ -614,6 +614,8 @@ void s2_gen_strings(void) { }
 void s2_gen_tables(void) { s2r_tables(); }
 #endif
 static void s2_hooks_set(void) { s2r_strings(); }
+/* the options page's RESOLUTION line (s2r_car.h 0x420c0): 1 low, 2 high was asked for (once) */
+int s2_menu_res_change(void) { const int r = s2m_res_change; s2m_res_change = 0; return r; }
 static void s2m_list_clear(void) { FUN_0004b016(); }
 
 /*
@@ -767,7 +769,9 @@ int s2_menu_run(void)
         s2_in_menu = 1; s2_menu_exit_code = 0; s2m_resume = (U32(0x130d10) & 0x80) ? 2 : I32(0x1324dc) < 0 ? 3 : 1;   /* (2: after the attract race, 3: after a replay) */
         s2m_objects_clear();
         s2_master = I32(0x130d58);                       /* (the sounds' volume as the race's end leaves it: 0x31495) */
-        if (!setjmp(s2_menu_out)) { S2_FPU_IN; FUN_00038540(); S2_FPU_OUT; }
+        S2_FPU_IN;                                       /* (set before the jump's place: the game's exit, 0xae662, comes back past it) */
+        if (!setjmp(s2_menu_out)) FUN_00038540();
+        S2_FPU_OUT;
         return s2_menu_left();
     }
     if (!s2_reset()) return 0;
@@ -796,11 +800,9 @@ int s2_menu_run(void)
     s2_dtr("build/dec/GAME/MISC.DTR", "DAMAGES", 0x11cce0, 4, 4);
     s2m_heap_start(); s2m_ease_row = 0;
     s2_in_menu = 1; s2_menu_exit_code = 0;
-    if (!setjmp(s2_menu_out)) {
-        S2_FPU_IN;
-        FUN_00038540();
-        S2_FPU_OUT;
-    }
+    S2_FPU_IN;
+    if (!setjmp(s2_menu_out)) FUN_00038540();
+    S2_FPU_OUT;
     return s2_menu_left();
 }
 #else

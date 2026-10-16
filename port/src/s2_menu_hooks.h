@@ -552,7 +552,12 @@ static uint64_t FUN_0004d5b4(int track, int again)
 #define HOOK_4d738
 #define FUN_0004d738(...) (snd_cd(0, 0), 0)
 #define HOOK_4d7c0
-static uint64_t FUN_0004d7c0(int left, int right) { snd_cd_volume((float)(left > right ? left : right) / 255.0f); return 0; }
+static uint64_t FUN_0004d7c0(int left, int right)
+{
+    if (getenv("OS_SNDLOG")) printf("menu: the CD's volume %d %d\n", left, right);
+    snd_cd_volume((float)(left > right ? left : right) / 255.0f);
+    return 0;
+}
 
 /* the attract race (0x3c9ac) over, the rest of its page: the next of its six tracks (0x128a58,
    kept in CHOICE.DAT), TEAM SELECTION next, ATTRACT.TXT let go, and the menu's song (track 2, if

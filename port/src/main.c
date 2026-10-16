@@ -5957,9 +5957,11 @@ static void hud_load(void)
             g_text[i][strcspn(g_text[i], "\r\n")] = 0;
         fclose(f);
     }
-    g_have_implet = pkc_load("build/dec/GAME/IMPLET_L.PKC", g_implet);
-    g_have_cdfront = pkc_load("build/dec/GAME/CDFRONTL.PKC", g_cdfront);
-    g_have_impres = pkc_load("build/dec/GAME/IMPRES_L.PKC", g_impres);
+    if (os_game() != 2) {                    /* (Screamer's race screen's pictures: Screamer 2 has none of them) */
+        g_have_implet = pkc_load("build/dec/GAME/IMPLET_L.PKC", g_implet);
+        g_have_cdfront = pkc_load("build/dec/GAME/CDFRONTL.PKC", g_cdfront);
+        g_have_impres = pkc_load("build/dec/GAME/IMPRES_L.PKC", g_impres);
+    } else g_have_implet = g_have_cdfront = g_have_impres = 0;
     if (!g_nfont || !g_nspr) fprintf(stderr, "note: no HUD font / sprites in build/dec/GAME\n");
 }
 
@@ -10276,6 +10278,7 @@ void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room)
 int s2m_show(void)
 {
     static uint32_t out[FB_MAXW * FB_MAXH];
+    if (getenv("OS_SNDWAV")) snd_render(1.0f / 30.0f);  /* (a test: the menu's sound into the file, a frame's worth a frame) */
     for (int i = 0; i < FB_W * FB_H; i++) out[i] = pxi[i] >= 0 ? g_s2m_hw[pxi[i] & 255] : fb[i];
     {   /* the frames a second (F5) over what is shown (the game draws its whole screen again each frame) */
         memcpy(fb, out, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
@@ -10375,7 +10378,18 @@ static int s2_menu3d(void)
     memset(g_s2m_base, 0xff, sizeof g_s2m_base);
     s2m_clip_start();
     for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xFF000000u; pxi[i] = 0; }
-    return s2_menu_run();
+    const int r = s2_menu_run();
+    const int res = s2_menu_res_change();
+    if (res) {                               /* the options page's RESOLUTION line: kept, and the menu again in it, on that page */
+        g_cfg.res = res == 2; g_cfg.starting = 0;
+        cfg_save();
+        setenv("OS_RES", res == 2 ? "high" : "low", 1);
+        setenv("OS_S2MGOTO", "options", 1);
+        unsetenv("OS_S2MKEYS");
+        if (getenv("OS_S2MKEYSAFTER")) { setenv("OS_S2MKEYS", getenv("OS_S2MKEYSAFTER"), 1); unsetenv("OS_S2MKEYSAFTER"); }   /* (a test: the keys after the change) */
+        os_go(1, NULL, NULL);
+    }
+    return r;
 }
 
 /*

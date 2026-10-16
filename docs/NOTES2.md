@@ -2613,6 +2613,31 @@ labels and figures at the same places; Screamer 1's high resolution (two tracks,
 unchanged; low resolution unchanged (the quick check and the 13 menu pages). `-res low|high`
 chooses it for one run; the one kept is still Screamer's OPTIONS (`openscreamer.cfg`).
 
+**A RESOLUTION line in the game's settings (2026-10-16, Danik: "add a switch for resolution in
+game settings, above 'detail level'").** The port's own, on the options page (`0x420c0`): its
+rows are now 0 TRANSMISSION, 1 RESOLUTION (`:320X200` / `:640X400`, the words written into the
+routine's own stack in the game's memory and drawn as the game draws its lines), 2..8 the
+game's DETAIL LEVEL .. MUSIC, 9 VIEW HIGH SCORES; the ten lines fit the page's box in both
+sizes. ENTER on it: the game's settings saved (`0x331dc`), the menu left by the game's own exit
+(`0xae662`) with `s2m_res_change` set; `s2_menu3d` (main.c) keeps the choice in
+`openscreamer.cfg` (`resolution=`), sets it for the run and begins the menu again
+(`os_go`) with `OS_S2MGOTO=options`: the menu's loop (`0x38540`) then goes straight to the
+options page, starts the music as its first page would, and the cursor is on RESOLUTION.
+Checked both ways (the settings file and the picture's size after it), DETAIL LEVEL still
+steps round. On the way: the menu's floating-point mode (`S2_FPU_IN`) is now set before
+the jump the game's exit comes back to, and put back after it (it was left set).
+Danik's first try: (1) after the change, ESC from the page showed the options room facing a wall
+-- the restart skipped the name page, which as it ends reads the team's camera paths for the rooms
+(`p_<team>.mcm`, `0x32c48` into `0x131f34..`: the rooms' camera places `0x131f38`, aims
+`0x131fec`); the restart now reads them, after the settings (`0x32d53`, the team), and sets the
+room's choice to OPTIONS (`0x132378` = 4); (2) the music did not come back -- the first page
+(`0x3c9ac`) copies the settings' volumes into the race record's (`0x130d5c` CD, `0x130d60`,
+`0x130d58`) before it starts the song, which the restart did not: the song played at volume 0.
+Both now as the skipped pages leave them. (3) "note: no picture at .../IMPLET_L.PKC" (and CDFRONTL,
+IMPRES_L) on every exit: Screamer's race-screen pictures, asked for by the shared `hud_load`;
+Screamer 2 no longer asks. Tests: `OS_S2MKEYSAFTER` = the keys after the restart; `OS_SNDWAV`
+now records the menu's sound too, a frame's worth a frame; `OS_SNDLOG` prints the CD's volume.
+
 ## S2-6. Plan
 
 1. Groundwork: decompiler project, tools (this section and S2-3).
