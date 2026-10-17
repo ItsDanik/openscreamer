@@ -77,16 +77,19 @@ static int g_yd = 1;
  * g_tall is the extra rows (0 or 40) and g_oy how far down the flat thing
  * being drawn is put -- the middle for whole-screen pictures and menus (the
  * default), LAY_TOP / LAY_BOT for what belongs at an edge of the race's
- * screen: 8 rows in from it, a television's edge being what it is (Danik).
+ * screen: as far in from it as the player's HUD margins say (the MiSTer
+ * core's HUD (Top) / HUD (Bottom), 0..24 rows, followed every picture; 10
+ * without the core), a television's edge being what it is.
  * The 3D view has all the rows.  The picture's memory is always 40 rows more
  * than it needs, so that the height can change while the program runs
  * (tall_follow).
  */
 static int g_tall, g_oy;
+static int g_hud_top = 10, g_hud_bot = 10;      /* (the HUD margins: tall_follow) */
 #define TALL_ROWS 40
-#define LAY_TOP() (g_oy = g_tall ? 8 : 0)
+#define LAY_TOP() (g_oy = g_tall ? g_hud_top : 0)
 #define LAY_MID() (g_oy = g_tall / 2)
-#define LAY_BOT() (g_oy = g_tall ? g_tall - 8 : 0)
+#define LAY_BOT() (g_oy = g_tall ? g_tall - g_hud_bot : 0)
 static int g_clip[4] = { 0, 320, 0, 200 };     /* where flat things may be drawn: x0, x1, y0, y1, in pixels */
 
 /*
@@ -104,7 +107,7 @@ static int g_clip[4] = { 0, 320, 0, 200 };     /* where flat things may be drawn
 #define COL_GROUND       0xFF23282Eu
 #define COL_FOG          0xFF2A2434u
 
-typedef struct { int w, h; uint8_t *pix; } sky;   /* RGB, w*h*3 */
+typedef struct { int w, h; uint8_t *pix; } sky;   /* palette numbers, w*h (the track's palette: see sky_load) */
 typedef struct { float x, y, z, yaw, pitch, roll; } camera;   /* roll: + = right side up */
 
 /*
@@ -125,7 +128,7 @@ static float g_cy = 130.0f;   /* the projection's centre row */
 #define EYE_LINE (getenv("OS_EYE") ? (float)atof(getenv("OS_EYE")) : 0.65f)
 static int   g_vh = 200;      /* rows of the screen the 3D view covers */
 
-static uint32_t *fb;          /* colour                                        */
+static uint8_t  *fb;          /* colour: the palette's number (see show_palette) */
 static float    *zb;          /* 1/depth per pixel; bigger is nearer           */
 static int16_t  *idb;         /* which scene object owns the pixel, -1 = none  */
 static int g_tie_rule = 1;   /* OS_NOTIE=1 switches the same-depth rule off (for comparing) */
@@ -135,13 +138,96 @@ static int g_ground_now, g_obj_sprite;               /* the object being drawn: 
 static unsigned char g_obj_carpet[4096 + MAX_OBJS + 8];   /* this picture: the object is a ground carpet (mesh.carpet) */
 static int   g_tiemark;                           /* OS_TIEMARK, a test (render_frame) */
 static float g_obj_d2[4096 + MAX_OBJS + 8];   /* this picture: camera to each object's own position, squared (by object id) */
-static int16_t  *pxi;         /* palette index of the pixel, -1 = not known (sky) */
 static uint8_t   g_smg[112 * 256];  /* MAPn.SMG, see raster_tri; Screamer 2 makes its own, of 112 rows (s2_blend_make) */
 static int       g_smg_rows = 64;
 static int       g_dbg_quad;        /* OS_S2PUFFQUAD: a test, the dust's square shown whole */
 static int       g_have_smg;
 static const scene *g_scene;
 static uint32_t g_pal[256];   /* MAPn.COL, scaled to 8 bits */
+/*
+ * THE PICTURE IS EIGHT BITS A PIXEL (2026-10-16, for the MiSTer: the 32-bit picture and its
+ * pixels' palette numbers beside it moved twice the memory, and the memory, which the two
+ * processors share, was what a picture's time went to).  fb holds palette numbers, as the
+ * game's own screen did, and is shown through a palette: g_pal, or g_show_src where a picture
+ * is shown through another (Screamer 2's menu: g_s2m_hw).  The game's fades of the whole
+ * picture -- to black, to a colour -- are the palette's as it is shown (show_palette), as they
+ * were the hardware palette's; they are asked for again before each picture (show_picture
+ * puts them back).  A colour no palette has (black for a letterbox, a test's magenta) is the
+ * palette's nearest (pal_near).
+ */
+static const uint32_t *g_show_src = g_pal;
+static float    g_show_fade = 1.0f;                /* to black: 1 = none */
+static uint32_t g_show_to;                         /* towards this colour ... */
+static float    g_show_to_k;                       /* ... so much of the way: 0 = none */
+#define FB_BYTES ((size_t)(FB_W * FB_H) * sizeof *fb)
+
+/* the palette's (g_pal's) colour nearest to rgb, remembered until the palette changes */
+static uint8_t pal_near(uint32_t rgb)
+{
+    static uint32_t seen[64], sum_was = 1;
+    static uint8_t gives[64];
+    static unsigned char ok[64];
+    uint32_t sum = 0;
+    for (int i = 0; i < 256; i++) sum = sum * 31u + g_pal[i];
+    if (sum != sum_was) { sum_was = sum; memset(ok, 0, sizeof ok); }
+    rgb &= 0xffffffu;
+    const unsigned h = (rgb * 2654435761u) >> 26;
+    if (ok[h] && seen[h] == rgb) return gives[h];
+    const int r = (int)(rgb >> 16 & 255), g = (int)(rgb >> 8 & 255), b = (int)(rgb & 255);
+    long best = 1L << 40; int at = 0;
+    for (int i = 0; i < 256; i++) {
+        const long dr = (long)(g_pal[i] >> 16 & 255) - r, dg = (long)(g_pal[i] >> 8 & 255) - g, db = (long)(g_pal[i] & 255) - b;
+        const long d = dr * dr + dg * dg + db * db;
+        if (d < best) { best = d; at = i; }
+    }
+    seen[h] = rgb; gives[h] = (uint8_t)at; ok[h] = 1;
+    return (uint8_t)at;
+}
+
+/* for each palette number, the number of the colour nearest to `share` of it (the game's
+   darkenings: 0x25870's table, 0.75); made again when the palette changes */
+static const uint8_t *pal_darker(float share)
+{
+    static uint8_t t[256];
+    static uint32_t sum_was = 1;
+    static float share_was = -1.0f;
+    uint32_t sum = 0;
+    for (int i = 0; i < 256; i++) sum = sum * 31u + g_pal[i];
+    if (sum == sum_was && share == share_was) return t;
+    sum_was = sum; share_was = share;
+    for (int i = 0; i < 256; i++) {
+        const int r = (int)((float)(g_pal[i] >> 16 & 255) * share), g = (int)((float)(g_pal[i] >> 8 & 255) * share),
+                  b = (int)((float)(g_pal[i] & 255) * share);
+        long best = 1L << 40; int at = 0;
+        for (int q = 0; q < 256; q++) {
+            const long dr = (long)(g_pal[q] >> 16 & 255) - r, dg = (long)(g_pal[q] >> 8 & 255) - g, db = (long)(g_pal[q] & 255) - b;
+            const long d = dr * dr + dg * dg + db * db;
+            if (d < best) { best = d; at = q; }
+        }
+        t[i] = (uint8_t)at;
+    }
+    return t;
+}
+
+/* the palette the picture is shown through now: g_show_src with the fades asked for (the same
+   sums the 32-bit picture's pixels had) */
+static const uint32_t *show_palette(void)
+{
+    static uint32_t out[256];
+    for (int i = 0; i < 256; i++) {
+        uint32_t c = g_show_src[i] | 0xff000000u;
+        if (g_show_to_k > 0.0f) {
+            const float k = g_show_to_k, r = (float)(g_show_to >> 16 & 255), g = (float)(g_show_to >> 8 & 255), b = (float)(g_show_to & 255);
+            c = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) + (r - (float)(c >> 16 & 255)) * k) << 16
+              | (uint32_t)((float)(c >> 8 & 255) + (g - (float)(c >> 8 & 255)) * k) << 8 | (uint32_t)((float)(c & 255) + (b - (float)(c & 255)) * k);
+        }
+        if (g_show_fade < 1.0f)
+            c = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) * g_show_fade) << 16
+              | (uint32_t)((float)(c >> 8 & 255) * g_show_fade) << 8 | (uint32_t)((float)(c & 255) * g_show_fade);
+        out[i] = c;
+    }
+    return out;
+}
 /*
  * SCREAMER 2: A TRACK'S CONDITION (0x130c50, the race record's third word) and what the
  * track loader (0x2ef4e) and the face routines make of it:
@@ -213,11 +299,13 @@ static int sky_load(sky *s, const char *path)
     const int w = (d[8] | d[9] << 8) - (d[4] | d[5] << 8) + 1, h = (d[10] | d[11] << 8) - (d[6] | d[7] << 8) + 1;
     const int bpl = d[66] | d[67] << 8;
     if (w < 1 || h < 1 || w > 4096 || h > 4096) { free(d); return -1; }
-    const uint8_t *pal = d + n - 768;
+    /* (its own palette at the end is the track's, but for a few colours of two tracks -- Screamer's
+       sixth, Screamer 2's third -- where the game's single palette, the track's, is what the
+       original showed: the picture's numbers are taken, and shown through the track's palette) */
     s->w = w;
     s->h = h;
-    s->pix = malloc((size_t)w * h * 3);
-    memset(s->pix, 0, (size_t)w * h * 3);
+    s->pix = malloc((size_t)w * h);
+    memset(s->pix, 0, (size_t)w * h);
     long p = 128;
     for (int y = 0; y < h; y++) {
         int x = 0;
@@ -225,7 +313,7 @@ static int sky_load(sky *s, const char *path)
             int c = d[p++], run = 1;
             if ((c & 0xc0) == 0xc0) { run = c & 0x3f; c = d[p++]; }
             for (; run > 0 && x < bpl; run--, x++)
-                if (x < w) memcpy(s->pix + ((size_t)y * w + x) * 3, pal + 3 * c, 3);
+                if (x < w) s->pix[(size_t)y * w + x] = (uint8_t)c;
         }
     }
     free(d);
@@ -275,9 +363,8 @@ static int sky_load(sky *s, const char *path)
 static jmp_buf *g_next_part;           /* where os_go() jumps back to: the loop in main() */
 
 #ifdef MISTER_HYBRID
-/* MISTER: "update the texture, clear, copy, present" is one call that turns
-   the picture into the screen's 16 bits and shows it at the next field */
-#define SDL_UpdateTexture(t, r, p, pitch) mister_show(os_slot(0), (p), FB_W, FB_H)
+/* MISTER: "update the texture, clear, copy, present" is one call (show_picture:
+   the picture and its palette to the core, at the next field) */
 #define SDL_RenderClear(r)                ((void)0)
 #define SDL_RenderCopy(r, t, a, b)        ((void)0)
 #define SDL_RenderPresent(r)              ((void)0)
@@ -298,6 +385,7 @@ static SDL_Window *sys_window(SDL_Renderer **ren)
     if (!win) {
 #ifdef MISTER_HYBRID
         SDL_SetHint("SDL_MISTER_VSYNC", "1");            /* MISTER: a picture is shown once a field */
+        SDL_SetHint("SDL_MISTER_VIDEO_FORMAT", "INDEX8"); /* MISTER: and is the palette's numbers (fb) */
 #endif
         if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return NULL; }
         /* 4:3, as 320x200 was always meant to be shown; resizable, letterboxed */
@@ -348,6 +436,24 @@ static SDL_Texture *sys_texture(int w, int h)
     os_slot_set(2, tex);
     return tex;
 }
+
+/* the picture (`rows` of fb's width from `pixels`) to the screen, through the palette as shown
+   (show_palette); the fades asked for are put back after it.  The PC: through 32 bits into the
+   texture.  MISTER: the numbers and the palette to the core (mister_show). */
+static void show_pixels(SDL_Texture *tex, const uint8_t *pixels, int rows)
+{
+    const uint32_t *const pal = show_palette();
+#ifdef MISTER_HYBRID
+    (void)tex;
+    mister_show(os_slot(0), pixels, pal, FB_W, rows);
+#else
+    static uint32_t rgb[FB_MAXW * (FB_MAXH + 40)];
+    for (int i = 0; i < FB_W * rows; i++) rgb[i] = pal[pixels[i]];
+    SDL_UpdateTexture(tex, NULL, rgb, FB_W * (int)sizeof(uint32_t));
+#endif
+    g_show_fade = 1.0f; g_show_to_k = 0.0f;
+}
+#define show_picture(tex) show_pixels((tex), fb, FB_H)
 
 /* run another part of the program next (a1 / a2: its arguments), from a clean
    slate; does not come back */
@@ -474,8 +580,14 @@ static void res_init(void)
             "build/dec/GAME/GAMEH.FNT", "build/dec/GAME/GAMEH.SPR", "build/dec/GAME/IMPLET_H.PKC",
             "build/dec/GRAF/MENUH.FNT", "build/dec/GRAF/MENUH.SPR", "build/dec/GRAF/MENU1H.PCX",
         };
-        for (size_t i = 0; i < sizeof need / sizeof need[0]; i++)
-            if (!os_exists(need[i])) { fprintf(stderr, "a wide picture needs %s: not there\n", need[i]); wide = 0; break; }
+        static const char *need2[] = {                   /* (Screamer 2's: STARTH's) */
+            "build/dec/GAME1/GAMEH.FNT", "build/dec/GAME1/GAMEH.SPR", "build/dec/GAME1/MIRROR_H.PKC",
+            "build/dec/GRAF1/MENUH.FNT", "build/dec/GRAF1/MENUH.SPR",
+        };
+        const char **list = os_game() == 2 ? need2 : need;
+        const size_t nlist = os_game() == 2 ? sizeof need2 / sizeof need2[0] : sizeof need / sizeof need[0];
+        for (size_t i = 0; i < nlist; i++)
+            if (!os_exists(list[i])) { fprintf(stderr, "a wide picture needs %s: not there\n", list[i]); wide = 0; break; }
     }
     if (wide) { g_s = 2; g_yd = 2; FB_W = 640; FB_H = 200; }
     if (hi && g_cfg.starting && !getenv("OS_RES"))
@@ -504,6 +616,8 @@ static void res_init(void)
 }
 
 static float g_focal_x, g_focal_y;
+static int g_s2m_band;                               /* (Screamer 2's menu in a taller picture: s2_menu3d) */
+static SDL_Texture *g_s2m_tex;                       /* (... and its picture while it runs) */
 #ifdef MISTER_HYBRID
 static int g_in_race;                                /* a race (or the intro) is set up and running */
 static void race_art_load(void);
@@ -512,10 +626,18 @@ static void race_art_load(void);
 static void tall_follow(void)
 {
     static int quiet = -1;
-    if (quiet < 0) quiet = getenv("OS_TALL") != NULL || !mister_on();
+    if (quiet < 0) quiet = getenv("OS_TALL") != NULL || getenv("OS_WIDE") != NULL || !mister_on();   /* (a test's fixed size) */
+    if (mister_on()) {                               /* the HUD margins, every picture: a change shows at once */
+        mister_hud_margins(&g_hud_top, &g_hud_bot);
+        mister_menu_mask(quiet ? g_tall || g_s2m_band : mister_res_mode() & 1, os_game());
+    }
     if (quiet || !fb || (g_s == 2 && g_yd == 1)) return;
     const int tall = (mister_res_mode() & 1) ? TALL_ROWS : 0;
     const int wide = mister_res_mode() >> 1;
+    if (g_s2m_tex && wide == (g_yd == 2)) {          /* Screamer 2's menu: only the black rows round it */
+        if (tall / 2 != g_s2m_band) { mister_show_wait(); g_s2m_band = tall / 2; g_s2m_tex = sys_texture(FB_W, FB_H + 2 * g_s2m_band); }
+        return;
+    }
     if (tall == g_tall && wide == (g_yd == 2)) return;
     mister_show_wait();                              /* (the last picture may still be on its way out) */
     if (wide != (g_yd == 2)) {
@@ -526,7 +648,7 @@ static void tall_follow(void)
                 os_go(g_argc, g_argc > 1 ? g_argv[1] : NULL, g_argc > 2 ? g_argv[2] : NULL);
             return;
         }
-        if (wide && !os_exists("build/dec/GAME/GAMEH.FNT")) return;
+        if (wide && !os_exists(os_game() == 2 ? "build/dec/GAME1/GAMEH.FNT" : "build/dec/GAME/GAMEH.FNT")) return;
         g_s = wide ? 2 : 1; g_yd = wide ? 2 : 1;
         FB_W = 320 * g_s; FB_H = 200 + g_tall;
         g_clip[1] = FB_W;
@@ -538,7 +660,7 @@ static void tall_follow(void)
     LAY_MID();
     g_vh = FB_H; g_cy = EYE_LINE * (float)FB_H;
     g_clip[3] = FB_H;
-    for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xff000000u; zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
+    { const uint8_t black = pal_near(0); for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = black; zb[i] = 0.0f; idb[i] = -1; } }
     sys_texture(FB_W, FB_H);                         /* the window's size is the core's video mode */
 }
 #endif
@@ -547,27 +669,21 @@ static void tall_follow(void)
 static void pic_put(const uint8_t *pic, int scene)
 {
     const int top = g_tall / 2 * FB_W, rows = FB_H - g_tall, n = FB_W * rows;
-    for (int i = 0; i < top; i++) fb[i] = fb[top + n + i] = 0xff000000u;
-    if (scene) for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = 0; }
+    const uint8_t black = pal_near(0);
+    for (int i = 0; i < top; i++) fb[i] = fb[top + n + i] = black;
+    if (scene) for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; }
     for (int y = 0; y < rows; y++) {                 /* (g_yd: every second row of the picture in a wide one) */
         const uint8_t *from = pic + (size_t)(y * g_yd) * ART_W;
-        uint32_t *to = fb + top + y * FB_W;
-        for (int x = 0; x < FB_W; x++) to[x] = g_pal[from[x]];
-        if (scene) for (int x = 0; x < FB_W; x++) pxi[top + y * FB_W + x] = (int16_t)from[x];
+        memcpy(fb + top + y * FB_W, from, (size_t)FB_W);
     }
 }
 
 /* the backdrop as whole pixels, made once (and by the main thread: sky_paint
    may be another thread's work, and the port's memory is the main thread's) */
-static const uint8_t *g_sky_packed_of;
-static uint32_t *g_sky_packed;
+static const uint8_t *g_sky_packed;
 static void sky_ready(const sky *s)
 {
-    if (!s->pix || g_sky_packed_of == s->pix) return;
-    g_sky_packed_of = s->pix;
-    g_sky_packed = malloc(sizeof(uint32_t) * (size_t)s->w * (size_t)s->h);
-    for (long i = 0; i < (long)s->w * s->h; i++)
-        g_sky_packed[i] = 0xFF000000u | ((uint32_t)s->pix[3 * i] << 16) | ((uint32_t)s->pix[3 * i + 1] << 8) | s->pix[3 * i + 2];
+    g_sky_packed = s->pix;                           /* (the numbers as they are: nothing to make any more) */
 }
 
 static void sky_paint(const float yaw, const float pitch, const float roll,
@@ -575,13 +691,13 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
 {
     (void)focal_x;
     if (getenv("OS_SKYMARK")) {                 /* a test: no backdrop but magenta, to find holes in the scene */
-        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = 0xFFFF00FFu;
+        memset(fb, pal_near(0xff00ff), FB_BYTES);
         return;
     }
     if (!s->pix) {
         /* no backdrop (Screamer 2: indoors, or the condition without one): the clear colour */
-        const uint32_t clear = os_game() == 2 && g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_SKY_FALLBACK;
-        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = clear;
+        const uint8_t clear = os_game() == 2 && g_ground_colour >= 0 ? (uint8_t)g_ground_colour : pal_near(COL_SKY_FALLBACK);
+        memset(fb, clear, FB_BYTES);
         return;
     }
     float cr = cosf(roll), sr = sinf(roll);
@@ -595,7 +711,7 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
     const float top = g_cy / sy + (22.0f - (float)s->h) + focal_y / sy * sinf(pitch);
 
     sky_ready(s);
-    const uint32_t *const packed = g_sky_packed;
+    const uint8_t *const packed = g_sky_packed;
     /*
      * Where a pixel would be with the camera upright -- the backdrop's column
      * and row -- is a straight-line function of the screen's x and y: it is
@@ -604,11 +720,11 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
      * a remainder for every pixel: fifteen milliseconds a picture on the
      * MiSTer.)
      */
-    const uint32_t ground = g_ground_colour >= 0 ? g_pal[g_ground_colour] : COL_GROUND;
+    const uint8_t ground = g_ground_colour >= 0 ? (uint8_t)g_ground_colour : pal_near(COL_GROUND);
     const int w = s->w, h = s->h, pow2 = (w & (w - 1)) == 0;
     const int du = (int)(cr / sx * 65536.0f), dv = (int)(-sr / sx * 65536.0f);
     for (int y = 0; y < g_vh; y++) {
-        uint32_t *row = fb + (size_t)y * FB_W;
+        uint8_t *row = fb + (size_t)y * FB_W;
         const float ax = -FB_W * 0.5f / sx, ay = (g_cy - (float)y) / sy;
         const float ux = ax * cr - ay * sr, uy = ax * sr + ay * cr;
         float fu = off + FB_W * 0.5f / sx + ux;
@@ -618,7 +734,7 @@ static void sky_paint(const float yaw, const float pitch, const float roll,
             /* upright: the whole row is one row of the backdrop, or ground */
             const int v = vi >> 16;
             if (v >= h) { for (int x = 0; x < FB_W; x++) row[x] = ground; continue; }
-            const uint32_t *src = packed + (size_t)(v < 0 ? 0 : v) * w;
+            const uint8_t *src = packed + (size_t)(v < 0 ? 0 : v) * w;
             if (pow2) for (int x = 0; x < FB_W; x++, ui += du) row[x] = src[(ui >> 16) & (w - 1)];
             else for (int x = 0; x < FB_W; x++, ui += du) { int px = (ui >> 16) % w; if (px < 0) px += w; row[x] = src[px]; }
             continue;
@@ -1070,11 +1186,15 @@ static inline int iceil(float x)  { int i = (int)x; return i + (x > (float)i); }
  * foot, a little under the road as drawn, and the row just over the middle fell
  * to the plain test and lost to the road -- a one-pixel line through each puff,
  * long straight streaks when a sliding car's puffs stand side by side (Danik).
+ * Screamer 1's puffs stand at the car's height, up to 136 under the road where
+ * they are (measured: tracks 2, 4), and had the streaks still (Danik,
+ * 2026-10-17): the rule starts 256 over the middle (a puff is 568 high), and
+ * over the middle it allows the 0.85 alone.
  */
 static inline int over_ground(float mine, float there, float py, float gvy, float h)
 {
     const float below = gvy - (g_cy - py) / (g_focal_y * mine);
-    return below > -64.0f && mine > there * 0.85f * h / (h + below);
+    return below > -256.0f && mine > there * 0.85f * h / (h + (below > 0.0f ? below : 0.0f));
 }
 
 /* what raster_tri's rules of depth (they are explained there) say about a
@@ -1092,6 +1212,7 @@ static inline int depth_keep(float mine, float there, int other, int id, int cm,
     return !(mine < there);
 }
 typedef uint32_t __attribute__((may_alias)) depth_bits;       /* a depth read as a whole number: the order is the same */
+
 
 /*
  * A TRIANGLE TO FILL, with everything the filling needs to know about the
@@ -1178,7 +1299,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
         if (c0 > c1) return;
     }
 #ifdef MISTER_HYBRID
-    if (counted) mister_tris++;
+    if (counted) mister_tris++; else mister_helper_cnt[0]++;
 #endif
     const float ia = j->ia, ib = j->ib, ic = j->ic;
     float inv = 1.0f / area;
@@ -1232,7 +1353,6 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
     const float fog = g_fog;
     const int   fogged = fog > 0.0f;
     const int   plain = !glass && !fogged && flat < 0 && !wraps;
-    const uint32_t *const pal = g_pal;
     const uint8_t *const fade = j->fade;
     for (int y = ys; y <= ye; y++) {
         if (!(rows >> (y & 7) & 1)) continue;               /* another lane's row */
@@ -1246,6 +1366,7 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
         if (xs > xe) continue;
 #ifdef MISTER_HYBRID
         if (counted) { mister_pixels += xe - xs + 1; mister_rows++; }    /* MISTER: for the speed line of the log */
+        else { mister_helper_cnt[2] += xe - xs + 1; mister_helper_cnt[1]++; }
 #endif
         const float fx = (float)xs + 0.5f - ax, fy = py - ay;
         float iz = ia + fx * diz + fy * dizy;
@@ -1271,13 +1392,16 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                  as can be: the depths are compared as whole numbers (twice a
                  depth is its bits + 0x00800000), and only a pixel within a
                  factor of two of what is there is put to the rules. */
-              uint32_t *const cp = fb + pi;
+              uint8_t *const cp = fb + pi;
               depth_bits *const zp = (depth_bits *)(zb + pi);
-              int16_t *const ip = idb + pi, *const xp = pxi + pi;
+              int16_t *const ip = idb + pi;
               for (int k_ = 0; k_ < n_; k_++, iz += diz, ui += dui, vi += dvi) {
                   union { float f; uint32_t u; } mz, tz;
                   mz.f = iz * zbias;
                   tz.u = zp[k_];
+                  /* (more than twice as far: depth_keep says no but for a sprite -- without reading
+                     whose the pixel is, which most hidden pixels are, from memory) */
+                  if (mz.u + 0x00800000u < tz.u && !sprite) continue;
                   if (mz.u <= tz.u + 0x00800000u && !depth_keep(mz.f, tz.f, ip[k_], id, cm, sprite, tie, py, gvy, eh)) continue;
                   int tu = ui >> 16, tv = vi >> 16;
                   if ((tu | tv) & ~255) {
@@ -1289,10 +1413,9 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                   unsigned idx = page[o];
                   if (keyed && idx == 0) continue;
                   if (fade) idx = fade[idx];
-                  cp[k_] = pal[idx];
+                  cp[k_] = (uint8_t)idx;
                   zp[k_] = mz.u;
                   ip[k_] = (int16_t)id;
-                  xp[k_] = (int16_t)idx;
               }
               x += n_; pi += n_;
               continue;
@@ -1377,7 +1500,6 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
             uint8_t idx = flat >= 0 ? (uint8_t)flat : page[o];
             if (keyed && idx == 0) continue;       /* routine 64: 0 = nothing */
             if (fade && !glass) idx = fade[idx];
-            uint32_t col = g_pal[idx];
             if (glass) {
                 /*
                  * ROUTINE 224: the texel is not a colour, it is a STRENGTH,
@@ -1392,44 +1514,25 @@ static void raster_job(const tri_job *j, int rows, int counted)      /* rows: bi
                  * road in front of each car, brightening whatever is under
                  * it -- and so are window glass and shadows.
                  *
-                 * It works on palette indices, so the port keeps the index of
-                 * every pixel it draws (pxi).  Sky pixels come from an RGB
-                 * picture and have none; the nearest palette colour is found
-                 * when one is needed.
+                 * It works on palette numbers, which is what the picture is.
                  */
-                if (!g_have_smg) { fb[pi] = mix(fb[pi], col, 0.5f); continue; }
+                if (!g_have_smg) { fb[pi] = pal_near(mix(g_pal[fb[pi]], g_pal[idx], 0.5f)); continue; }
                 if (idx == 0) continue;
-                int under = pxi[pi];
-                if (under < 0) {
-                    uint32_t c0 = fb[pi];
-                    int br = (c0 >> 16) & 0xFF, bg = (c0 >> 8) & 0xFF, bb = c0 & 0xFF;
-                    long best = 1L << 40;
-                    for (int q = 0; q < 256; q++) {
-                        uint32_t pc = g_pal[q];
-                        long dr = (long)((pc >> 16) & 0xFF) - br;
-                        long dg = (long)((pc >> 8) & 0xFF) - bg;
-                        long db = (long)(pc & 0xFF) - bb;
-                        long dd = dr * dr + dg * dg + db * db;
-                        if (dd < best) { best = dd; under = q; }
-                    }
-                }
+                const int under = fb[pi];
                 int row = idx >= g_smg_rows ? g_smg_rows - 1 : idx;
                 if (g_dbg_quad && sprite && row == 48) row = 64;      /* (a test: the dust's square shown whole) */
-                int out = g_smg[row * 256 + under];
-                fb[pi] = g_pal[out];
-                pxi[pi] = (int16_t)out;
+                fb[pi] = g_smg[row * 256 + under];
                 continue;
             }
-            if (fogged)
-                col = mix(col, COL_FOG, 1.0f - expf(-1.0f / (iz * fog)));
-            fb[pi]  = tiewon ? 0xFFFF00FFu : col;      /* (OS_TIEMARK: won on a tie of depth, by the nearer object) */
+            if (fogged)                                /* (OS_FOG, a test: the haze's nearest colour) */
+                idx = pal_near(mix(g_pal[idx], COL_FOG, 1.0f - expf(-1.0f / (iz * fog))));
+            fb[pi]  = tiewon ? pal_near(0xff00ff) : (uint8_t)idx;    /* (OS_TIEMARK: won on a tie of depth, by the nearer object) */
             /* the depth that is KEPT is the biased one too.  Keeping the raw
                depth let a later face that was really behind (a tyre's black
                outer wall after its hub disc, a window's reflection after the
                pillar painted over it) pass the test on a tie and overwrite. */
             zb[pi]  = iz * zbias;
             idb[pi] = (int16_t)id;
-            pxi[pi] = fogged ? -1 : (int16_t)idx;
           }
         }
     }
@@ -1481,7 +1584,9 @@ typedef struct {
 static void frame_clear(float yaw, float pitch, float roll, const sky *s, float focal_x, float focal_y)
 {
     sky_paint(yaw, pitch, roll, s, focal_x, focal_y);
-    for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; pxi[i] = -1; }
+    /* (whose a pixel is, idb, is only ever read where something is drawn already -- a depth is
+       there -- so it is not cleared: half the clearing) */
+    memset(zb, 0, sizeof(float) * (size_t)(FB_W * FB_H));
 }
 
 /*
@@ -2299,7 +2404,7 @@ static void draw_guides(void)
         int x = (int)(FB_W * 0.5f + v.x * g_focal_x / v.z);
         int y = (int)(g_cy - v.y * g_focal_y / v.z);
         if (x < 1 || y < 1 || x >= FB_W - 1 || y >= FB_H - 1) continue;
-        uint32_t col = 0xFFFFFF00u;
+        const uint8_t col = pal_near(0xffff00);
         fb[y * FB_W + x] = col;
         fb[y * FB_W + x + 1] = col;
         fb[(y + 1) * FB_W + x] = col;
@@ -2346,9 +2451,27 @@ static void render_scene(const camera *cam, const sky *s)
     if (!g_scene) { raster_flush(); return; }
     g_tri_listing = 1;
 
+    /* the pieces' places and sizes side by side (they do not move: made once a scene), so that the
+       two thousand far ones are passed over without reading their records -- draw_object's own
+       test of the distance, a little wider (it decides the borderline ones itself) */
+    static const scene *near_of;
+    static float (*near_at)[4];
+    if (near_of != g_scene) {
+        near_of = g_scene;
+        near_at = malloc(sizeof *near_at * (size_t)(g_scene->count + 1));
+        for (int o = 0; near_at && o < g_scene->count; o++) {
+            const scene_object *so = &g_scene->obj[o];
+            near_at[o][0] = so->x; near_at[o][1] = so->y; near_at[o][2] = so->z; near_at[o][3] = so->radius;
+        }
+    }
     /* pass 0: everything solid; pass 1: the see-through materials on top */
     for (int pass = 0; pass < 2; pass++) {
         for (int o = 0; o < g_scene->count; o++) {
+            if (near_at) {
+                const float dx = near_at[o][0] - cam->x, dy = near_at[o][1] - cam->y, dz = near_at[o][2] - cam->z;
+                const float lim = g_drawdist + near_at[o][3];
+                if (dx * dx + dy * dy + dz * dz > lim * lim * 1.001f) continue;
+            }
             const scene_object *so = &g_scene->obj[o];
             g_ground_now = (so->layer == 0);
             if (so->m && layer_wanted(so)) draw_object(so, o, pass, cam);
@@ -2519,7 +2642,7 @@ static void describe_under_crosshair(void)
         if (py < 0) py = 0;
         if (py >= FB_H) py = FB_H - 1;
     } else { px = FB_W / 2; py = (int)g_cy; }
-    int id = idb[py * FB_W + px];
+    int id = zb[py * FB_W + px] > 0.0f ? idb[py * FB_W + px] : -1;          /* (no depth: nobody's, whatever idb says) */
     if (id < 0 || !g_scene) {
         printf("nothing under the crosshair (sky)\n");
         fflush(stdout);
@@ -2550,18 +2673,21 @@ static void describe_under_crosshair(void)
     fflush(stdout);
 }
 
-static void write_ppm(const char *path)
+/* `rows` of fb's width from `pixels`, through the palette as shown */
+static void write_ppm_of(const char *path, const uint8_t *pixels, int rows)
 {
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "cannot write %s\n", path); return; }
-    fprintf(f, "P6\n%d %d\n255\n", FB_W, FB_H);
-    for (int i = 0; i < FB_W * FB_H; i++) {
-        uint32_t c = fb[i];
+    fprintf(f, "P6\n%d %d\n255\n", FB_W, rows);
+    const uint32_t *const pal = show_palette();
+    for (int i = 0; i < FB_W * rows; i++) {
+        uint32_t c = pal[pixels[i]];
         unsigned char rgb[3] = { (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF };
         fwrite(rgb, 1, 3, f);
     }
     fclose(f);
 }
+#define write_ppm(path) write_ppm_of((path), fb, FB_H)
 
 /* the camera's place on the path at parameter t (in samples) */
 static void path_at(const path *r, float t, float cam_height, camera *cam)
@@ -3516,7 +3642,7 @@ static void shot_report(const char *ppm, const camera *cam)
     for (int i = 0; i < nid; i++) { box[4 * i] = box[4 * i + 1] = 1 << 30; box[4 * i + 2] = box[4 * i + 3] = -1; }
     for (int y = 0; y < FB_H; y++)
         for (int x = 0; x < FB_W; x++) {
-            const int id = idb[y * FB_W + x];
+            const int id = zb[y * FB_W + x] > 0.0f ? idb[y * FB_W + x] : -1;      /* (no depth: nobody's, whatever idb says) */
             if (id < 0 || id >= nid) continue;
             cnt[id]++;
             if (x < box[4 * id]) box[4 * id] = x; if (y < box[4 * id + 1]) box[4 * id + 1] = y;
@@ -3630,8 +3756,18 @@ static void s2_camera_show(camera *cam, float t)
     g_hide = (b->view == 2 || b->view == 6) ? g_s2_obj[s2_player()] : NULL;
     /* the scene's rows are the view's, the eye line 0.65 of them (0x12dff -> 0x4f6c4): view
        6 draws only down to the dashboard */
-    if (s2_screen_hi()) { if (b->rows > 0 && b->rows <= 400) { g_vh = b->rows; g_cy = EYE_LINE * (float)g_vh; } }   /* (STARTH: the rows are the screen's own) */
-    else if (b->rows > 0 && b->rows <= 200) { g_vh = b->rows * SY + (b->rows == 200 ? g_tall : 0); g_cy = EYE_LINE * (float)g_vh; }
+    /* (STARTH's rows are the screen's own: 400 is all of it, a wide picture has half of them) */
+    const int rows = s2_screen_hi() ? b->rows / 2 : b->rows;
+    if (rows > 0 && rows <= 200) {
+        if (rows == 200 || !g_tall) { g_vh = rows * SY + (rows == 200 ? g_tall : 0); g_cy = EYE_LINE * (float)g_vh; }
+        else {
+            /* a TALLER PICTURE with view 6's dashboard, which is put down by the bottom's HUD margin
+               (LAY_BOT): the eye line is the rows above it, and the scene goes on behind it and under
+               it to the bottom, as the views go on behind the HUD */
+            g_cy = EYE_LINE * (float)(rows * SY + g_tall - g_hud_bot);
+            g_vh = FB_H;
+        }
+    }
 }
 
 /*
@@ -3641,7 +3777,7 @@ static void s2_camera_show(camera *cam, float t)
  * off (OS_S2MIRROR=1 starts with it on); the game has it as an option of its menu.
  */
 static int g_s2_mirror_have, g_s2_mirror_w, g_s2_mirror_h;
-static uint32_t g_s2_mirror_px[(FB_MAXW / 2) * 100];
+static uint8_t  g_s2_mirror_px[(FB_MAXW / 2) * 100];
 static int16_t g_s2_mirror_frame[FB_MAXW * FB_MAXH];
 
 static void s2_render(const camera *cam, const sky *sk)
@@ -3660,7 +3796,7 @@ static void s2_render(const camera *cam, const sky *sk)
         mc.yaw = atan2f(-cosf(h), sinf(h));
         mc.pitch = s2_half_turn(s2_angle_between(a->angle[0], b->angle[0], t));
         mc.roll = -s2_half_turn(s2_angle_between(a->angle[2], b->angle[2], t));
-        g_vh = s2_screen_hi() ? m.rows : m.rows * SY; g_cy = EYE_LINE * (float)g_vh;
+        g_vh = s2_screen_hi() ? m.rows / g_yd : m.rows * SY; g_cy = EYE_LINE * (float)g_vh;
         g_hide = g_s2_obj[s2_player()];                       /* (0x2b6b4: the car and its shadow are not in it) */
         if (g_s2_shadow[0]) { shadow_z = g_s2_shadow[0]->z; g_s2_shadow[0]->z = -1.0e6f; }
         render_frame(&mc, sk);
@@ -3674,7 +3810,8 @@ static void s2_render(const camera *cam, const sky *sk)
     }
     render_frame(cam, sk);
     if (g_s2_mirror_have) {
-        const int x0 = 80 * g_s, y0 = 14 * SY;
+        LAY_TOP();                                            /* (the mirror is with the top's things in a taller picture) */
+        const int x0 = 80 * g_s, y0 = 14 * SY + g_oy;
         for (int y = 0; y < g_s2_mirror_h && y0 + y < FB_H; y++)
             for (int x = 0; x < g_s2_mirror_w && x0 + x < FB_W; x++)
                 fb[(y0 + y) * FB_W + x0 + x] = g_s2_mirror_px[y * (FB_MAXW / 2) + x];
@@ -3780,6 +3917,9 @@ static int   g_intro;              /* this run is the intro: a race with nobody 
    second / third set of props, 4 the countdown stands still, 0x10 the picture
    is mirrored (and the steering with it), 0x20 it is upside down */
 static int   g_cheat;
+#ifdef MISTER_HYBRID
+static int   g_cheat_typed;        /* MISTER: the typed words' part of it; the core's Cheats page goes with it */
+#endif
 static float g_record_lap, g_record_shown;      /* 0x1d268 and the text at 0x1f88 */
 static float g_res_lap, g_res_total;            /* a finished race waiting to be entered */
 static int   g_res_pending, g_res_laps;
@@ -3908,6 +4048,18 @@ static int    g_total_laps = 3;        /* the game's option at 0x1d2ac, + 1 */
 #define MODE_ATTACK 4
 static int    g_mode = 1, g_perfect, g_attack_won;
 static int    g_replay, g_replay_seen, g_dialog, g_rpl_n, g_rpl_at;
+#ifdef MISTER_HYBRID
+/* MISTER: the core's Cheats page in Screamer's race, every picture: its switches turn over what the
+   typed words left (CLOCK, MIRRO and UPDOW turn a bit over each time, as the game's do), its Props
+   other than Normal are MONTY's / JOINT's set.  Not in the intro, nor in a replay, which is the
+   race as it was driven. */
+static void cheats_follow(void)
+{
+    if (g_intro || os_game() != 1 || g_replay) return;
+    const int osd = mister_cheats();
+    g_cheat = (g_cheat_typed & ~0x37) | ((g_cheat_typed ^ osd) & 0x34) | ((osd & 3) ? (osd & 3) : (g_cheat_typed & 3));
+}
+#endif
 static float  g_end_clock, g_rpl_stray;
 static float  g_carnage_time = 20.0f;
 #define GATES_MAX 64
@@ -4326,9 +4478,13 @@ static void smoke_dump(void)
     if (!getenv("OS_SMOKEDUMP") || n++ % 100) return;
     for (int i = 0; i < PUFFS; i++)
         if (g_puff[i].obj)
-            printf("  puff %d on=%d phase %.2f at %.0f, %.0f, %.0f  (car %.0f, %.0f, %.0f) frame %d\n",
+        {
+            float road = 0.0f;
+            const int hit = track_under(g_puff[i].obj->x, g_puff[i].obj->y, 1, &road);
+            printf("  puff %d on=%d phase %.2f at %.0f, %.0f, %.0f  (car %.0f, %.0f, %.0f) frame %d, road %s%.0f\n",
                    i, g_puff[i].on, g_puff[i].phase, g_puff[i].obj->x, g_puff[i].obj->y,
-                   g_puff[i].obj->z, g_pc.x, g_pc.y, g_pc.z, g_puff[i].obj->phase);
+                   g_puff[i].obj->z, g_pc.x, g_pc.y, g_pc.z, g_puff[i].obj->phase, hit ? "" : "(none) ", road);
+        }
 }
 
 /*
@@ -4851,7 +5007,7 @@ static void pkc_draw(const int16_t *pic)
        each goes -- in a wide picture only the even rows have a place */
     static struct { const int16_t *pic; int n, loads; int *run; } known[6];
     int k = 0;
-    uint32_t *const to = fb + g_oy * FB_W;                 /* (a picture is 200 rows of the layout: see g_tall) */
+    uint8_t *const to = fb + g_oy * FB_W;                  /* (a picture is 200 rows of the layout: see g_tall) */
     while (k < 6 && known[k].pic && known[k].pic != pic) k++;
     if (k == 6) k = 0;
     if (known[k].pic != pic || known[k].loads != g_pkc_loads) {
@@ -4875,9 +5031,9 @@ static void pkc_draw(const int16_t *pic)
     }
     for (int r = 0; r < known[k].n; r++) {
         const int16_t *from = pic + known[k].run[3 * r];
-        uint32_t *at = to + known[k].run[3 * r + 1];
+        uint8_t *at = to + known[k].run[3 * r + 1];
         const int len = known[k].run[3 * r + 2];
-        for (int i = 0; i < len; i++) at[i] = g_pal[from[i]];
+        for (int i = 0; i < len; i++) at[i] = (uint8_t)from[i];
     }
 }
 
@@ -5873,7 +6029,7 @@ static void dash_load(int model)
     g_have_dash = (n == 29);
 }
 
-static void dash_line(int x0, int y0, int x1, int y1, uint32_t col)
+static void dash_line(int x0, int y0, int x1, int y1, uint8_t col)
 {
     int dx = abs(x1 - x0), dy = abs(y1 - y0), n = dx > dy ? dx : dy;
     for (int i = 0; i <= n; i++) {
@@ -5890,7 +6046,7 @@ static void dash_needle(int px, int py, int len, float angle, int colour)
     px *= g_s; py *= g_s; len *= g_s;
     int tx = (int)((float)px + (float)len * sinf(a));
     int ty = (int)((float)py - (float)len * cosf(a));
-    uint32_t col = g_pal[colour];
+    const uint8_t col = (uint8_t)colour;
     dash_line(px, py, tx, ty, col);
     float b = a + 1.5707964f;
     dash_line((int)((float)px + sinf(b)), (int)((float)py - cosf(b)), tx, ty, col);
@@ -6023,8 +6179,7 @@ static void hud_put(int x, int y, int idx)
     if (g_yd == 2) y >>= 1;                          /* (a wide picture: two rows of the high set to one of the screen) */
     y += g_oy;
     if (x < g_clip[0] || x >= g_clip[1] || y < g_clip[2] || y >= g_clip[3]) return;
-    fb[y * FB_W + x] = g_pal[idx & 255];
-    if (pxi) pxi[y * FB_W + x] = (int16_t)(idx & 255);   /* (the colour's number too: what is darkened, blended, faded) */
+    fb[y * FB_W + x] = (uint8_t)idx;
 }
 
 /* 0x24fc0 with draw = 1, 0x25448 with draw = 0.  Positions and the width
@@ -6093,13 +6248,21 @@ static void hud_sprite_px(int x, int y, int n)
 {
     if (n < 0 || n >= g_nspr) return;
     const hud_sprite *sp = &g_spr[n];
-    for (int r = 0; r < sp->h; r++)
-        for (int c = 0; c < sp->w; c++) {
-            int v = g_spr_px[sp->at + r * sp->w + c];
-            if (!v) continue;
-            if (g_yd == 2 && ((y + sp->oy + r) & 1) && r > 0 && g_spr_px[sp->at + (r - 1) * sp->w + c]) continue;   /* (as in hud_text) */
-            hud_put(x + sp->ox + c, y + sp->oy + r, v);
+    /* (hud_put's sums and clipping, a row at a time) */
+    const int x0 = x + sp->ox;
+    const int c0 = x0 < g_clip[0] ? g_clip[0] - x0 : 0, c1 = x0 + sp->w > g_clip[1] ? g_clip[1] - x0 : sp->w;
+    if (c0 >= c1) return;
+    for (int r = 0; r < sp->h; r++) {
+        const int yy = y + sp->oy + r, sy = (g_yd == 2 ? yy >> 1 : yy) + g_oy;
+        if (sy < g_clip[2] || sy >= g_clip[3]) continue;
+        const uint8_t *const from = g_spr_px + sp->at + r * sp->w, *const above = from - sp->w;
+        uint8_t *const to = fb + sy * FB_W + x0;
+        const int odd = g_yd == 2 && (yy & 1) && r > 0;        /* (as in hud_text) */
+        for (int c = c0; c < c1; c++) {
+            const uint8_t v = from[c];
+            if (v && !(odd && above[c])) to[c] = v;
         }
+    }
 }
 
 /* ... and at a place in 320 x 200 units */
@@ -6140,32 +6303,11 @@ static void hud_radar(void)
     if (!g_radar_zoom) return;
     const car_state *c = &g_pc;
     g_clip[0] = 4 * g_s; g_clip[1] = 0x4c * g_s; g_clip[2] = 0x7c * SY + g_oy; g_clip[3] = 0xc4 * SY + g_oy;
-    /* The search through the palette for every pixel of the window was 45 %
-       of a hi-res frame.  The answer only depends on the pixel's colour, so
-       it is looked up once a colour and remembered (the game does the same
-       thing with a table built once, 0x25870). */
-    static uint32_t seen[4096], gives[4096], pal_sum;
-    static int      seen_ok[4096];
-    uint32_t sum = 0;
-    for (int i = 0; i < 256; i++) sum = sum * 31u + g_pal[i];
-    if (sum != pal_sum) { pal_sum = sum; memset(seen_ok, 0, sizeof seen_ok); }
+    /* every pixel of the window to the palette's nearest of three quarters of it: the game's
+       table, built once a palette (0x25870) */
+    const uint8_t *const dark = pal_darker(0.75f);
     for (int y = g_clip[2]; y < g_clip[3]; y++)
-        for (int x = g_clip[0]; x < g_clip[1]; x++) {
-            uint32_t p = fb[y * FB_W + x];
-            uint32_t h = ((p >> 16 & 255) * 7u + (p >> 8 & 255) * 61u + (p & 255) * 131u) & 4095u;
-            if (seen_ok[h] && seen[h] == p) { fb[y * FB_W + x] = gives[h]; continue; }
-            int r = (int)((p >> 16) & 255) * 3 / 4, g = (int)((p >> 8) & 255) * 3 / 4,
-                b = (int)(p & 255) * 3 / 4, best = 0;
-            long bd = 1L << 30;
-            for (int i = 0; i < 256; i++) {
-                int dr = (int)((g_pal[i] >> 16) & 255) - r, dg = (int)((g_pal[i] >> 8) & 255) - g,
-                    db = (int)(g_pal[i] & 255) - b;
-                long d = (long)dr * dr + dg * dg + db * db;
-                if (d < bd) { bd = d; best = i; }
-            }
-            seen[h] = p; gives[h] = g_pal[best]; seen_ok[h] = 1;
-            fb[y * FB_W + x] = g_pal[best];
-        }
+        for (int x = g_clip[0]; x < g_clip[1]; x++) fb[y * FB_W + x] = dark[fb[y * FB_W + x]];
     float s = (float)(g_radar_zoom * g_s) / 32768.0f, cs = cosf(c->yaw), sn = sinf(c->yaw);
     for (int i = 0; g_scene && i < g_scene->nwall; i++) {
         const scene_wall *w = &g_scene->wall[i];
@@ -6336,7 +6478,7 @@ static void cd_key(int key)
     static int *const vol[3] = { &g_cfg.vol_cd, &g_cfg.vol_fx, &g_cfg.vol_mu };
     if (key == SDLK_LEFT && g_cd.sel > 0)  { g_cd.sel--; g_cd.press = 0.0f; }
     if (key == SDLK_RIGHT && g_cd.sel < 6) { g_cd.sel++; g_cd.press = 0.0f; }
-    if (key == SDLK_ESCAPE) cd_close();
+    if (key == SDLK_ESCAPE || key == SDLK_PAUSE) { cd_close(); return; }      /* (PAUSE: START, out of it again) */
     if (key != SDLK_RETURN && key != SDLK_KP_ENTER) return;
     g_cd.press = 0.01f;
     switch (g_cd.sel) {
@@ -6384,7 +6526,7 @@ static void cd_draw(float dt)
         for (int i = 0; i < *vol[g_cd.chan] / 1024; i++)
             for (int y = 0x45 * SY + g_oy; y <= 0x4a * SY + SY - 1 + g_oy; y++)
                 for (int x = (0x55 + i * 3) * g_s; x < (0x55 + i * 3) * g_s + g_s; x++)
-                    if (x < FB_W && y < FB_H) fb[y * FB_W + x] = g_pal[bar_colour[(i / 10) & 3]];
+                    if (x < FB_W && y < FB_H) fb[y * FB_W + x] = (uint8_t)bar_colour[(i / 10) & 3];
     }
 }
 
@@ -6444,21 +6586,7 @@ static void s2_dark_box(int x, int y, int w, int h)
     x &= ~3; w &= ~3;
     for (int yy = y * SY + g_oy; yy < (y + h) * SY + g_oy && yy < FB_H; yy++)
         for (int xx = x * g_s; xx < (x + w) * g_s && xx < FB_W; xx++) {
-            const uint32_t c = fb[yy * FB_W + xx] | 0xFF000000u;
-            static uint32_t seen[256]; static uint8_t is[256]; static int ok[256];
-            const unsigned hsh = (c * 2654435761u) >> 24;
-            int idx = -1;
-            if (ok[hsh] && seen[hsh] == c) idx = is[hsh];
-            else {
-                long least = 1L << 40;
-                for (int q = 0; q < 256; q++) {
-                    const long dr = (long)((g_pal[q] >> 16) & 255) - (long)((c >> 16) & 255), dg = (long)((g_pal[q] >> 8) & 255) - (long)((c >> 8) & 255),
-                               db = (long)(g_pal[q] & 255) - (long)(c & 255);
-                    if (dr * dr + dg * dg + db * db < least) { least = dr * dr + dg * dg + db * db; idx = q; }
-                }
-                seen[hsh] = c; is[hsh] = (uint8_t)idx; ok[hsh] = 1;
-            }
-            fb[yy * FB_W + xx] = g_pal[dark[idx]];
+            fb[yy * FB_W + xx] = dark[fb[yy * FB_W + xx]];
         }
 }
 
@@ -6523,7 +6651,7 @@ static void s2_dash_needle(const int32_t *r, float part)
         const int cx = r[0], cy = r[1];
         const int tx = (int)(cosf(a) * (float)r[2] / 1.0f + (float)cx), ty = (int)((float)cy - sinf(a) * (float)r[2] / 1.0f);
         const float b = a + 1.5707964f, c = b - 3.1415927f;
-        const uint32_t col = g_pal[12];
+        const uint8_t col = 12;
         dash_line(cx, cy, tx, ty, col);
         dash_line((int)(cosf(b) + (float)cx), (int)((float)cy - sinf(b)), tx, ty, col);
         dash_line((int)(cosf(c) + (float)cx), (int)((float)cy - sinf(c)), tx, ty, col);
@@ -6532,7 +6660,7 @@ static void s2_dash_needle(const int32_t *r, float part)
     const int cx = r[0] / 2, cy = r[1] / 2;
     const int tx = (int)(cosf(a) * (float)r[2] * 0.5f + (float)cx), ty = (int)((float)cy - sinf(a) * (float)r[2] * 0.5f);
     const float b = a + 1.5707964f, c = b - 3.1415927f;
-    const uint32_t col = g_pal[12];
+    const uint8_t col = 12;
     dash_line(cx * g_s, cy * g_s, tx * g_s, ty * g_s, col);
     dash_line((int)(cosf(b) + (float)cx) * g_s, (int)((float)cy - sinf(b)) * g_s, tx * g_s, ty * g_s, col);
     dash_line((int)(cosf(c) + (float)cx) * g_s, (int)((float)cy - sinf(c)) * g_s, tx * g_s, ty * g_s, col);
@@ -6550,7 +6678,7 @@ static void s2_dash_draw(const s2_hud_state *h)
     }
     /* (the scene stops at the view's rows; where the picture is open below them -- a few
        pixels at its upper edge -- the port leaves black: its own) */
-    for (int y = g_vh; y < FB_H; y++) for (int x = 0; x < FB_W; x++) fb[y * FB_W + x] = 0xff000000u;
+    if (g_vh < FB_H) memset(fb + g_vh * FB_W, pal_near(0), (size_t)((FB_H - g_vh) * FB_W));
     if (g_s2_cock_ok) pkc_draw(g_s2_cock);
     const int gear = h->gear < 0 ? 0 : h->gear > 4 ? 4 : h->gear;
     if (s2_screen_hi()) hud_sprite_px(r[12 + gear * 2], r[13 + gear * 2], h->dash * 5 + 0x46 + gear);
@@ -6585,24 +6713,21 @@ static void s2_attract_start(void)
     g_s2_att_n = text_lines("build/dec/LOCAL/ATTRACT.TXT", g_s2_att_txt, 160);
 }
 
-static void s2_attract_fill(uint32_t to, float k)      /* every pixel k of the way to the colour */
+static void s2_attract_fill(uint32_t to, float k)      /* every pixel k of the way to the colour: the palette's, as shown */
 {
-    const float r = (float)(to >> 16 & 255), g = (float)(to >> 8 & 255), b = (float)(to & 255);
-    for (int i = 0; i < FB_W * FB_H; i++) {
-        const uint32_t c = fb[i];
-        fb[i] = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) + (r - (float)(c >> 16 & 255)) * k) << 16
-              | (uint32_t)((float)(c >> 8 & 255) + (g - (float)(c >> 8 & 255)) * k) << 8 | (uint32_t)((float)(c & 255) + (b - (float)(c & 255)) * k);
-    }
+    if (g_show_to_k > 0.0f && !(to & 0xffffffu)) { g_show_fade *= 1.0f - k; return; }   /* (to black after a colour already) */
+    g_show_to = to; g_show_to_k = k;
 }
 
 static void s2_attract_draw(float dt)
 {
     LAY_TOP();
     if (g_s2_att.stage == 0) {
-        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
+        memset(fb, 0, FB_BYTES);
         g_s2_att.group = 2; g_s2_att.stage = 1; g_s2_att.x = s2_screen_hi() ? 2000.0f : 1000.0f; g_s2_att.pause = 0.0f;
     } else if (g_s2_att.stage < 3) {
-        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = g_pal[0];
+        memset(fb, 0, FB_BYTES);
+        LAY_MID();                                       /* (a taller picture: the title cards in the middle) */
         const int n = g_s2_att.stage + 0x6d;
         if (n < g_nspr) {
             /* (STARTH: the logo's place in the screen's own pixels -- from 2000, aimed at twice the
@@ -6633,10 +6758,12 @@ static void s2_attract_draw(float dt)
         s2_sprite_centred(4, 0x71);
         if (g_s2_att.pause == 0.0f) {
             int k = 0;
+            LAY_MID();                                   /* (the credits in the middle, the logo at the top) */
             while (g_s2_att.group + k < g_s2_att_n && g_s2_att_txt[g_s2_att.group + k][0] != '#') {
                 s2_text_centred(k * 0x10 + 100, g_s2_att_txt[g_s2_att.group + k], 0, 1, 2);
                 k++;
             }
+            LAY_TOP();
             if (k == 0) { g_s2_att.stage = 5; g_s2_att.end = 1; }
             else {
                 g_s2_att.shown -= dt * 0.25f;
@@ -6694,7 +6821,7 @@ static void s2_pause_open(void)
 static void s2_pause_line(int x0, int y0, int y1, int colour)
 {
     for (int y = y0 * SY + g_oy; y < (y1 + 1) * SY + g_oy && y < FB_H; y++)
-        for (int x = x0 * g_s; x < x0 * g_s + g_s && x < FB_W; x++) fb[y * FB_W + x] = g_pal[colour & 255];
+        for (int x = x0 * g_s; x < x0 * g_s + g_s && x < FB_W; x++) fb[y * FB_W + x] = (uint8_t)colour;
 }
 
 static void s2_pause_draw(float dt)
@@ -6750,6 +6877,7 @@ static void s2_pause_close(int pick)
 /* a key on the pause screen: 1 = the race is to end (EXIT) */
 static int s2_pause_key(SDL_Keycode k)
 {
+    if (k == SDLK_PAUSE) { g_s2_pz.cd = 0; s2_pause_close(0); return 0; }      /* (START: resume, wherever the cursor is) */
     if (g_s2_pz.cd) {
         if (k == SDLK_ESCAPE) { g_s2_pz.cd = 0; s2_pause_close(0); return 0; }
         if (k == SDLK_LEFT && g_s2_pz.cd_sel > 0) g_s2_pz.cd_sel--;
@@ -6905,7 +7033,7 @@ static void s2_hud_draw(float dt)
         int team, view;
         if (s2_replay_band(&team, &view)) {
             static const int word[7] = { -1, 29, 30, 31, 32, -1, 33 };
-            LAY_TOP();
+            LAY_BOT();
             s2_dark_box(0, 0xb4, 0x140, 0x14);
             if (view >= 0 && view < 7 && word[view] >= 0 && team >= 0 && team < 4) {
                 snprintf(buf, sizeof buf, "%s - %s", g_s2_team[team], g_s2_gt[word[view]]);
@@ -6919,6 +7047,7 @@ static void s2_hud_draw(float dt)
      * on a darkened band -- left and right choose, ENTER takes -- and the track's best times.
      */
     if (h.finished) {
+        LAY_MID();                                       /* (a taller picture: the end's screen in the middle) */
         if (g_s2_end_t < 4.0f && (h.mode & 4)) {
             /* time attack's (0x48980): the total and the best lap */
             s2_text_centred(0x3c, g_s2_text[1], 0, 1, 2);
@@ -7008,6 +7137,7 @@ static void s2_hud_draw(float dt)
         }
         g_s2_end_t += dt;
     }
+    LAY_TOP();
     /* the timers the screen itself runs down (0x45882) */
     *h.message_left -= dt; if (*h.message_left < 0.0f) *h.message_left = 0.0f;
     *h.best_lap_left -= dt; if (*h.best_lap_left < 0.0f) *h.best_lap_left = 0.0f;
@@ -7107,10 +7237,9 @@ static void hud_draw(int instruments)
 /* 0x219d0: the picture darkened three times, the question, YES and NO */
 static void dialog_draw(int tick)
 {
-    for (int i = 0; i < FB_W * FB_H; i++) {
-        uint32_t c = fb[i];
-        uint32_t r = (c >> 16 & 255) * 27 / 64, g = (c >> 8 & 255) * 27 / 64, b = (c & 255) * 27 / 64;
-        fb[i] = 0xff000000u | r << 16 | g << 8 | b;
+    {   /* (three times the game's table of three quarters) */
+        const uint8_t *const d = pal_darker(0.75f);
+        for (int i = 0; i < FB_W * FB_H; i++) fb[i] = d[d[d[fb[i]]]];
     }
     int blink = tick & 0x10;
     hud_text_centred(0x34, g_text[19], 0, 2);
@@ -8594,9 +8723,7 @@ static void champ_darken(int x0, int y0, int w, int h)           /* 0x25cc8: to 
     x0 *= g_s; y0 = y0 * SY + g_oy; w *= g_s; h *= SY;
     for (int y = y0; y < y0 + h && y < FB_H; y++)
         for (int x = x0; x < x0 + w && x < FB_W; x++) {
-            uint32_t c = fb[y * FB_W + x];
-            uint32_t r = (c >> 16 & 255) * 3 / 4, g = (c >> 8 & 255) * 3 / 4, b = (c & 255) * 3 / 4;
-            fb[y * FB_W + x] = 0xff000000u | r << 16 | g << 8 | b;
+            fb[y * FB_W + x] = pal_darker(0.75f)[fb[y * FB_W + x]];
         }
 }
 
@@ -9006,7 +9133,7 @@ static void tiny_number(int value, int line)
                         for (int xx = -1 + pass; xx < k + 1 - pass; xx++) {
                             int x = x0 + (c * 4 + q) * k + xx, y = y0 + r * k + yy;
                             if (x >= 0 && y >= 0 && x < FB_W && y < FB_H)
-                                fb[y * FB_W + x] = pass ? 0xffffff00u : 0xff000000u;
+                                fb[y * FB_W + x] = pass ? pal_near(0xffff00) : pal_near(0);
                         }
                 }
 }
@@ -9064,17 +9191,16 @@ static int menu_run(int *track, int *car)
         return 0;
     }
     g_focal_x = GAME_FOCAL * (float)g_s; g_focal_y = GAME_FOCAL * (float)SY;
-    fb  = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
+    fb  = malloc(sizeof *fb       * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
     zb  = malloc(sizeof(float)    * FB_MAXW * (FB_MAXH + TALL_ROWS));
     idb = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    pxi = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
+    if (g_s == 2 && (!fb || !zb || !idb)) res_fail("no memory for the bigger picture");
     static scene empty;                      /* draw_object looks at the scene's count */
     g_scene = &empty;
 
     static uint8_t bg_main[FB_MAXW * FB_MAXH], bg_cars[FB_MAXW * FB_MAXH];
     static uint32_t pal_main[256], pal_cars[256];
-    static uint32_t frozen[FB_MAXW * FB_MAXH];
+    static uint8_t frozen[FB_MAXW * (FB_MAXH + 40)];
     pcx_load("build/dec/GRAF/MENU1L.PCX", bg_main, pal_main);
     pcx_load("build/dec/GRAF/MENU4L.PCX", bg_cars, pal_cars);     /* 0x1110: the cars' picture */
     ms_load(specs, nspec);
@@ -9197,10 +9323,25 @@ static int menu_run(int *track, int *car)
         }
         tick++;
         g_menu_tick = tick;
+        int osd_aburn = 0;
+#ifdef MISTER_HYBRID
+        {
+            /* MISTER: the core's Cheats page.  Its two triggers do what TAZOR and INVER do (kept with
+               the records); Afterburner Difficulty is ABURN's while it is on: AFTERBURNER as it is
+               switched on, and in the difficulty's line */
+            static int aburn_was = -1;
+            const int t = mister_triggers();
+            if (t & 1) { g_save.bullet = 1; save_write(); snd_play(8); printf("cheat: TAZOR (the core's)\n"); fflush(stdout); }
+            if (t & 2) { g_save.level = 9; save_write(); snd_play(8); printf("cheat: INVER (the core's)\n"); fflush(stdout); }
+            osd_aburn = mister_cheat_afterburner();
+            if (osd_aburn && aburn_was == 0) g_opt_diff = 3;
+            aburn_was = osd_aburn;
+        }
+#endif
         g_track_max = unlock ? 11 : g_save.level + 2 > 11 ? 11 : g_save.level + 2;
         g_car_max = (unlock || g_save.bullet) ? 12 : 11;
         if (g_car_max > g_nmenu_car - 1) g_car_max = g_nmenu_car - 1;
-        g_page_options[OPT_DIFF].max = (unlock || g_save.bullet || cheat_diff) ? 3 : 2;            /* AFTERBURNER */
+        g_page_options[OPT_DIFF].max = (unlock || g_save.bullet || cheat_diff || osd_aburn) ? 3 : 2;            /* AFTERBURNER */
         if (g_opt_diff > g_page_options[OPT_DIFF].max) g_opt_diff = g_page_options[OPT_DIFF].max;
         /* OS_MENU_KEYS="DEUS..." presses keys by itself, one every 1.2 s, for
            testing: U D L R, E enter, X escape, S save a picture, a-z typed */
@@ -9216,7 +9357,7 @@ static int menu_run(int *track, int *car)
                     if (k == 'S') {
                         char name[64];
                         snprintf(name, sizeof name, "menu_script_%d.ppm", script_shots++);
-                        memcpy(fb, frozen, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+                        memcpy(fb, frozen, FB_BYTES);
                         write_ppm(name);
                     } else {
                         SDL_Event e;
@@ -9254,15 +9395,10 @@ static int menu_run(int *track, int *car)
             if (dt > 0.1f) dt = 0.1f;
         }
 #define MENU_SHOW() do { \
-            memcpy(frozen, fb, sizeof(uint32_t) * (size_t)(FB_W * FB_H)); \
-            if (fade < 1.0f) \
-                for (int i_ = 0; i_ < FB_W * FB_H; i_++) { \
-                    uint32_t c_ = fb[i_]; \
-                    fb[i_] = 0xff000000u | (uint32_t)((float)(c_ >> 16 & 255) * fade) << 16 \
-                           | (uint32_t)((float)(c_ >> 8 & 255) * fade) << 8 | (uint32_t)((float)(c_ & 255) * fade); \
-                } \
+            memcpy(frozen, fb, FB_BYTES); \
+            if (fade < 1.0f) g_show_fade = fade; \
             fps_draw(); \
-            SDL_UpdateTexture(tex, NULL, fb, FB_W * sizeof(uint32_t)); } while (0)
+            show_picture(tex); } while (0)
         /* the game's screens: 0 the pages, 2 cars, 3 tracks, 4 the name, 5 championship, 6 records */
         int want = page == 6 ? 5 : page == 8 ? 6 : page == -2 ? 4 : page == -1 ? (screen == 0 ? 3 : 2) : 0;
         /* 0x27f9c: the pages left alone for 30 s (0xedc) give way to the intro again */
@@ -9287,7 +9423,7 @@ static int menu_run(int *track, int *car)
                     view_setup(&c);
                     ms_letters_draw(&c);
                     ms_logos(0.0f);
-                } else memcpy(fb, frozen, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+                } else memcpy(fb, frozen, FB_BYTES);
                 float keep = fade;
                 MENU_SHOW();
                 memcpy(frozen, fb, 0);
@@ -9895,12 +10031,7 @@ static void intro_draw(void)
             i++; idx++;
         } while (idx < g_nattr && g_attr[idx][0] != '#');
     }
-    if (g_in.fade < 1.0f)
-        for (int k = 0; k < FB_W * FB_H; k++) {
-            uint32_t c = fb[k];
-            fb[k] = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) * g_in.fade) << 16
-                  | (uint32_t)((float)(c >> 8 & 255) * g_in.fade) << 8 | (uint32_t)((float)(c & 255) * g_in.fade);
-        }
+    if (g_in.fade < 1.0f) g_show_fade = g_in.fade;           /* (the palette's, as the picture is shown) */
 }
 
 static int session(int argc, char **argv);
@@ -9969,13 +10100,13 @@ static int loading_show(int track)
     if (cheat & 0x10)
         for (int y = 0; y < FB_H; y++)
             for (int x = 0; x < FB_W / 2; x++) {
-                uint32_t t = fb[y * FB_W + x];
+                uint8_t t = fb[y * FB_W + x];
                 fb[y * FB_W + x] = fb[y * FB_W + FB_W - 1 - x]; fb[y * FB_W + FB_W - 1 - x] = t;
             }
     if (cheat & 0x20)
         for (int y = 0; y < FB_H / 2; y++)
             for (int x = 0; x < FB_W; x++) {
-                uint32_t t = fb[y * FB_W + x];
+                uint8_t t = fb[y * FB_W + x];
                 fb[y * FB_W + x] = fb[(FB_H - 1 - y) * FB_W + x]; fb[(FB_H - 1 - y) * FB_W + x] = t;
             }
     hud_text_centred(0x50, g_menu_text[47], 3, 0);
@@ -9985,7 +10116,7 @@ static int loading_show(int track)
     Uint32 t0 = SDL_GetTicks();
     do {
         fps_draw();
-        SDL_UpdateTexture(tex, NULL, fb, FB_W * (int)sizeof(uint32_t));
+        show_picture(tex);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
@@ -10078,7 +10209,7 @@ static int s2_champ_race(s2_champ_t *c)
 static void s2_menu_show(SDL_Renderer *ren, SDL_Texture *tex)
 {
     fps_draw();
-    SDL_UpdateTexture(tex, NULL, fb, FB_W * (int)sizeof(uint32_t));
+    show_picture(tex);
     SDL_RenderClear(ren);
     SDL_RenderCopy(ren, tex, NULL, NULL);
     SDL_RenderPresent(ren);
@@ -10089,13 +10220,12 @@ static void s2_menu_show(SDL_Renderer *ren, SDL_Texture *tex)
  * (s2r_car.h, from 0x38540); the engine calls they make are answered in s2_menu_hooks.h, the
  * drawing ones by these.  The game draws into a picture of palette numbers and shows it through
  * the hardware palette, which the fades change (0x512f1 -> 0x51664); the port draws into its
- * own picture, keeping each pixel's number (pxi), and shows that through the palette last set.
+ * own picture of palette numbers too (fb), and shows that through the palette last set.
  * The game's palette (0x1338cc, 64 levels) is the one everything is drawn with (g_pal).
  */
 static uint32_t g_s2m_hw[256];                 /* the palette as last set (0x51664): what is shown */
 static uint8_t  g_s2m_base[768];               /* the game's palette as g_pal has it now */
 static SDL_Renderer *g_s2m_ren;
-static SDL_Texture  *g_s2m_tex;
 static int g_s2m_closed;
 static uint8_t g_s2m_key[128];                 /* the keys down, by the PC's scancode (0x4cc25's table) */
 static uint32_t g_s2m_ticks;
@@ -10115,8 +10245,19 @@ void s2m_palette(const uint8_t *six)           /* 0x51664: the palette shown */
     for (int i = 0; i < 256; i++) g_s2m_hw[i] = s2m_rgb(six + 3 * i);
 }
 /* HIGH RESOLUTION (STARTH, docs/NOTES2.md S2-9): the menu at 640 x 400 with the H set; the game's
-   routines then give every place in the screen's own pixels, and these draw them as given */
-int s2_screen_hi(void) { return g_s == 2 && g_yd == 1; }
+   routines then give every place in the screen's own pixels, and these draw them as given.  A WIDE
+   picture (640 x 200 / 240, the MiSTer's: g_yd = 2) is the same game, the H set and STARTH's places,
+   with every second row of its 400 (hud_put, pkc_draw, s2m_picture, s2m_dark, the clips halve the
+   row) -- so this is "the H set", not "400 rows" */
+int s2_screen_hi(void) { return g_s == 2; }
+int s2_osd_triggers(void)
+{
+#ifdef MISTER_HYBRID
+    return mister_triggers();
+#else
+    return 0;
+#endif
+}
 void s2m_fonts(void)                           /* 0x50dd3 / 0x50a9c: the menu's font and sprites */
 {
     g_fnt_file = s2_screen_hi() ? "build/dec/GRAF1/MENUH.FNT" : "build/dec/GRAF1/MENUL.FNT";
@@ -10125,21 +10266,23 @@ void s2m_fonts(void)                           /* 0x50dd3 / 0x50a9c: the menu's 
 }
 void s2m_picture(int x, int y, int w, int h, const uint8_t *px)    /* 0x51b02 */
 {
-    const int sw = s2_screen_hi() ? FB_W : 320, sh = s2_screen_hi() ? FB_H : 200;
-    for (int r = 0; r < h; r++)
+    const int sw = s2_screen_hi() ? ART_W : 320, sh = s2_screen_hi() ? ART_H : 200;
+    for (int r = 0; r < h; r++) {
+        const int yy = y + r;
+        if (yy < 0 || yy >= sh || (yy % g_yd)) continue;          /* (a wide picture: the even rows) */
         for (int c = 0; c < w; c++) {
-            const int xx = x + c, yy = y + r;
-            if (xx < 0 || xx >= sw || yy < 0 || yy >= sh) continue;
-            fb[yy * FB_W + xx] = g_pal[px[r * w + c]];
-            pxi[yy * FB_W + xx] = px[r * w + c];
+            const int xx = x + c;
+            if (xx < 0 || xx >= sw) continue;
+            fb[yy / g_yd * FB_W + xx] = px[r * w + c];
         }
+    }
 }
 /* the menu's two clip boxes (0x50d6c sprites, 0x50fb9 text; the game keeps them in its screen's
    record and the drawers copy them in): x0 <= x < x1, y0 <= y < y1, in the 320 x 200 screen */
 static int g_s2m_clip[2][4] = { { 0, 0, 320, 200 }, { 0, 0, 320, 200 } };
 static void s2m_clip_start(void)               /* (the whole screen, as the menu starts) */
 {
-    for (int k = 0; k < 2; k++) { g_s2m_clip[k][0] = g_s2m_clip[k][1] = 0; g_s2m_clip[k][2] = s2_screen_hi() ? FB_W : 320; g_s2m_clip[k][3] = s2_screen_hi() ? FB_H : 200; }
+    for (int k = 0; k < 2; k++) { g_s2m_clip[k][0] = g_s2m_clip[k][1] = 0; g_s2m_clip[k][2] = s2_screen_hi() ? ART_W : 320; g_s2m_clip[k][3] = s2_screen_hi() ? ART_H : 200; }
 }
 void s2m_clip(int text, int x0, int y0, int x1, int y1)
 {
@@ -10149,7 +10292,7 @@ void s2m_clip(int text, int x0, int y0, int x1, int y1)
 static void s2m_clip_on(int text)
 {
     const int *c = g_s2m_clip[text != 0];
-    if (s2_screen_hi()) { g_clip[0] = c[0]; g_clip[1] = c[2]; g_clip[2] = c[1]; g_clip[3] = c[3]; }
+    if (s2_screen_hi()) { g_clip[0] = c[0]; g_clip[1] = c[2]; g_clip[2] = c[1] / g_yd + g_oy; g_clip[3] = c[3] / g_yd + g_oy; }
     else { g_clip[0] = c[0] * g_s; g_clip[1] = c[2] * g_s; g_clip[2] = c[1] * SY + g_oy; g_clip[3] = c[3] * SY + g_oy; }
     if (g_clip[0] < 0) g_clip[0] = 0;
     if (g_clip[1] > FB_W) g_clip[1] = FB_W;
@@ -10177,15 +10320,15 @@ void s2m_dark(int x, int y, int w, int h)      /* 0x51698, on the colours' numbe
 {
     s2_dark_make();
     x &= ~3; w &= ~3;
-    const int sw = s2_screen_hi() ? FB_W : 320, sh = s2_screen_hi() ? FB_H : 200;
+    const int sw = s2_screen_hi() ? ART_W : 320, sh = s2_screen_hi() ? ART_H : 200;
     for (int yy = y; yy < y + h && yy < sh; yy++)
         for (int xx = x; xx < x + w && xx < sw; xx++) {
-            if (yy < 0 || xx < 0) continue;
-            const int i = yy * FB_W + xx, idx = pxi[i] >= 0 ? pxi[i] : 0;
-            pxi[i] = g_s2_dark[0][idx]; fb[i] = g_pal[pxi[i]];
+            if (yy < 0 || xx < 0 || (yy % g_yd)) continue;
+            const int i = yy / g_yd * FB_W + xx;
+            fb[i] = g_s2_dark[0][fb[i]];
         }
 }
-void s2m_clear(uint8_t idx) { for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = g_pal[idx]; pxi[i] = idx; } }
+void s2m_clear(uint8_t idx) { memset(fb, idx, FB_BYTES); }
 
 /* the engine's objects in its draw list (0x753a0), as s2_menu_hooks.h finds them, drawn by the
    port's renderer over what is on the screen.  Meshes by container and name, loaded once;
@@ -10317,14 +10460,13 @@ void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room)
     }
     /* drawn over the picture as it is: the depth cleared, the colours kept */
     const float keep_cy = g_cy; const int keep_vh = g_vh;
-    g_cy = s2_screen_hi() ? 200.0f : 100.0f; g_vh = s2_screen_hi() ? 400 : 200;      /* (the eye line in the middle) */
+    g_vh = 200 * SY; g_cy = 0.5f * (float)g_vh;     /* (the eye line in the middle; 400 rows in the H set, half of them in a wide picture) */
     for (int i = 0; i < FB_W * FB_H; i++) { zb[i] = 0.0f; idb[i] = -1; }
     g_lanes = 4; g_tie_rule = 1;
     /* with the room (0x753e8): its backdrop, then it, then the objects */
     const scene *keep_scene = g_scene;
     if (room && g_s2m_have_sky) {
         sky_paint(cam.yaw, cam.pitch, cam.roll, &g_s2m_sky, g_focal_x, g_focal_y);
-        for (int i = 0; i < FB_W * FB_H; i++) pxi[i] = -1;
     }
     view_setup(&cam);
     g_tri_listing = 1;
@@ -10346,18 +10488,30 @@ void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room)
 }
 
 /* 0x7f5a2: the picture shown -- through the palette last set -- and the keys and the clock read */
+int g_s2m_frames;                                    /* the menu's pictures shown (tests: OS_S2MPAD) */
 int s2m_show(void)
 {
-    static uint32_t out[FB_MAXW * FB_MAXH];
+    static uint8_t all[FB_MAXW * (FB_MAXH + TALL_ROWS)];
+    g_s2m_frames++;
     if (getenv("OS_SNDWAV")) snd_render(1.0f / 30.0f);  /* (a test: the menu's sound into the file, a frame's worth a frame) */
-    for (int i = 0; i < FB_W * FB_H; i++) out[i] = pxi[i] >= 0 ? g_s2m_hw[pxi[i] & 255] : fb[i];
-    {   /* the frames a second (F5) over what is shown (the game draws its whole screen again each frame) */
-        memcpy(fb, out, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
-        fps_draw();
-        memcpy(out, fb, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+    fps_draw();                                         /* (the frames a second, F5: the game draws its whole screen again each frame) */
+    /* (a taller picture: the menu's 200 rows in the middle, black rows above and below them) --
+       shown through the hardware palette as last set (g_s2m_hw), which the fades change */
+    g_show_src = g_s2m_hw;
+    {
+        const uint32_t *const was = g_show_src;
+        uint8_t black = 0; long least = 1L << 40;
+        for (int i = 0; i < 256; i++) {
+            const long d = (long)(was[i] >> 16 & 255) * (was[i] >> 16 & 255) + (long)(was[i] >> 8 & 255) * (was[i] >> 8 & 255) + (long)(was[i] & 255) * (was[i] & 255);
+            if (d < least) { least = d; black = (uint8_t)i; }
+        }
+        memset(all, black, (size_t)(g_s2m_band * FB_W));
+        memcpy(all + g_s2m_band * FB_W, fb, FB_BYTES);
+        memset(all + g_s2m_band * FB_W + FB_W * FB_H, black, (size_t)(g_s2m_band * FB_W));
     }
     if (g_s2m_tex) {
-        SDL_UpdateTexture(g_s2m_tex, NULL, out, FB_W * (int)sizeof(uint32_t));
+        show_pixels(g_s2m_tex, all, FB_H + 2 * g_s2m_band);
+        g_show_src = g_s2m_hw;
         SDL_RenderClear(g_s2m_ren);
         SDL_RenderCopy(g_s2m_ren, g_s2m_tex, NULL, NULL);
         SDL_RenderPresent(g_s2m_ren);
@@ -10367,7 +10521,7 @@ int s2m_show(void)
         static int f;
         int at = 0; char name[256] = "menu.ppm";
         sscanf(getenv("OS_S2MSHOT"), "%d,%255s", &at, name);
-        if (++f >= at) { memcpy(fb, out, sizeof(uint32_t) * (size_t)(FB_W * FB_H)); write_ppm(name); g_s2m_closed = 1; }
+        if (++f >= at) { write_ppm_of(name, all, FB_H + 2 * g_s2m_band); g_s2m_closed = 1; }
     }
     static const struct { SDL_Scancode sdl; uint8_t pc; } map[] = {
         { SDL_SCANCODE_ESCAPE, 0x01 }, { SDL_SCANCODE_RETURN, 0x1c }, { SDL_SCANCODE_KP_ENTER, 0x1c }, { SDL_SCANCODE_SPACE, 0x39 },
@@ -10383,6 +10537,8 @@ int s2m_show(void)
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) { g_s2m_closed = 1; g_window_closed = 1; }
+        /* (the controller's START / BACK, and on the MiSTer the OSD's Menu OK / Menu Back, come as
+           ENTER and ESC, down and up: controls_poll) */
         if (ev.type != SDL_KEYDOWN && ev.type != SDL_KEYUP) continue;
         const int down = ev.type == SDL_KEYDOWN;
         const SDL_Scancode sc = ev.key.keysym.scancode;
@@ -10434,22 +10590,26 @@ static int s2_menu3d(void)
 {
     setenv("OS_S2MENU3D", "1", 1);      /* (its races know they are its: their results go back to it) */
     g_focal_x = GAME_FOCAL * (float)g_s; g_focal_y = GAME_FOCAL * (float)SY;
-    if (!fb) fb = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!fb) fb = malloc(sizeof *fb * FB_MAXW * (FB_MAXH + TALL_ROWS));
     if (!zb) zb = malloc(sizeof(float) * FB_MAXW * (FB_MAXH + TALL_ROWS));
     if (!idb) idb = malloc(sizeof(int16_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    if (!pxi) pxi = malloc(sizeof(int16_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    if (!fb || !zb || !idb || !pxi) return 0;
+    if (!fb || !zb || !idb) return 0;
     static scene empty;                      /* (draw_object looks at the scene's count) */
     g_scene = &empty;
     SDL_Window *win = sys_window(&g_s2m_ren);
     if (!win || !g_s2m_ren) return 0;
     SDL_SetWindowTitle(win, "OpenScreamer");
-    g_s2m_tex = sys_texture(FB_W, FB_H);
+    /* A TALLER PICTURE (240 rows): the menu is the game's 200 rows (400 in the H set), drawn as
+       they are, and shown in the middle of the screen with black rows above and below (s2m_show;
+       tall_follow changes only those) */
+    g_s2m_band = g_tall / 2; FB_H -= g_tall; g_tall = 0; LAY_MID();
+    g_clip[3] = FB_H;
+    g_s2m_tex = sys_texture(FB_W, FB_H + 2 * g_s2m_band);
     g_s2m_closed = 0; g_s2m_ticks = 0; g_s2m_nmesh = 0; g_s2m_nmlb = 0;
     if (getenv("OS_CULL")) g_cull = atoi(getenv("OS_CULL"));     /* (a test, as in a race) */
     memset(g_s2m_base, 0xff, sizeof g_s2m_base);
     s2m_clip_start();
-    for (int i = 0; i < FB_W * FB_H; i++) { fb[i] = 0xFF000000u; pxi[i] = 0; }
+    memset(fb, 0, FB_BYTES);
     const int r = s2_menu_run();
     const int res = s2_menu_res_change();
     if (res) {                               /* the options page's RESOLUTION line: kept, and the menu again in it, on that page */
@@ -10491,8 +10651,8 @@ static int s2_champ_report(s2_champ_t *c, SDL_Renderer *ren, SDL_Texture *tex, c
     pal_load("build/dec/MAP1H01/MAP1.COL");
     for (;;) {
         char line[80];
-        for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
-        LAY_TOP();
+        memset(fb, pal_near(0x101418), FB_BYTES);
+        LAY_MID();                                   /* (a taller picture: in the middle) */
         if (phase == 0) {
             s2_text_centred(14, t_report, 0, 1, 2);
             for (int k = 0; k < 4; k++) {               /* (0x43914: "n.", the team's badge, the name, the points) */
@@ -10603,8 +10763,8 @@ static int s2_customize(SDL_Renderer *ren, SDL_Texture *tex, char (*str)[40], in
     memcpy(six, g_s2_setup[team][car][which], sizeof six);
     for (;;) {
         char line[64];
-        for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
-        LAY_TOP();
+        memset(fb, pal_near(0x101418), FB_BYTES);
+        LAY_MID();                                   /* (a taller picture: in the middle) */
         s2_text_centred(10, title, 0, 1, 2);
         snprintf(line, sizeof line, "CAR %d   CUSTOM %d", car + 1, which + 1);
         s2_text_centred(32, line, 3, 3, -1);
@@ -10689,7 +10849,7 @@ static int s2_menu(void)
     if (!win) return 0;
     SDL_SetWindowTitle(win, "OpenScreamer");
     SDL_Texture *tex = sys_texture(FB_W, FB_H);
-    if (!fb) fb = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));
+    if (!fb) fb = malloc(sizeof *fb * FB_MAXW * (FB_MAXH + TALL_ROWS));
     if (!ren || !tex || !fb) return 0;
     g_fnt_file = "build/dec/GAME1/GAMEL.FNT";
     g_spr_file = "build/dec/GAME1/GAMEL.SPR";
@@ -10744,8 +10904,8 @@ static int s2_menu(void)
             snprintf(line[L_COND], sizeof line[0], "-");
             snprintf(line[L_SKILL], sizeof line[0], "OPPONENTS   %s", level[2 - s2_league[league][4]]);
         }
-        for (int k = 0; k < FB_W * FB_H; k++) fb[k] = 0xff101418u;
-        LAY_TOP();
+        memset(fb, pal_near(0x101418), FB_BYTES);
+        LAY_MID();                                   /* (a taller picture: in the middle) */
         s2_text_centred(10, "SCREAMER 2", 0, 1, 2);
         for (int k = 0; k < NLINE; k++) s2_text_centred(40 + k * 18, line[show[k]], 3, k == sel ? 1 : 3, -1);
         s2_text_centred(40 + NLINE * 18 + 8, "ENTER   START        ESC   QUIT", 3, 3, -1);
@@ -10901,6 +11061,10 @@ static int session(int argc, char **argv)
         g_fnt_file = "build/dec/GRAF/ATTRL.FNT";      /* the credits have their own font file */
     }
     if (getenv("OS_CHEAT") && !g_intro) g_cheat = atoi(getenv("OS_CHEAT"));
+#ifdef MISTER_HYBRID
+    g_cheat_typed = g_cheat;
+    cheats_follow();
+#endif
     const int records_ok = (!getenv("OS_DRIVE_DEMO") || getenv("OS_RECORDTEST")) && !getenv("OS_REPLAYFILE") && !g_intro;   /* the robot's laps are not records */
     g_record_lap = g_record_shown = (g_mode == 1 && track >= 1 && track <= 6) ? g_save.t[track - 1].lap[0] : 0.0f;
     const char *shot  = (argc > 4 && strcmp(argv[3], "--shot") == 0)
@@ -11188,11 +11352,10 @@ static int session(int argc, char **argv)
 #endif
     float base_pitch = -0.10f;
 
-    fb  = malloc(sizeof(uint32_t) * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
+    fb  = malloc(sizeof *fb       * FB_MAXW * (FB_MAXH + TALL_ROWS));     /* (the biggest: the size can change as it runs) */
     zb  = malloc(sizeof(float)    * FB_MAXW * (FB_MAXH + TALL_ROWS));
     idb = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    pxi = malloc(sizeof(int16_t)  * FB_MAXW * (FB_MAXH + TALL_ROWS));
-    if (g_s == 2 && (!fb || !zb || !idb || !pxi)) res_fail("no memory for the bigger picture");
+    if (g_s == 2 && (!fb || !zb || !idb)) res_fail("no memory for the bigger picture");
 
     /* OS_WALLCHECK=1: for every wall segment, is the track really there just
        inside it?  The collision only works if the drivable area reaches the
@@ -11411,7 +11574,13 @@ static int session(int argc, char **argv)
                     }
                     keys = now;
                 }
-                s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
+                if (getenv("OS_S2PAD")) {                    /* a test: OS_S2PAD="throttle,brake,steer" held, as a controller's (with OS_PADTEST6 for one there) */
+                    float th = 0.0f, br = 0.0f, st = 0.0f;
+                    sscanf(getenv("OS_S2PAD"), "%f,%f,%f", &th, &br, &st);
+                    s2_controls_pad(th, br, st, 0, 0);
+                } else {
+                    s2_controls(strchr(keys, 'A') != NULL, strchr(keys, 'B') != NULL, strchr(keys, 'L') != NULL, strchr(keys, 'R') != NULL, 0, 0);
+                }
                 s2_race_step();
             }
             s2_race_show(1.0f);
@@ -11542,6 +11711,9 @@ static int session(int argc, char **argv)
     Uint64 last = SDL_GetPerformanceCounter();
     const double tick = 1.0 / (double)SDL_GetPerformanceFrequency();
     while (running) {
+#ifdef MISTER_HYBRID
+        cheats_follow();
+#endif
         /* (the frame's time from the fine clock: in whole milliseconds a 180 Hz screen's
            frames are 5 and 6 by turns) */
         const Uint64 frame_began = SDL_GetPerformanceCounter();
@@ -11580,14 +11752,30 @@ static int session(int argc, char **argv)
         if (ddemo) dt = 1.0f / 50.0f;
         /* OS_BENCH=1: time stands still -- the same picture (the grid) over and
            over, for measuring how long a picture takes */
-        { static int bench = -1; if (bench < 0) bench = getenv("OS_BENCH") != NULL; if (bench) { dt = 0.0f; g_fade_in = 1.0f; } }
+        { static int bench = -1, pictures; if (bench < 0) bench = getenv("OS_BENCH") ? atoi(getenv("OS_BENCH")) : 0;
+          if (bench && ++pictures >= bench) { dt = 0.0f; g_fade_in = 1.0f; }      /* (OS_BENCH=n: from the n-th picture on, */
+          else if (bench) dt = 1.0f / 60.0f; }                                       /*  each before it 1/60 s: the same place every time) */
         if (demo) {
             dt = 1.0f / 60.0f;
             if (demo_frame == 0) new_mode = WALK;
             if (demo_frame == demo / 2) jump = 1;
         }
-        /* the controller's buttons are the car's while it is being driven, the menus' otherwise */
-        controls_menu_mode(mode != DRIVE || g_dialog || g_replay || g_intro || g_cd.on || g_finished || g_game_over);
+        /* the controller's buttons are the car's while it is being driven, the menus' otherwise.
+           A Screamer 2 race is not DRIVE: it is driven while it runs -- not the attract race, the
+           pause screen, a replay or once it is over.  (It was the menus' all along: X and Y did
+           nothing, Menu Back paused -- on Circle, the accelerate button too; Danik, 2026-10-17.) */
+        {
+            const int s2_driving = g_s2_on && !(s2_mode & 0x80) && !g_s2_pz.on && !s2_replaying() && !g_s2_end_t;
+            controls_menu_mode((g_s2_on ? !s2_driving : mode != DRIVE) || g_dialog || g_replay || g_intro || g_cd.on || g_finished || g_game_over);
+            /* START pauses a race and resumes it, in both games (Danik, 2026-10-17): the game's pause
+               screen -- Screamer 2's, Screamer 1's CD player (its P, over the still race) -- and out of
+               it again wherever its cursor is.  SELECT does not pause: in Screamer 2's race it does
+               nothing, in Screamer 1's it asks whether to leave (ESC) */
+            const int s1_racing = !g_s2_on && mode == DRIVE && !g_dialog && !g_replay && !g_intro && !g_finished && !g_game_over;
+            if (g_s2_on && (s2_driving || g_s2_pz.on)) controls_start_back(SDLK_PAUSE, s2_driving ? 0 : SDLK_ESCAPE);
+            else if (s1_racing || (!g_s2_on && g_cd.on)) controls_start_back(SDLK_PAUSE, SDLK_ESCAPE);
+            else controls_start_back(SDLK_RETURN, SDLK_ESCAPE);
+        }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) { running = 0; g_window_closed = 1; }
@@ -11696,6 +11884,10 @@ static int session(int argc, char **argv)
             case SDLK_p:
                 if (mode == DRIVE && !g_dialog && !g_replay) cd_open();     /* 0x211d0 */
                 else paused = !paused;
+                break;
+            case SDLK_PAUSE:                     /* (START, and the keyboard's Pause: the game's pause screen) */
+                if (g_s2_on) { if (!(s2_mode & 0x80) && !s2_replaying() && !s2_player_done() && !g_s2_end_t) s2_pause_open(); }
+                else if (mode == DRIVE && !g_dialog && !g_replay && !g_finished && !g_game_over) cd_open();
                 break;
             case SDLK_SPACE: jump = 1; break;
             case SDLK_LEFTBRACKET:  hop = -25; break;
@@ -11840,7 +12032,7 @@ static int session(int argc, char **argv)
                 /* (the gear controls as HELD: the game changes one gear a press itself -- 0x1f756 reads
                    the key's word and waits for it to be let go, car +0x140 -- and a press handed on
                    for one picture only was lost whenever that picture ran no race step) */
-                s2_controls(ct.throttle > 0.3f, ct.brake > 0.3f, ct.steer > 0.3f, ct.steer < -0.3f, ct.up_held, ct.down_held);
+                s2_controls_pad(ct.throttle, ct.brake, ct.steer, ct.up_held, ct.down_held);
                 s2_race_step();
                 owed -= s2_every();
             }
@@ -12109,13 +12301,13 @@ static int session(int argc, char **argv)
         if (g_cheat & 0x10)
             for (int y = 0; y < FB_H; y++)
                 for (int x = 0; x < FB_W / 2; x++) {
-                    uint32_t t = fb[y * FB_W + x];
+                    uint8_t t = fb[y * FB_W + x];
                     fb[y * FB_W + x] = fb[y * FB_W + FB_W - 1 - x]; fb[y * FB_W + FB_W - 1 - x] = t;
                 }
         if (g_cheat & 0x20)
             for (int y = 0; y < FB_H / 2; y++)
                 for (int x = 0; x < FB_W; x++) {
-                    uint32_t t = fb[y * FB_W + x];
+                    uint8_t t = fb[y * FB_W + x];
                     fb[y * FB_W + x] = fb[(FB_H - 1 - y) * FB_W + x]; fb[(FB_H - 1 - y) * FB_W + x] = t;
                 }
         if (g_intro) {
@@ -12146,11 +12338,7 @@ static int session(int argc, char **argv)
         if (!g_intro && !g_cd.on && g_fade_in < 1.0f) {
             g_fade_in += dt * 2.0f;
             if (g_fade_in > 1.0f) g_fade_in = 1.0f;
-            for (int k = 0; k < FB_W * FB_H; k++) {
-                uint32_t c = fb[k];
-                fb[k] = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) * g_fade_in) << 16
-                      | (uint32_t)((float)(c >> 8 & 255) * g_fade_in) << 8 | (uint32_t)((float)(c & 255) * g_fade_in);
-            }
+            g_show_fade = g_fade_in;                     /* (the palette's, as the picture is shown) */
             volumes_apply(g_fade_in);
         }
         if (g_s2_on) rumble_show(!s2_replaying() && !(s2_mode & 0x80) && !g_s2_feel_finished && !g_s2_pz.on);   /* (Screamer 2's: s2_rumble_step) */
@@ -12198,17 +12386,30 @@ static int session(int argc, char **argv)
                        cam.z - feet);
             if (demo_frame++ >= demo) { write_ppm("demo.ppm"); break; }
         }
+        if (getenv("OS_SHOTAT")) {           /* a test: OS_SHOTAT=<picture>,<file>: that picture as shown, HUD and all, and the end */
+            static int n_;
+            int at_ = 0; char f_[256] = "shot.ppm";
+            sscanf(getenv("OS_SHOTAT"), "%d,%255s", &at_, f_);
+            if (++n_ >= at_) { write_ppm(f_); g_window_closed = 1; running = 0; }
+        }
+        if (getenv("OS_SHOTEVERY")) {        /* a test: OS_SHOTEVERY=<n>,<prefix>: every n-th picture as <prefix>_NNNNN.ppm, going on */
+            static int n_;
+            int every_ = 0; char p_[200] = "shot", f_[256];
+            sscanf(getenv("OS_SHOTEVERY"), "%d,%199s", &every_, p_);
+            if (every_ > 0 && ++n_ % every_ == 0) { snprintf(f_, sizeof f_, "%s_%05d.ppm", p_, n_); write_ppm(f_); }
+        }
 #ifdef MISTER_HYBRID
         {
             /* MISTER: the helper thread turns the picture into the screen's and
                copies it; nothing draws on it until that thread has filled the
                next scene */
             tri_helper *h = tri_helper_get();
-            if (!h) mister_show(os_slot(0), fb, FB_W, FB_H);
-            else if (mister_show_later(os_slot(0), fb, FB_W, FB_H)) { SDL_AtomicSet(&h->show, 1); SDL_SemPost(h->wake); }
+            if (!h) show_picture(tex);
+            else if (mister_show_later(os_slot(0), fb, show_palette(), FB_W, FB_H)) { SDL_AtomicSet(&h->show, 1); SDL_SemPost(h->wake); }
+            g_show_fade = 1.0f; g_show_to_k = 0.0f;
         }
 #else
-        SDL_UpdateTexture(tex, NULL, fb, FB_W * sizeof(uint32_t));
+        show_picture(tex);
 #endif
         const double worked = (double)(SDL_GetPerformanceCounter() - frame_began) * tick;
         SDL_RenderClear(ren);
@@ -12250,25 +12451,21 @@ static int session(int argc, char **argv)
     if (records_ok) records_enter(track);        /* 0x2a1a8, 0x28f42 */
     if (!g_window_closed && !g_intro && !getenv("OS_DRIVE_DEMO") && !getenv("OS_DEMO") && !shot) {      /* 0x21d8c */
         Uint32 t0 = SDL_GetTicks();
-        uint32_t *keep = malloc(sizeof(uint32_t) * (size_t)(FB_W * FB_H));
-        if (keep) {
-            memcpy(keep, fb, sizeof(uint32_t) * (size_t)(FB_W * FB_H));
+        {
+#ifdef MISTER_HYBRID
+            mister_show_wait();                          /* (the helper may still be handing the last picture over) */
+#endif
             for (;;) {
                 float f = 1.0f - (float)(SDL_GetTicks() - t0) / 500.0f;
                 if (f <= 0.0f) break;
-                for (int k = 0; k < FB_W * FB_H; k++) {
-                    uint32_t c = keep[k];
-                    fb[k] = 0xff000000u | (uint32_t)((float)(c >> 16 & 255) * f) << 16
-                          | (uint32_t)((float)(c >> 8 & 255) * f) << 8 | (uint32_t)((float)(c & 255) * f);
-                }
+                g_show_fade = f;                         /* (the palette's: the picture stands as it is) */
                 volumes_apply(f);
-                SDL_UpdateTexture(tex, NULL, fb, FB_W * sizeof(uint32_t));
+                show_picture(tex);
                 SDL_RenderClear(ren);
                 SDL_RenderCopy(ren, tex, NULL, NULL);
                 SDL_RenderPresent(ren);
                 SDL_PumpEvents();
             }
-            free(keep);
         }
     }
     SDL_SetRelativeMouseMode(SDL_FALSE);

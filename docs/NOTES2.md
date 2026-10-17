@@ -1763,6 +1763,13 @@ through it (`build/png/s2_smoke_through_bank_before_after.png`, left).
   than 15 % nearer), walls and cars are not ground. Found with a scratch copy that put sixteen
   puffs in a trail at Danik's place (`OS_S2AT=195838,238468,5.897`, view 3) and logged the
   depth test down one column. Screamer 1's pictures (tracks 1, 5) unchanged.
+  **Screamer 1 had them still (2026-10-17, Danik):** its puffs stand at the car's height,
+  which is up to 136 under the road where a puff is (tracks 2, 4; `OS_SMOKEDUMP` prints the
+  road under each), so the row that lost lay above the 64. The rule now starts 256 over the
+  middle (a puff is 568 high), and over the middle allows the 0.85 alone (h / (h + below) had
+  little left to divide by with a low camera). A scan of all six tracks (`OS_SHOTEVERY` with
+  `OS_VIEW=3 OS_SMOKETEST=1`, against the same with `OS_NOSMOKE=1`) finds no row missing from
+  the smoke any more.
 
 ## S2-5zp. The replay — 2026-10-14
 

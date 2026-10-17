@@ -371,7 +371,11 @@ static uint64_t FUN_0007f5a2(uint32_t r0, uint32_t r1) { if (!s2m_show() && s2_i
    accelerate = ENTER (where the page allows it: "ACCELERATE TO CONTINUE"), brake = ESC, left,
    right, gear up = down, gear down = up.  The port sets the record so (CONTROLS.CFG's joystick
    lines are not read: a controller is the port's own, as in the race) and answers the button
-   read 0x4cd69 with the controller's (controls_pad) */
+   read 0x4cd69 with the controller's (controls_pad).
+   MISTER: only left and right come this way.  Confirm and back are the OSD's Menu OK / Menu
+   Back (and START / SELECT), as in every menu of the hybrid ports (s2m_show): accelerate,
+   brake and the shoulders are the race's, and with Menu OK on the brake's button the menu
+   went back instead (Danik, 2026-10-17: "select with Mister_OK, not have to use gas") */
 static uint32_t s2m_pad_bits;
 static void s2m_pad(void)
 {
@@ -385,9 +389,49 @@ static void s2m_pad(void)
     I32(0x11f298) = 1;
     s2m_pad_bits = 0;
     for (int k = 0; k < 6; k++) if (sw[k]) s2m_pad_bits |= 1u << k;
+    if (getenv("OS_S2MPAD") && s2_in_menu) {         /* a test: OS_S2MPAD="frame:bits,..." -- from that picture of the menu on */
+        int at, bits, first = 1;                      /* (s2m_show's, as OS_S2MSHOT counts) the controls held as OS_PADTEST6's bits; */
+        for (const char *p = getenv("OS_S2MPAD"); p && sscanf(p, "%d:%d", &at, &bits) == 2; p = strchr(p, ','), p = p ? p + 1 : NULL) {
+            if (first && g_s2m_frames < at) break;    /* before the first, the controller's (OS_PADTEST6) */
+            first = 0;
+            if (g_s2m_frames >= at) s2m_pad_bits = (uint32_t)bits;
+        }
+    }
+#ifdef MISTER_HYBRID
+    if (s2_in_menu) s2m_pad_bits &= 4 | 8;            /* (left and right only in the menu: above; the attract race is left as before) */
+#endif
+    if (getenv("OS_S2MLOG")) {                       /* (the controls, the key the menu took, the gearbox page's stage and choice) */
+        static uint32_t was[4] = { ~0u };
+        const uint32_t now[4] = { s2m_pad_bits, U32(0x131f20), U32(0x1324c4), U32(0x1289fc) };
+        if (memcmp(now, was, sizeof now)) {
+            printf("menu: picture %d: controls 0x%x, key 0x%x, gearbox page %u, gearbox %u\n", g_s2m_frames, now[0], now[1], now[2], now[3]);
+            fflush(stdout);
+            memcpy(was, now, sizeof was);
+        }
+    }
+}
+/* THE MISTER CORE'S CHEATS PAGE (s2_osd_triggers): its triggers do what the typed words do (0x366a8,
+   with their own table, 0x113020): All Tracks MRTRK, Fifth Cars TACAR TBCAR TCCAR TDCAR, All Leagues
+   CHMPA -- the game keeps them with its settings */
+static void s2m_osd_cheats(void)
+{
+    static const char *const words[3][4] = { { "MRTRK" }, { "TACAR", "TBCAR", "TCCAR", "TDCAR" }, { "CHMPA" } };
+    const int t = s2_osd_triggers();
+    for (int b = 0; b < 3; b++) {
+        if (!(t & (1 << b))) continue;
+        for (int k = 0; k < 4 && words[b][k]; k++)
+            for (uint32_t w = 0; w < 6; w++) {
+                const uint32_t word = 0x113020u + 0x18u * w;
+                if (memcmp(MP(word), words[b][k], 5)) continue;
+                if (I32(word + 0x14) == 0) U32(U32(word + 0xc)) = U32(word + 0x10);
+                else U32(U32(word + 0xc)) ^= U32(word + 0x10);
+                printf("cheat: %s (the core's)\n", words[b][k]);
+            }
+        fflush(stdout);
+    }
 }
 #define HOOK_4cca5                     /* the keys down, copied for the frame to 0x100002 + scancode (and the controller) */
-static uint64_t FUN_0004cca5(uint32_t r0, uint32_t r1) { const uint8_t *k = s2m_keys(); for (int i = 0; i < 128; i++) U8(0x100002 + (uint32_t)i) = k[i]; s2m_pad(); (void)r1; return r0; }
+static uint64_t FUN_0004cca5(uint32_t r0, uint32_t r1) { const uint8_t *k = s2m_keys(); for (int i = 0; i < 128; i++) U8(0x100002 + (uint32_t)i) = k[i]; s2m_pad(); s2m_osd_cheats(); (void)r1; return r0; }
 /* the frame's step (0x4adf8): the time since the last, eased as the race's (S2-5l).  The game
    takes no step under 1/50 s -- no PC of its day drew faster -- and its easing tables have rows
    for 1 to 50 frames a second (0x315a4: row r = (0.5 + i * 0.005) ^ (50 / r)).  The port draws

@@ -8,6 +8,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <strings.h>
+#ifdef MISTER_HYBRID
+#include "mister.h"
+#endif
 #ifdef _WIN32
 /*
  * WINDOWS (MinGW-w64; tools/release_windows.sh).  What differs is all in this
@@ -363,6 +366,9 @@ static void game_check(void)
                                          "CARS101", "CARS201", "CARS301", "CARS401", NULL };
     static const char *const high2[] = { "MAP1H01", "MAP2H01", "MAP3H01", "MAP4H01", "MAP5H01", "MAP6H01", "MAP7H01", NULL };
     char bad[1200] = "", path[1024], file[32];
+#ifdef MISTER_HYBRID
+    char names[300] = "";                   /* MISTER: the same, short, for the core's message */
+#endif
     int files = 0, nbad = 0, hi = 1, packs = 0;
     printf("OpenScreamer %s\n", OS_VERSION);
     printf("Checking %s data in %s ... ", K->game == 2 ? "Screamer 2" : "Screamer", K->data);
@@ -386,12 +392,25 @@ static void game_check(void)
             size_t at = strlen(bad);
             snprintf(bad + at, sizeof bad - at, "\n  %s/%s%s  %s", set == 0 ? "DATA" : "GFX", list[i],
                      K->packed ? ".DAT" : " (unpacked folder)", what);
+#ifdef MISTER_HYBRID
+            at = strlen(names);
+            snprintf(names + at, sizeof names - at, "%s%s/%s%s", at ? ", " : "", set == 0 ? "DATA" : "GFX", list[i], K->packed ? ".DAT" : "");
+#endif
             nbad++;
         }
     }
     if (nbad) {
         printf("FAILED\n");
         fflush(stdout);
+#ifdef MISTER_HYBRID
+        {
+            /* MISTER: the files that cannot be used, on the core's picture */
+            char text[400];
+            snprintf(text, sizeof text, "%s's files in %s/ are missing or damaged: %.180s. Copy them again from the game.",
+                     K->game == 2 ? "Screamer 2" : "Screamer", mister_game_path(K->data), names);
+            mister_fatal(text);
+        }
+#endif
         fprintf(stderr, "openscreamer: %d of the game's files cannot be used:%s\n"
                         "Say where a complete copy of the game is with -data DIR (the folder that holds its\n"
                         "DATA and GFX folders), or put it next to the program as \"%s\".\n", nbad, bad,
@@ -557,6 +576,9 @@ void os_init(int argc, char **argv)
             os_help(me ? me + 1 : argv[0]);
             exit(0);
         }
+#ifdef MISTER_HYBRID
+    setvbuf(stdout, NULL, _IOLBF, 0);       /* MISTER: the log a line at a time (the launch script keeps it in /tmp) */
+#endif
     K = calloc(1, sizeof *K);
     if (!K) exit(1);
     const char *data = getenv("OPENSCREAMER_DATA"), *home = getenv("OPENSCREAMER_HOME");
@@ -581,6 +603,16 @@ void os_init(int argc, char **argv)
     if (n > 0) { exe[n] = 0; char *s = strrchr(exe, '/'); if (s) *s = 0; } else strcpy(exe, ".");
 #endif
     if (game != 1 && game != 2) game = 0;
+#ifdef MISTER_HYBRID
+    /* MISTER: the game is the core's menu entry's, or the one picked from the core's list of
+       those found (mister.c); there is no first page choosing it */
+    static char picked[64];
+    if (!data && !game && mister_on()) {
+        game = mister_pick_game(picked, sizeof picked);
+        if (!game) exit(0);                  /* (the core says what is missing, until the player leaves it) */
+        data = picked;
+    }
+#endif
     if (data) {
         snprintf(K->data, sizeof K->data, "%s", data);
         if (!game) game = which_game(K->data);

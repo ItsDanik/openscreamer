@@ -1778,6 +1778,13 @@ int s2_race_start(int track, int condition, int ncars, const int *team, const in
         const int entry[7] = { 1, 0, 1, 0, k < 2, 1, scan[k] };
         for (uint32_t j = 0; j < 7; j++) I32(KEYS(s2_me) + k * 0x1c + j * 4) = entry[j];
     }
+    /* a game controller: the steering is the game's joystick, an axis (the steering control's kind,
+       +0x40, 0), through its own curve (0x19409); for the whole race, as a replay has the record
+       as the race started (s2_controls_pad) */
+    {
+        int sw[6];
+        if (controls_pad(sw)) I32(KEYS(s2_me) + 2 * 0x1c + 8) = 0;
+    }
     F32(0x133350) = F32(0x133354) = 0.02f;
     {
         S2_FPU_IN;
@@ -1923,6 +1930,28 @@ void s2_controls(int accelerate, int brake, int left, int right, int gear_up, in
     I32(KEYS(s2_me) + 0xac) = brake ? 1023 : 0;
     I32(KEYS(s2_me) + 0xb0) = left ? 1023 : 0;
     I32(KEYS(s2_me) + 0xb4) = right ? 1023 : 0;
+    I32(KEYS(s2_me) + 0xb8) = gear_up ? 1023 : 0;
+    I32(KEYS(s2_me) + 0xbc) = gear_down ? 1023 : 0;
+}
+
+/* the player's controls from the port's (controls.c): accelerate and brake their share of 1023,
+   which the game takes as it is (0x174ca, 0x1756f: a trigger's travel); the steering, -1 full
+   right .. 1 full left, as the steering control's kind wants it -- an axis (0, a controller:
+   s2_race_start) the one word, the joystick's: + to the RIGHT (0x19409 turns the wheels by
+   -(+0xb0) / 1024 of the lock, and its curve has the opposite sign to the keys'), through the
+   game's curve; keys (1) left and right held or not */
+void s2_controls_pad(float throttle, float brake, float steer, int gear_up, int gear_down)
+{
+    const int axis = I32(KEYS(s2_me) + 2 * 0x1c + 8) == 0;
+    I32(KEYS(s2_me) + 0xa8) = throttle <= 0.0f ? 0 : throttle >= 1.0f ? 1023 : (int)(throttle * 1023.0f + 0.5f);
+    I32(KEYS(s2_me) + 0xac) = brake <= 0.0f ? 0 : brake >= 1.0f ? 1023 : (int)(brake * 1023.0f + 0.5f);
+    if (axis) {
+        I32(KEYS(s2_me) + 0xb0) = steer <= -1.0f ? 1023 : steer >= 1.0f ? -1023 : (int)(-steer * 1023.0f);
+        I32(KEYS(s2_me) + 0xb4) = 0;
+    } else {
+        I32(KEYS(s2_me) + 0xb0) = steer > 0.3f ? 1023 : 0;
+        I32(KEYS(s2_me) + 0xb4) = steer < -0.3f ? 1023 : 0;
+    }
     I32(KEYS(s2_me) + 0xb8) = gear_up ? 1023 : 0;
     I32(KEYS(s2_me) + 0xbc) = gear_down ? 1023 : 0;
 }

@@ -37,6 +37,7 @@ static SDL_GameController *g_pad;
 static int g_steer_stick;                  /* the steering last came from the stick */
 static int g_gear_was[2];
 static int g_stick_was[2];                 /* the stick as menu arrows: -1 / 0 / +1, across and up-down */
+static SDL_Keycode g_start_key = SDLK_RETURN, g_back_key = SDLK_ESCAPE;   /* START and BACK (controls_start_back) */
 
 /* PC keyboard scan code -> SDL's, with the twin of the keys the PC cannot tell apart */
 static void scan_to_sdl(int scan, SDL_Scancode out[2])
@@ -116,6 +117,7 @@ static void pad_find(void)
 }
 
 void controls_menu_mode(int on) { g_menu = on; }
+void controls_start_back(SDL_Keycode start, SDL_Keycode back) { g_start_key = start; g_back_key = back; }
 
 static int axis_word(int raw);
 int controls_pad(int sw[6])
@@ -227,21 +229,62 @@ void controls_read(controls_state *out)
     g_gear_was[0] = sw[4]; g_gear_was[1] = sw[5];
 }
 
-static int as_key(SDL_Event *ev, SDL_Keycode sym)
+static int as_key(SDL_Event *ev, SDL_Keycode sym, int down)
 {
     Uint32 stamp = ev->common.timestamp;
     memset(ev, 0, sizeof *ev);
-    ev->type = SDL_KEYDOWN;
+    ev->type = down ? SDL_KEYDOWN : SDL_KEYUP;
     ev->key.timestamp = stamp;
-    ev->key.state = SDL_PRESSED;
+    ev->key.state = down ? SDL_PRESSED : SDL_RELEASED;
     ev->key.keysym.sym = sym;
     ev->key.keysym.scancode = SDL_GetScancodeFromKey(sym);
     return 1;
 }
 
+/* the key a controller button is, here (0: none) */
+static SDL_Keycode button_key(int button)
+{
+    switch (button) {
+    case SDL_CONTROLLER_BUTTON_START: return g_start_key;
+    case SDL_CONTROLLER_BUTTON_BACK:  return g_back_key;
+    case SDL_CONTROLLER_BUTTON_Y:     return g_menu ? 0 : SDLK_c;
+    case SDL_CONTROLLER_BUTTON_X:     return g_menu ? 0 : SDLK_m;
+    default: break;
+    }
+    if (!g_menu) return 0;
+    switch (button) {
+#ifdef MISTER_HYBRID
+    /* MISTER: in menus the OSD's Menu OK / Menu Back, which the core's
+       joystick has as two buttons of their own (mister.c) */
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK:  return SDLK_RETURN;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return SDLK_ESCAPE;
+    case SDL_CONTROLLER_BUTTON_MISC1:      return SDLK_RETURN;    /* (the core's own Menu OK / Back buttons) */
+    case SDL_CONTROLLER_BUTTON_PADDLE1:    return SDLK_ESCAPE;
+#else
+    case SDL_CONTROLLER_BUTTON_A:          return SDLK_RETURN;
+    case SDL_CONTROLLER_BUTTON_B:          return SDLK_ESCAPE;
+#endif
+    case SDL_CONTROLLER_BUTTON_DPAD_UP:    return SDLK_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return SDLK_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return SDLK_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return SDLK_RIGHT;
+    default: return 0;
+    }
+}
+
+/* Buttons and the stick come as keys, and every key that went down also comes
+   up again: a menu that keeps the keys held (Screamer 2's) had the arrows
+   stuck down -- the gearbox went back to AUTOMATIC as the stick came back to
+   the middle, and the menus took keys nobody pressed (Danik, 2026-10-17). */
 int controls_poll(SDL_Event *ev)
 {
+    static SDL_Keycode down_key[SDL_CONTROLLER_BUTTON_MAX], pending;
     if (!g_pad) pad_find();
+    if (pending) {                               /* (the stick straight across: the new arrow after the old one's release) */
+        const SDL_Keycode k = pending;
+        pending = 0;
+        return as_key(ev, k, 1);
+    }
     while (SDL_PollEvent(ev)) {
         switch (ev->type) {
         case SDL_CONTROLLERDEVICEADDED:
@@ -254,39 +297,31 @@ int controls_poll(SDL_Event *ev)
             }
             continue;
         case SDL_CONTROLLERBUTTONDOWN:
-            switch (ev->cbutton.button) {
-            case SDL_CONTROLLER_BUTTON_START: return as_key(ev, SDLK_RETURN);
-            case SDL_CONTROLLER_BUTTON_BACK:  return as_key(ev, SDLK_ESCAPE);
-            case SDL_CONTROLLER_BUTTON_Y:     if (!g_menu) return as_key(ev, SDLK_c); continue;
-            case SDL_CONTROLLER_BUTTON_X:     if (!g_menu) return as_key(ev, SDLK_m); continue;
-            default: break;
-            }
-            if (!g_menu) continue;
-            switch (ev->cbutton.button) {
-#ifdef MISTER_HYBRID
-            /* MISTER: in menus the OSD's Menu OK / Menu Back, which the core's
-               joystick has as two buttons of their own (mister.c) */
-            case SDL_CONTROLLER_BUTTON_LEFTSTICK:  return as_key(ev, SDLK_RETURN);
-            case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return as_key(ev, SDLK_ESCAPE);
-#else
-            case SDL_CONTROLLER_BUTTON_A:          return as_key(ev, SDLK_RETURN);
-            case SDL_CONTROLLER_BUTTON_B:          return as_key(ev, SDLK_ESCAPE);
-#endif
-            case SDL_CONTROLLER_BUTTON_DPAD_UP:    return as_key(ev, SDLK_UP);
-            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return as_key(ev, SDLK_DOWN);
-            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return as_key(ev, SDLK_LEFT);
-            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return as_key(ev, SDLK_RIGHT);
-            default: continue;
-            }
+        case SDL_CONTROLLERBUTTONUP: {
+            const int b = ev->cbutton.button, down = ev->type == SDL_CONTROLLERBUTTONDOWN;
+            if (b < 0 || b >= SDL_CONTROLLER_BUTTON_MAX) return 1;
+            /* (up as the key it went down as, whatever the menu / race state is now) */
+            const SDL_Keycode k = down ? button_key(b) : down_key[b];
+            if (down) down_key[b] = k;
+            else down_key[b] = 0;
+            if (k) return as_key(ev, k, down);
+            if (down) continue;
+            return 1;                            /* (a button up that made no key: as it is) */
+        }
         case SDL_CONTROLLERAXISMOTION: {
-            /* the stick pushed over counts as one press of an arrow */
+            /* the stick pushed over counts as an arrow held, in menus */
+            static SDL_Keycode held[2];
             int ax = ev->caxis.axis == SDL_CONTROLLER_AXIS_LEFTX ? 0 : ev->caxis.axis == SDL_CONTROLLER_AXIS_LEFTY ? 1 : -1;
             if (ax < 0) continue;
             int now = ev->caxis.value > 16000 ? 1 : ev->caxis.value < -16000 ? -1 : 0;
-            int was = g_stick_was[ax];
+            if (now == g_stick_was[ax]) continue;
             g_stick_was[ax] = now;
-            if (!g_menu || !now || now == was) continue;
-            return as_key(ev, ax == 0 ? (now > 0 ? SDLK_RIGHT : SDLK_LEFT) : (now > 0 ? SDLK_DOWN : SDLK_UP));
+            const SDL_Keycode k = !g_menu || !now ? 0 : ax == 0 ? (now > 0 ? SDLK_RIGHT : SDLK_LEFT) : (now > 0 ? SDLK_DOWN : SDLK_UP);
+            const SDL_Keycode was = held[ax];
+            held[ax] = k;
+            if (was) { pending = k; return as_key(ev, was, 0); }
+            if (k) return as_key(ev, k, 1);
+            continue;
         }
         default: return 1;
         }

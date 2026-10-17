@@ -18,6 +18,12 @@ extern int s2_level;                         /* 0 pro, 1 normal, 2 rookie; befor
 int  s2_race_start(int track, int condition, int ncars, const int *team, const int *model);
 void s2_sound_start(int track);            /* the samples of a race read and the mixer started: before s2_race_start */
 void s2_controls(int accelerate, int brake, int left, int right, int gear_up, int gear_down);
+/* the player's controls as controls.c has them: accelerate and brake 0..1, the steering -1 full right
+   .. 1 full left (a stick's through the game's own curve when a controller is there) */
+void s2_controls_pad(float throttle, float brake, float steer, int gear_up, int gear_down);
+/* the MiSTer core's Cheats page: its triggers selected since the last asking (bit 0 = the first),
+   0 elsewhere (main.c) */
+int  s2_osd_triggers(void);
 void s2_go(void);                            /* the start: before it the cars are held */
 void s2_frame(float step);
 void s2_frame_times(float raw);              /* a test: the next frames' unsmoothed time (0x133354) */
@@ -167,6 +173,7 @@ void s2m_draw(const s2m_item *it, int n, const s2m_cam *cm, int room);
 void s2m_scene_load(const char *cont, const char *name);
 void s2m_scene_free(void);
 int  s2m_show(void);
+extern int g_s2m_frames;
 void s2m_race_go(int track);
 void s2_race_results_keep(void);                         /* a race from the game's menu: what it leaves for the menu */
 const uint8_t *s2m_keys(void);

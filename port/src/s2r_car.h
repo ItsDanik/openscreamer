@@ -5220,6 +5220,11 @@ static void FUN_0004189f(void)
  * by which program was started, STARTL or STARTH): ENTER saves the settings and the menu begins
  * again in the other one, on this page (s2m_res_change; main.c s2_menu3d).
  */
+#ifdef MISTER_HYBRID
+#define S2_RES_ROW 0                               /* MISTER: no RESOLUTION line, the core's own option is the size */
+#else
+#define S2_RES_ROW 1
+#endif
 #define HOOK_420c0
 static void FUN_000420c0(void)
 {
@@ -5240,11 +5245,11 @@ static void FUN_000420c0(void)
             const uint32_t key = U32(0x131f20);
             /* (rows: 0 the game's first, 1 the port's RESOLUTION, 2..8 the game's 1..7, 9 "done") */
             if (key == 1 && row != 0) { row--; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
-            else if (key == 2 && row < 9) { row++; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
+            else if (key == 2 && row < 8 + S2_RES_ROW) { row++; U32(0x4ce0a) = 0; FUN_000aea54(U32(0x124274), 10, 0, 0, 0, 0); }
             else if (key == 0x10) {
-                const int g = row > 1 ? row - 1 : row;
-                if (row == 9) { U32(0x132498) = 0x3f800000u; I32(0x132494) = 0x4254f; FUN_000aea54(U32(0x124274), 0xd, 0, 0, 0, 0); }
-                else if (row == 1) {                   /* the port's: saved, and the menu again in the other size */
+                const int g = S2_RES_ROW && row > 1 ? row - 1 : row;
+                if (row == 8 + S2_RES_ROW) { U32(0x132498) = 0x3f800000u; I32(0x132494) = 0x4254f; FUN_000aea54(U32(0x124274), 0xd, 0, 0, 0, 0); }
+                else if (S2_RES_ROW && row == 1) {                   /* the port's: saved, and the menu again in the other size */
                     FUN_000aea54(U32(0x124274), 0xc, 0, 0, 0, 0);
                     FUN_000331dc();
                     s2m_res_change = S2_HI ? 1 : 2;
@@ -5266,10 +5271,10 @@ static void FUN_000420c0(void)
         }
         FUN_0003327c(U32(0x127f04), 4, 0, 1, 2);
         int y = 0x30, names = 0x79;
-        for (int r = 0; r < 10; r++) {
-            const int i = r > 1 ? r - 1 : r;
+        for (int r = 0; r < 9 + S2_RES_ROW; r++) {
+            const int i = S2_RES_ROW && r > 1 ? r - 1 : r;
             const int lit = (U32(0x4ce0a) & 0x20) == 0 && row == r;
-            if (r == 1) {                              /* (the port's line, drawn as the game's) */
+            if (S2_RES_ROW && r == 1) {                /* (the port's line, drawn as the game's) */
                 const uint32_t value = txt + (S2_HI ? 32u : 16u);
                 FUN_00050f45(0x12420c, 10 * S2K, y * S2K, txt, 2, 1, 2 * S2K);
                 if (lit) { FUN_00050f45(0x12420c, 200 * S2K, y * S2K, value, 3, 3, 2 * S2K); FUN_00050f45(0x12420c, 200 * S2K, y * S2K, 0x11155au, 2, 1, 2 * S2K); }
@@ -6437,6 +6442,7 @@ static void FUN_00040a67(void)
     const uint32_t sp0 = s2_sp, fp = s2_push(0xd0) + 0xd0, setup = fp - 0x58, line = fp - 0x98;
     int moving = 0;
     const uint32_t chosen = 0x128a9cu + 0x188u * U32(0x1289ec);
+    if (getenv("OS_S2MLOG")) { printf("menu: the arcade's cars (0x40a67), then the gearbox\n"); fflush(stdout); }
     FUN_0004bda7(0x11da14, 0x11d6f4);
     I32(0x132494) = 0;
     FUN_0004eaed(0x130bc8u, 0x1114c6u, S2_SET);

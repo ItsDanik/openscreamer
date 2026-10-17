@@ -33,6 +33,9 @@ int  controls_poll(SDL_Event *ev);
 /* 1 = the controller's buttons work the menus (arrows, ENTER, ESC);
    0 = they are the car's (only START, BACK and Y are turned into keys) */
 void controls_menu_mode(int on);
+/* the keys START and BACK are (0: none) -- ENTER and ESC unless the program says otherwise:
+   in a race START is PAUSE (the game's pause screen, and out of it again) */
+void controls_start_back(SDL_Keycode start, SDL_Keycode back);
 /* the controller's heavy and light motor, 0..1 each; call it every picture */
 void controls_rumble(float low, float high);
 const char *controls_key_name(int i);
