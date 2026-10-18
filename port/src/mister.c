@@ -182,8 +182,9 @@ void mister_fm_gain(float gain)
  * THE TWO GAMES (package/games.txt), each in a folder of its own in the
  * game's (games/dnk/OpenScreamer/): screamer/ and screamer2/.  The first
  * release had Screamer's folders in the game's folder itself, which is still
- * taken when screamer/ has not got them.  The files are the ones the
- * program's own check asks for (game_check in port.c).
+ * taken when screamer/ has not got them.  The files say whether a game is
+ * there at all; the program's own check (game_check in port.c) then names
+ * any other file it opens that is missing.
  */
 #define S1_FILES(at) \
     at "DATA/GEN.DAT", at "DATA/LOCAL.DAT", at "DATA/MUSIC.DAT", at "DATA/SOUND.DAT", \
@@ -202,8 +203,8 @@ static const char *const s2_files[] = {
     "screamer2/GFX/MAP7L01.DAT", "screamer2/GFX/MAP1L11.DAT", "screamer2/GFX/MAP2L11.DAT", "screamer2/GFX/MAP3L11.DAT",
     "screamer2/GFX/MAP4L11.DAT", "screamer2/GFX/MAP6L11.DAT", "screamer2/GFX/CARS101.DAT", "screamer2/GFX/CARS201.DAT",
     "screamer2/GFX/CARS301.DAT", "screamer2/GFX/CARS401.DAT", NULL };
-#define NO_GAME "No game data found. In %s/ on the SD card, put the DATA, GFX and CONFIG " \
-    "folders of Screamer in screamer/, and those of Screamer 2 (with ANIMS and music) in screamer2/."
+#define NO_GAME "No game data found. In %s/ on the SD card, put everything in the folder of " \
+    "Screamer in screamer/, and everything in that of Screamer 2 in screamer2/."
 
 static const char *g_listed = "OS_MISTER_LISTED";     /* (the environment outlives the port's parts) */
 
@@ -211,11 +212,11 @@ int mister_pick_game(char *dir, int size)
 {
     mh_game games[2] = {
         { "S1", "Screamer", s1_files, NULL,
-          "Screamer was not found. Copy the DATA, GFX and CONFIG folders of Screamer (the 1995 game) "
-          "to %s/screamer/ on the SD card." },
+          "Screamer was not found. Copy everything in the folder of Screamer (the 1995 game), DATA and "
+          "GFX with all their files, to %s/screamer/ on the SD card." },
         { "S2", "Screamer 2", s2_files, NULL,
-          "Screamer 2 was not found. Copy the DATA, GFX, ANIMS and CONFIG folders of Screamer 2, "
-          "and its music folder, to %s/screamer2/ on the SD card." },
+          "Screamer 2 was not found. Copy everything in its folder (DATA, GFX, ANIMS and the rest, "
+          "with all their files) to %s/screamer2/ on the SD card." },
     };
     int old = !MH_GameFound(&games[0], NULL) && (games[0].files = s1_old_files, MH_GameFound(&games[0], NULL));
     if (!old) games[0].files = s1_files;

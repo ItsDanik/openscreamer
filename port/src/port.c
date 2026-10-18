@@ -353,48 +353,85 @@ static void game_dirs(void)
     if (!K->packed || !ci_find(K->data, "ANIMS", K->dir_anims, sizeof K->dir_anims) || !is_dir(K->dir_anims)) K->dir_anims[0] = 0;
 }
 
+#ifdef MISTER_HYBRID
+/* MISTER: a file's name onto the core's message, whole or not at all (the message has 4 lines
+   of 71 characters); those left out are counted */
+#define NAMES_ROOM 110
+static void name_add(char *names, int *more, const char *name)
+{
+    size_t at = strlen(names);
+    if (*more || at + 2 + strlen(name) > NAMES_ROOM) { (*more)++; return; }
+    snprintf(names + at, NAMES_ROOM + 1 - at, "%s%s", at ? ", " : "", name);
+}
+#endif
+
 static void game_check(void)
 {
     static const char *const data1[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
                                          "MAP1I", "MAP2I", "MAP3I", "MAP4I", "MAP5I", "MAP6I", NULL };
     static const char *const gfx1[]  = { "GAME", "GRAF", "MENU", "MAP1L", "MAP2L", "MAP3L", "MAP4L", "MAP5L", "MAP6L", NULL };
     static const char *const high1[] = { "MAP1H", "MAP2H", "MAP3H", "MAP4H", "MAP5H", "MAP6H", NULL };
-    /* SCREAMER 2: what the port reads so far (the 256-colour low-resolution sets) */
+    static const char *const none[]  = { NULL };
+    /* SCREAMER 2: every container the port opens -- the 256-colour sets, the names ending in 1
+       (s2r_car.h passes '1' wherever the game's names take the set); the 65K-colour ones, ending
+       in 2, never.  A missing menu room or menu car was a black picture and no message.  Those
+       of the menus and the second look are only looked for, not read: reading them all through
+       too took another 2.6 s from the MiSTer's SD card (36 MB, 2026-10-18) */
     static const char *const data2[] = { "GEN", "GAME", "LOCAL", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6", "MAP7", NULL };
     static const char *const gfx2[]  = { "GAME1", "GRAF1", "MAP1L01", "MAP2L01", "MAP3L01", "MAP4L01", "MAP5L01", "MAP6L01", "MAP7L01",
                                          "MAP1L11", "MAP2L11", "MAP3L11", "MAP4L11", "MAP6L11",
                                          "CARS101", "CARS201", "CARS301", "CARS401", NULL };
+    static const char *const there2[] = { "CARS111", "CARS211", "CARS311", "CARS411",
+                                          "MENU11", "MENU21", "MENU31", "MENU41", "ENVM11", "ENVM21", "ENVM31", "ENVM41",
+                                          "ENVP101", "ENVP111", "ENVP201", "ENVP211", "ENVP301", "ENVP311", "ENVP401", "ENVP411",
+                                          "ENVP501", "ENVP601", "ENVP611", "ENVP701", "LOGO1", "MAPS1", "PLATES1", NULL };
+    static const char *const anims2[] = { "SCENE011", "SCENE021", "SCENE031", "SCENE041", "SCCAR11", "SCCAR21", "SCCAR31", "SCCAR41", NULL };
     static const char *const high2[] = { "MAP1H01", "MAP2H01", "MAP3H01", "MAP4H01", "MAP5H01", "MAP6H01", "MAP7H01", NULL };
-    char bad[1200] = "", path[1024], file[32];
+    /* the sets: their folder; read through (1) or only looked for (0); 4 the optional one */
+    static const char *const folder[] = { "DATA", "GFX", "GFX", "ANIMS", "GFX" };
+    static const int whole[] = { 1, 1, 0, 0, 1 };
+    static const char *const *const sets1[] = { data1, gfx1, none, none, high1 }, *const *const sets2[] = { data2, gfx2, there2, anims2, high2 };
+    char bad[2400] = "", path[1024], file[32];
 #ifdef MISTER_HYBRID
-    char names[300] = "";                   /* MISTER: the same, short, for the core's message */
+    char names[NAMES_ROOM + 1] = "", name[48];  /* MISTER: the same, short, for the core's message */
+    int more = 0;
 #endif
     int files = 0, nbad = 0, hi = 1, packs = 0;
     printf("OpenScreamer %s\n", OS_VERSION);
     printf("Checking %s data in %s ... ", K->game == 2 ? "Screamer 2" : "Screamer", K->data);
     fflush(stdout);
-    for (int set = 0; set < 3; set++) {
-        const char *const *list = K->game == 2 ? (set == 0 ? data2 : set == 1 ? gfx2 : high2)
-                                               : (set == 0 ? data1 : set == 1 ? gfx1 : high1);
+    for (int set = 0; set < 5; set++) {             /* DATA, GFX, more GFX, ANIMS, the optional high-resolution files */
+        const char *const *list = (K->game == 2 ? sets2 : sets1)[set];
+        const char *dir = set == 0 ? K->dir_data : set == 3 ? K->dir_anims : K->dir_gfx;
+        if (K->packed && !dir[0] && list[0]) {      /* no ANIMS folder at all: said once, not file by file */
+            size_t at = strlen(bad);
+            snprintf(bad + at, sizeof bad - at, "\n  %s/  missing (the whole folder)", folder[set]);
+#ifdef MISTER_HYBRID
+            snprintf(name, sizeof name, "%s/ (the folder)", folder[set]);
+            name_add(names, &more, name);
+#endif
+            nbad++;
+            continue;
+        }
         for (int i = 0; list[i]; i++) {
             int ok;
             const char *what = "missing";
             if (K->packed) {
                 snprintf(file, sizeof file, "%s.DAT", list[i]);
-                ok = ci_find(set == 0 ? K->dir_data : K->dir_gfx, file, path, sizeof path);
-                if (ok && !pack_whole(path, &files)) { ok = 0; what = "damaged"; }
+                ok = ci_find(dir, file, path, sizeof path);
+                if (ok && whole[set] && !pack_whole(path, &files)) { ok = 0; what = "damaged"; }
             } else {                                /* files unpacked by tools/extract.sh: the folder must be there */
                 snprintf(path, sizeof path, "%s/%s", K->data, list[i]);
                 ok = is_dir(path);
             }
             if (ok) { packs++; continue; }
-            if (set == 2) { hi = 0; continue; }
+            if (set == 4) { hi = 0; continue; }
             size_t at = strlen(bad);
-            snprintf(bad + at, sizeof bad - at, "\n  %s/%s%s  %s", set == 0 ? "DATA" : "GFX", list[i],
+            snprintf(bad + at, sizeof bad - at, "\n  %s/%s%s  %s", folder[set], list[i],
                      K->packed ? ".DAT" : " (unpacked folder)", what);
 #ifdef MISTER_HYBRID
-            at = strlen(names);
-            snprintf(names + at, sizeof names - at, "%s%s/%s%s", at ? ", " : "", set == 0 ? "DATA" : "GFX", list[i], K->packed ? ".DAT" : "");
+            snprintf(name, sizeof name, "%s/%s%s", folder[set], list[i], K->packed ? ".DAT" : "");
+            name_add(names, &more, name);
 #endif
             nbad++;
         }
@@ -405,9 +442,10 @@ static void game_check(void)
 #ifdef MISTER_HYBRID
         {
             /* MISTER: the files that cannot be used, on the core's picture */
-            char text[400];
-            snprintf(text, sizeof text, "%s's files in %s/ are missing or damaged: %.180s. Copy them again from the game.",
-                     K->game == 2 ? "Screamer 2" : "Screamer", mister_game_path(K->data), names);
+            char text[400], rest[24] = "";
+            if (more) snprintf(rest, sizeof rest, " and %d more", more);
+            snprintf(text, sizeof text, "%s's files in %s/ are missing or damaged: %s%s. Copy the game's whole folder again.",
+                     K->game == 2 ? "Screamer 2" : "Screamer", mister_game_path(K->data), names, rest);
             mister_fatal(text);
         }
 #endif
