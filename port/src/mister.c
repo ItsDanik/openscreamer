@@ -203,7 +203,7 @@ static const char *const s2_files[] = {
     "screamer2/GFX/MAP7L01.DAT", "screamer2/GFX/MAP1L11.DAT", "screamer2/GFX/MAP2L11.DAT", "screamer2/GFX/MAP3L11.DAT",
     "screamer2/GFX/MAP4L11.DAT", "screamer2/GFX/MAP6L11.DAT", "screamer2/GFX/CARS101.DAT", "screamer2/GFX/CARS201.DAT",
     "screamer2/GFX/CARS301.DAT", "screamer2/GFX/CARS401.DAT", NULL };
-#define NO_GAME "No game data found. In %s/ on the SD card, put everything in the folder of " \
+#define NO_GAME "No game data found. In %s/, put everything in the folder of " \
     "Screamer in screamer/, and everything in that of Screamer 2 in screamer2/."
 
 static const char *g_listed = "OS_MISTER_LISTED";     /* (the environment outlives the port's parts) */
@@ -213,10 +213,10 @@ int mister_pick_game(char *dir, int size)
     mh_game games[2] = {
         { "S1", "Screamer", s1_files, NULL,
           "Screamer was not found. Copy everything in the folder of Screamer (the 1995 game), DATA and "
-          "GFX with all their files, to %s/screamer/ on the SD card." },
+          "GFX with all their files, to %s/screamer/." },
         { "S2", "Screamer 2", s2_files, NULL,
           "Screamer 2 was not found. Copy everything in its folder (DATA, GFX, ANIMS and the rest, "
-          "with all their files) to %s/screamer2/ on the SD card." },
+          "with all their files) to %s/screamer2/." },
     };
     int old = !MH_GameFound(&games[0], NULL) && (games[0].files = s1_old_files, MH_GameFound(&games[0], NULL));
     if (!old) games[0].files = s1_files;
@@ -359,6 +359,15 @@ static SDL_atomic_t g_later_due;
 static int g_shown_w, g_shown_h;                 /* the size mister_show() last showed (the core is in that mode) */
 static uint32_t g_shown_field;
 
+/* Drawing ahead (hybrid/CLAUDE.md, "Frame pacing"): a race's picture handed over
+   with mister_show_later() is shown at a field of its own (MH_PresentAtField()),
+   the field after the one it was started in at the earliest, so that one a little
+   slower than a field is still in time, for one field more latency. Decided by
+   the benchmark in this repository's CLAUDE.md: off, no gain. MISTER_HYBRID_AHEAD=0
+   in the game's environment shows each as soon as it comes, for comparing. */
+#define DRAW_AHEAD 0
+static uint32_t g_ahead_field;                     /* the field the last such picture is shown at */
+
 void mister_show_wait(void)
 {
     while (SDL_AtomicGet(&g_later_due)) SDL_Delay(0);
@@ -445,6 +454,20 @@ int mister_show_later(void *window, const void *pixels, const uint32_t *pal, int
     Uint64 now = SDL_GetPerformanceCounter();
     work_done(now);
     mister_mark(4);
+    if (DRAW_AHEAD && !MH_Interlaced()) {
+        const uint32_t step = lock30() ? 2 : 1, field = MH_FieldCounter();
+        uint32_t at = g_ahead_field + step;
+        if ((int32_t)(field + 1 - at) > 0) at = field + 1;    /* too late for its own field: the next one */
+        g_ahead_field = at;
+        g_later.pixels = pixels; g_later.w = w; g_later.h = h;
+        memcpy(g_later.pal, pal, sizeof g_later.pal);
+        MH_PresentAtField(at);                       /* (for the helper's MH_Present) */
+        SDL_AtomicSet(&g_later_due, 1);
+        MH_WaitField(at + step - 3);                 /* the next picture starts two fields before its own */
+        g_shown_field = MH_FieldCounter();
+        wait_done(now);
+        return 1;
+    }
     MH_WaitFrame(g_shown_field);                 /* one picture a field (two with an interlaced mode) */
     if (lock30()) MH_WaitField(g_shown_field + 1);
     g_shown_field = MH_FieldCounter();
