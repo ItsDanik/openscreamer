@@ -11072,8 +11072,32 @@ static int session(int argc, char **argv)
     float t0          = (argc > 5) ? (float)atof(argv[5]) : 0.0f;
     float cam_height  = (argc > 6) ? (float)atof(argv[6]) : 600.0f;
     if (argc > 7) g_layer = atoi(argv[7]);
+    /* the DETAIL option; OS_DETAIL=0..3 for one run, OS_DRAWDIST=<units> the
+       old test switch (no far plane, pieces out to that distance) */
+    g_detail = getenv("OS_DETAIL") ? atoi(getenv("OS_DETAIL")) & 3 : g_cfg.detail & 3;
+#ifdef MISTER_HYBRID
+    if (g_detail == 3) g_detail = 2;
+#endif
+    if (g_detail == 3) { g_far_z = 0.0f; g_drawdist = DRAWDIST_FAR; }
+    else { g_far_z = g_detail == 2 ? 43808.0f : 27808.0f; g_drawdist = DRAWDIST_ORIGINAL; }
+    if (getenv("OS_DRAWDIST")) { g_far_z = 0.0f; g_drawdist = (float)atof(getenv("OS_DRAWDIST")); }
+    printf("detail %d: drawn to a depth of %.0f, pieces within %.0f\n", g_detail, g_far_z, g_drawdist);
+
+    /* the track's set is the DETAIL's, not the picture's size: both programs ask for
+       MAPnH from MID up and for MAPnL at LOW only (STARTL.EXE 0x131ca, STARTH.EXE 0x131ce:
+       detail >= 1 ? 'H' : 'L').  The H set has more scenery -- on track 1 the helmet and
+       the video wall at the start.  L too when there is no H container; a wide picture
+       has the low set's tracks. */
     char gfxdir[512];
-    snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c", track, g_s == 2 && g_yd == 1 ? 'H' : 'L');     /* (a wide picture has the low set's tracks) */
+    {
+        char set = g_detail >= 1 && g_yd == 1 ? 'H' : 'L';
+#ifdef MISTER_HYBRID
+        set = 'L';                  /* MISTER: the low set, as before (the H set's extra scenery not tried on the ARM) */
+#endif
+        snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%dH/MAP%d.MMP", track, track);
+        if (set == 'H' && !os_exists(gfxdir)) set = 'L';
+        snprintf(gfxdir, sizeof gfxdir, "build/dec/MAP%d%c", track, set);
+    }
     if (os_game() == 2) {
         /* SCREAMER 2: MAP<track><L|H><look><colours> (0x2e676).  The look is the track's
            condition & 1 (see g_s2_cond; tracks 5 and 7 have look 0 only); colours 1 = 256.
@@ -11093,16 +11117,6 @@ static int session(int argc, char **argv)
         }
     }
 
-    /* the DETAIL option; OS_DETAIL=0..3 for one run, OS_DRAWDIST=<units> the
-       old test switch (no far plane, pieces out to that distance) */
-    g_detail = getenv("OS_DETAIL") ? atoi(getenv("OS_DETAIL")) & 3 : g_cfg.detail & 3;
-#ifdef MISTER_HYBRID
-    if (g_detail == 3) g_detail = 2;
-#endif
-    if (g_detail == 3) { g_far_z = 0.0f; g_drawdist = DRAWDIST_FAR; }
-    else { g_far_z = g_detail == 2 ? 43808.0f : 27808.0f; g_drawdist = DRAWDIST_ORIGINAL; }
-    if (getenv("OS_DRAWDIST")) { g_far_z = 0.0f; g_drawdist = (float)atof(getenv("OS_DRAWDIST")); }
-    printf("detail %d: drawn to a depth of %.0f, pieces within %.0f\n", g_detail, g_far_z, g_drawdist);
     if (getenv("OS_FOG"))      g_fog      = (float)atof(getenv("OS_FOG"));
     if (getenv("OS_CULL"))     g_cull     = atoi(getenv("OS_CULL"));
     if (getenv("OS_SHOWEDGES")) g_show_edges = 1;

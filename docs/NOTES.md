@@ -1984,6 +1984,13 @@ more scenery** (track 1: 798 K / 131 K against 662 K / 106 K). `CARS.DTR`'s `COC
 sections: needle length and pivots are the SAME numbers as `COCKnnL` (320×200 units),
 only the gear-lamp positions are doubled (pixels). STARTL.EXE itself only ever asks for
 the L files (`push 0x4c`); the H layout numbers would be in STARTH.EXE, not read.
+**Correction (2026-10-23): not the TRACK containers.** `0x131ca` builds `%s\gfx\%s%c.dat`
+with `detail >= 1 ? 'H' : 'L'` (the detail at flat `0x11d2b4`, section 30's `0x1d2b4`) --
+STARTH.EXE the same at `0x131ce` (its detail at flat `0x11d2b8`). So both programs drive
+the H tracks from MID up and the L tracks at LOW only,
+whatever the picture's size (track 1's start: the helmet V220 and the video wall are H
+pieces). The port took the set from the resolution until then; it follows the detail now
+(the MiSTer keeps the low set, as it had).
 **Port:** OPTIONS has a line of its own, LOW RESOLUTION / HIGH RESOLUTION, under the
 game's DETAIL line (section 30). `FB_W` / `FB_H` are variables (320×200 or 640×400,
 both shown 4:3), `g_s` = 1 or 2; the lens is `128 × g_s`; everything flat keeps its

@@ -233,7 +233,7 @@ MODELOG TILTCHECK STACKED DOPPLERLOG INTRO_LOG`.
 | 24 | reversed tracks | 7–12 = `MAPnI.DAT` + road direction turned |
 | 25 | cheats, menu sounds | TAZOR VTELO INVER ABURN MONTY JOINT CLOCK MIRRO UPDOW; saved replays |
 | 26 | menu scene, intro | one 3D scene, letters are cubes; attract race with credits and per-car cameras |
-| 27 | hi-res, settings | hi-res = low doubled (layout not read from STARTH); `openscreamer.cfg`; crash fall-back |
+| 27 | hi-res, settings | hi-res = low doubled (layout not read from STARTH); `openscreamer.cfg`; crash fall-back; the track set MAPnL/H is the DETAIL's (H from MID, `0x131ca`), not the resolution's |
 | 28 | CD player, last pass | every race fades 0.5 s; listener = player's car (camera in the intro); tick = 1/100 s |
 | 29 | one program | state save / restore, directories, developer mode |
 | 30 | the audit | DETAIL = far plane (27808 / 27808 / 43808; ULTRA is the port's); `track_under` = first face in the game's order; running order; lop-sided skid; smoke; props tilt; carpets and same-place objects; HMI mixer read (no filter in it) |
