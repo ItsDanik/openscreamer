@@ -4382,7 +4382,11 @@ static void wheels_step(car_pose *w, float speed, float steer_part, float dt)
     w->env_scroll = fmodf(w->env_scroll + speed * dt * (w->env ? 0.03f : 0.002f), 256.0f);
     w->spin -= speed * dt / 108.6f;                 /* = speed x 3 units a second */
     w->spin = fmodf(w->spin, 6.2831853f);
-    w->steer = steer_part / 1.5f;
+    /* the sign: steer_part is + to the LEFT (controls.c: left less right), and the
+       model's +X is the car's LEFT (player_sync) -- the wheel turn in draw_object
+       sends a front wheel's nose (local -Z) towards -X for a + angle, so the angle
+       is the other way round (as Screamer 2's is, `p->steer = -...`) */
+    w->steer = -steer_part / 1.5f;
 }
 
 /*
