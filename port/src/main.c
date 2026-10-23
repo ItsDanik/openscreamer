@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "scene.h"
 #include "drive.h"
@@ -174,7 +175,7 @@ static uint8_t pal_near(uint32_t rgb)
     const unsigned h = (rgb * 2654435761u) >> 26;
     if (ok[h] && seen[h] == rgb) return gives[h];
     const int r = (int)(rgb >> 16 & 255), g = (int)(rgb >> 8 & 255), b = (int)(rgb & 255);
-    long best = 1L << 40; int at = 0;
+    long best = LONG_MAX; int at = 0;
     for (int i = 0; i < 256; i++) {
         const long dr = (long)(g_pal[i] >> 16 & 255) - r, dg = (long)(g_pal[i] >> 8 & 255) - g, db = (long)(g_pal[i] & 255) - b;
         const long d = dr * dr + dg * dg + db * db;
@@ -198,7 +199,7 @@ static const uint8_t *pal_darker(float share)
     for (int i = 0; i < 256; i++) {
         const int r = (int)((float)(g_pal[i] >> 16 & 255) * share), g = (int)((float)(g_pal[i] >> 8 & 255) * share),
                   b = (int)((float)(g_pal[i] & 255) * share);
-        long best = 1L << 40; int at = 0;
+        long best = LONG_MAX; int at = 0;
         for (int q = 0; q < 256; q++) {
             const long dr = (long)(g_pal[q] >> 16 & 255) - r, dg = (long)(g_pal[q] >> 8 & 255) - g, db = (long)(g_pal[q] & 255) - b;
             const long d = dr * dr + dg * dg + db * db;
@@ -10500,7 +10501,7 @@ int s2m_show(void)
     g_show_src = g_s2m_hw;
     {
         const uint32_t *const was = g_show_src;
-        uint8_t black = 0; long least = 1L << 40;
+        uint8_t black = 0; long least = LONG_MAX;
         for (int i = 0; i < 256; i++) {
             const long d = (long)(was[i] >> 16 & 255) * (was[i] >> 16 & 255) + (long)(was[i] >> 8 & 255) * (was[i] >> 8 & 255) + (long)(was[i] & 255) * (was[i] & 255);
             if (d < least) { least = d; black = (uint8_t)i; }
@@ -11140,7 +11141,7 @@ static int session(int argc, char **argv)
             for (int row = 0; row < 64; row++)
                 for (int i = 0; i < 256; i++) {
                     const float k = row >= 32 && row < 48 ? 1.0f - 0.045f * (float)(row - 32) : 1.0f;
-                    long least = 1L << 40; int best = i;
+                    long least = LONG_MAX; int best = i;
                     for (int q = 0; q < 256 && k < 1.0f; q++) {
                         const long dr = (long)((g_pal[q] >> 16) & 255) - (long)((float)((g_pal[i] >> 16) & 255) * k),
                                    dg = (long)((g_pal[q] >> 8) & 255) - (long)((float)((g_pal[i] >> 8) & 255) * k),
