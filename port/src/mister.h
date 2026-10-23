@@ -75,6 +75,11 @@ void     mister_show_wait(void);
    one) in dir; 0 when there is none, after the core's message saying what to
    copy where (it stays until the player leaves the core) */
 int      mister_pick_game(char *dir, int size);
+/* port.c: how many of the containers game `game` (1, 2) needs are not in
+   `dir` (looked for, not read; -1: no DATA, GFX or ANIMS folder there), the
+   first names in `names` (MISTER_NAMES + 1 characters), *more the others */
+#define  MISTER_NAMES 110
+int      os_game_missing(const char *dir, int game, char *names, int *more);
 /* a message on the core's picture that stays until the player leaves the
    core, for files that cannot be used; `folder` the game's data folder as the
    program knows it, for the text */

@@ -182,9 +182,11 @@ void mister_fm_gain(float gain)
  * THE TWO GAMES (package/games.txt), each in a folder of its own in the
  * game's (games/dnk/OpenScreamer/): screamer/ and screamer2/.  The first
  * release had Screamer's folders in the game's folder itself, which is still
- * taken when screamer/ has not got them.  The files say whether a game is
- * there at all; the program's own check (game_check in port.c) then names
- * any other file it opens that is missing.
+ * taken when screamer/ has not got them.  Every container the program opens
+ * is looked for before the pick (os_game_missing in port.c): a game with one
+ * missing is not there, and its message names them, under the MiSTer logo
+ * with no game logo (host version 17).  The program's own check (game_check
+ * in port.c) then reads the containers through and names a damaged one.
  */
 #define S1_FILES(at) \
     at "DATA/GEN.DAT", at "DATA/LOCAL.DAT", at "DATA/MUSIC.DAT", at "DATA/SOUND.DAT", \
@@ -206,6 +208,23 @@ static const char *const s2_files[] = {
 #define NO_GAME "No game data found. In %s/, put everything in the folder of " \
     "Screamer in screamer/, and everything in that of Screamer 2 in screamer2/."
 
+/* a game whose folder is there with containers missing: the message naming them (%s the
+   game's folder, for MH_PickGame()), else NULL */
+static const char *game_missing(int game, const char *dir, char *text, size_t size)
+{
+    char names[MISTER_NAMES + 1], rest[24] = "";
+    int more;
+    const int n = os_game_missing(dir, game, names, &more);
+    if (n < 0) printf("mister: %s: not in %s\n", game == 2 ? "Screamer 2" : "Screamer", dir);
+    else printf("mister: %s in %s: %d of its files missing\n", game == 2 ? "Screamer 2" : "Screamer", dir, n);
+    if (n <= 0) return NULL;
+    if (more) snprintf(rest, sizeof rest, " and %d more", more);
+    snprintf(text, size, "%s's files are not all there: %s%s %s missing. Copy everything in its folder, "
+             "whole, to %%s/%s/.", game == 2 ? "Screamer 2" : "Screamer", names, rest, n > 1 ? "are" : "is",
+             game == 2 ? "screamer2" : "screamer");
+    return text;
+}
+
 static const char *g_listed = "OS_MISTER_LISTED";     /* (the environment outlives the port's parts) */
 
 int mister_pick_game(char *dir, int size)
@@ -218,20 +237,25 @@ int mister_pick_game(char *dir, int size)
           "Screamer 2 was not found. Copy everything in its folder (DATA, GFX, ANIMS and the rest, "
           "with all their files) to %s/screamer2/." },
     };
-    int old = !MH_GameFound(&games[0], NULL) && (games[0].files = s1_old_files, MH_GameFound(&games[0], NULL));
-    if (!old) games[0].files = s1_files;
+    char names[MISTER_NAMES + 1], text[2][MH_MSG_ROWS * (MH_MSG_COLS + 1)];
+    int more;
+    /* Screamer's folders in the game's folder itself: the first release's */
+    const int old = os_game_missing("screamer", 1, names, &more) < 0 && os_game_missing(".", 1, names, &more) >= 0;
+    const char *missing[2] = { game_missing(1, old ? "." : "screamer", text[0], sizeof text[0]),
+                               game_missing(2, "screamer2", text[1], sizeof text[1]) };
+    games[0].files = old ? s1_old_files : s1_files;
+    for (int g = 0; g < 2; g++)
+        if (missing[g]) { games[g].files = MH_NOT_THERE; games[g].missing = missing[g]; }
+    /* no game there at all: what one there in part misses */
     int listed = 0;
-    const int pick = MH_PickGame(games, 2, NULL, NO_GAME, &listed);
+    const int pick = MH_PickGame(games, 2, NULL, missing[0] ? missing[0] : missing[1] ? missing[1] : NO_GAME, &listed);
     if (pick < 0) return 0;
     if (listed) setenv(g_listed, "1", 1);
     snprintf(dir, (size_t)size, "%s", pick == 1 ? "screamer2" : old ? "." : "screamer");
     printf("mister: %s (%s), in %s\n", games[pick].name, listed ? "picked from the core's list" : "its menu entry, or the only one there", dir);
     fflush(stdout);
-    {   /* on the core's picture until the game's first frame, as every hybrid port has it */
-        char text[MH_MSG_COLS + 1];
-        snprintf(text, sizeof text, "Loading %s...", games[pick].name);
-        MH_UI_Message("OpenScreamer", text, 0);
-    }
+    /* (its logo, "Checking Game Data...", "Game Data OK" and "Loading <title>..." are
+       MH_PickGame()'s, host version 17) */
     return pick + 1;
 }
 

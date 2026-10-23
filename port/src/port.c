@@ -356,7 +356,7 @@ static void game_dirs(void)
 #ifdef MISTER_HYBRID
 /* MISTER: a file's name onto the core's message, whole or not at all (the message has 4 lines
    of 71 characters); those left out are counted */
-#define NAMES_ROOM 110
+#define NAMES_ROOM MISTER_NAMES
 static void name_add(char *names, int *more, const char *name)
 {
     size_t at = strlen(names);
@@ -365,32 +365,71 @@ static void name_add(char *names, int *more, const char *name)
 }
 #endif
 
+/* what game_check (and the MiSTer's check before the pick) looks for, set by set */
+static const char *const data1[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
+                                     "MAP1I", "MAP2I", "MAP3I", "MAP4I", "MAP5I", "MAP6I", NULL };
+static const char *const gfx1[]  = { "GAME", "GRAF", "MENU", "MAP1L", "MAP2L", "MAP3L", "MAP4L", "MAP5L", "MAP6L", NULL };
+static const char *const high1[] = { "MAP1H", "MAP2H", "MAP3H", "MAP4H", "MAP5H", "MAP6H", NULL };
+static const char *const none[]  = { NULL };
+/* SCREAMER 2: every container the port opens -- the 256-colour sets, the names ending in 1
+   (s2r_car.h passes '1' wherever the game's names take the set); the 65K-colour ones, ending
+   in 2, never.  A missing menu room or menu car was a black picture and no message.  Those
+   of the menus and the second look are only looked for, not read: reading them all through
+   too took another 2.6 s from the MiSTer's SD card (36 MB, 2026-10-18) */
+static const char *const data2[] = { "GEN", "GAME", "LOCAL", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6", "MAP7", NULL };
+static const char *const gfx2[]  = { "GAME1", "GRAF1", "MAP1L01", "MAP2L01", "MAP3L01", "MAP4L01", "MAP5L01", "MAP6L01", "MAP7L01",
+                                     "MAP1L11", "MAP2L11", "MAP3L11", "MAP4L11", "MAP6L11",
+                                     "CARS101", "CARS201", "CARS301", "CARS401", NULL };
+static const char *const there2[] = { "CARS111", "CARS211", "CARS311", "CARS411",
+                                      "MENU11", "MENU21", "MENU31", "MENU41", "ENVM11", "ENVM21", "ENVM31", "ENVM41",
+                                      "ENVP101", "ENVP111", "ENVP201", "ENVP211", "ENVP301", "ENVP311", "ENVP401", "ENVP411",
+                                      "ENVP501", "ENVP601", "ENVP611", "ENVP701", "LOGO1", "MAPS1", "PLATES1", NULL };
+static const char *const anims2[] = { "SCENE011", "SCENE021", "SCENE031", "SCENE041", "SCCAR11", "SCCAR21", "SCCAR31", "SCCAR41", NULL };
+static const char *const high2[] = { "MAP1H01", "MAP2H01", "MAP3H01", "MAP4H01", "MAP5H01", "MAP6H01", "MAP7H01", NULL };
+/* the sets: their folder; read through (1) or only looked for (0); 4 the optional one */
+static const char *const folder[] = { "DATA", "GFX", "GFX", "ANIMS", "GFX" };
+static const int whole[] = { 1, 1, 0, 0, 1 };
+static const char *const *const sets1[] = { data1, gfx1, none, none, high1 }, *const *const sets2[] = { data2, gfx2, there2, anims2, high2 };
+
+#ifdef MISTER_HYBRID
+/* MISTER: is every container game_check asks for there, in `dir` (game 1 or 2)?  Looked for
+   only, not read through (that is game_check's, after the pick): asked before the core's pick
+   (mister_pick_game), so that a game with files missing gets the message naming them and no
+   logo.  The number missing (-1: no DATA, GFX or ANIMS folder at all), their names in `names`
+   (NAMES_ROOM + 1), *more those left out */
+int os_game_missing(const char *dir, int game, char *names, int *more)
+{
+    static const char *const kind[3] = { "DATA", "GFX", "ANIMS" };
+    char sub[3][1024], path[1024], file[32], name[48];
+    int have[3], n = 0;
+    names[0] = 0;
+    *more = 0;
+    for (int k = 0; k < 3; k++) have[k] = ci_find(dir, kind[k], sub[k], sizeof sub[k]) && is_dir(sub[k]);
+    if (!have[0] && !have[1] && !have[2]) return -1;
+    for (int set = 0; set < 4; set++) {             /* not the optional high-resolution files */
+        const char *const *list = (game == 2 ? sets2 : sets1)[set];
+        const int k = set == 0 ? 0 : set == 3 ? 2 : 1;
+        if (!list[0]) continue;
+        if (!have[k]) {
+            snprintf(name, sizeof name, "%s/ (the folder)", kind[k]);
+            name_add(names, more, name);
+            n++;
+            continue;
+        }
+        for (int i = 0; list[i]; i++) {
+            snprintf(file, sizeof file, "%s.DAT", list[i]);
+            if (ci_find(sub[k], file, path, sizeof path)) continue;
+            snprintf(name, sizeof name, "%s/%s", kind[k], file);
+            name_add(names, more, name);
+            n++;
+        }
+    }
+    return n;
+}
+#endif
+
 static void game_check(void)
 {
-    static const char *const data1[] = { "GEN", "LOCAL", "MUSIC", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6",
-                                         "MAP1I", "MAP2I", "MAP3I", "MAP4I", "MAP5I", "MAP6I", NULL };
-    static const char *const gfx1[]  = { "GAME", "GRAF", "MENU", "MAP1L", "MAP2L", "MAP3L", "MAP4L", "MAP5L", "MAP6L", NULL };
-    static const char *const high1[] = { "MAP1H", "MAP2H", "MAP3H", "MAP4H", "MAP5H", "MAP6H", NULL };
-    static const char *const none[]  = { NULL };
-    /* SCREAMER 2: every container the port opens -- the 256-colour sets, the names ending in 1
-       (s2r_car.h passes '1' wherever the game's names take the set); the 65K-colour ones, ending
-       in 2, never.  A missing menu room or menu car was a black picture and no message.  Those
-       of the menus and the second look are only looked for, not read: reading them all through
-       too took another 2.6 s from the MiSTer's SD card (36 MB, 2026-10-18) */
-    static const char *const data2[] = { "GEN", "GAME", "LOCAL", "SOUND", "MAP1", "MAP2", "MAP3", "MAP4", "MAP5", "MAP6", "MAP7", NULL };
-    static const char *const gfx2[]  = { "GAME1", "GRAF1", "MAP1L01", "MAP2L01", "MAP3L01", "MAP4L01", "MAP5L01", "MAP6L01", "MAP7L01",
-                                         "MAP1L11", "MAP2L11", "MAP3L11", "MAP4L11", "MAP6L11",
-                                         "CARS101", "CARS201", "CARS301", "CARS401", NULL };
-    static const char *const there2[] = { "CARS111", "CARS211", "CARS311", "CARS411",
-                                          "MENU11", "MENU21", "MENU31", "MENU41", "ENVM11", "ENVM21", "ENVM31", "ENVM41",
-                                          "ENVP101", "ENVP111", "ENVP201", "ENVP211", "ENVP301", "ENVP311", "ENVP401", "ENVP411",
-                                          "ENVP501", "ENVP601", "ENVP611", "ENVP701", "LOGO1", "MAPS1", "PLATES1", NULL };
-    static const char *const anims2[] = { "SCENE011", "SCENE021", "SCENE031", "SCENE041", "SCCAR11", "SCCAR21", "SCCAR31", "SCCAR41", NULL };
-    static const char *const high2[] = { "MAP1H01", "MAP2H01", "MAP3H01", "MAP4H01", "MAP5H01", "MAP6H01", "MAP7H01", NULL };
-    /* the sets: their folder; read through (1) or only looked for (0); 4 the optional one */
-    static const char *const folder[] = { "DATA", "GFX", "GFX", "ANIMS", "GFX" };
-    static const int whole[] = { 1, 1, 0, 0, 1 };
-    static const char *const *const sets1[] = { data1, gfx1, none, none, high1 }, *const *const sets2[] = { data2, gfx2, there2, anims2, high2 };
     char bad[2400] = "", path[1024], file[32];
 #ifdef MISTER_HYBRID
     char names[NAMES_ROOM + 1] = "", name[48];  /* MISTER: the same, short, for the core's message */
